@@ -6,6 +6,49 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Terminology**: When the user says "agent" or asks "why is agent doing X", they mean the **coding-agent package implementation**, not you (the assistant). The coding-agent is a CLI tool — questions about its behavior refer to code in `packages/coding-agent/`, not your current session.
 
+## Fork Context
+
+This repository is `btimothy-har/bwoah-my-pi`, a personal fork of upstream
+[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi).
+
+- Fork requirements outrank upstream parity.
+- Preserve intentional divergence; NEVER normalize it away.
+- Target `origin`; NEVER act upstream without explicit user direction.
+- Keep general fixes upstream-compatible unless fork requirements conflict.
+
+### Syncing from upstream
+
+Sync upstream ONLY when the user explicitly requests it.
+
+1. Start a clean branch or worktree at `origin/main`; preserve unrelated work.
+2. Require `origin` → `btimothy-har/bwoah-my-pi`; `upstream` → `can1357/oh-my-pi`.
+3. Add or correct missing remotes, then fetch both.
+4. Inspect the incoming range and preview merge conflicts without changing the worktree.
+5. Present expected conflicts, protected-surface impacts, and resolution options to the owner/user. MUST obtain their decisions before merging.
+6. After approval, run `git merge --no-ff upstream/main`; NEVER rebase or force-push shared history.
+7. An unexpected conflict appears? STOP. Show the conflict and options; obtain the owner/user's decision before resolving it.
+8. Audit every protected path and invariant below against the pre-sync fork.
+9. Verify fork customizations and upstream-affected paths with targeted checks and smoke scenarios.
+10. Report imported range, conflict decisions, protected-surface decisions, verification. Push only when requested.
+
+### Protected fork surface
+
+Refresh this evidence-based list from the fork/upstream diff before every sync. Listed paths are manual-merge zones, not frozen copies; upstream changes elsewhere SHOULD merge normally.
+
+- **Fork identity:** `README.md`, `CONTRIBUTING.md`, `.github/SECURITY.md`, and this section MUST continue identifying the repository as a personal fork.
+- **Fork version:** `packages/utils/src/dirs.ts` MUST keep `VERSION` equal to the upstream package version for update/changelog compatibility and expose the human-facing `DISPLAY_VERSION` with the `+bwoah` build suffix.
+- **Legal notices:** Preserve matching fork notices in `LICENSE` and `packages/coding-agent/src/tools/browser/relay/extension-assets/LICENSE.txt`, but manually merge upstream copyright, license, and `THIRD-PARTY-NOTICES.txt` changes. NEVER choose either whole file unchanged during a legal-notice conflict.
+- **Fork-safe CI paths only:** `.github/workflows/ci.yml` and `.github/workflows/bazel-cache-warm.yml` require manual reconciliation. Other workflows merge normally unless the refreshed diff identifies a fork delta.
+  - Fork `ci.yml` jobs use `ubuntu-22.04`; `omp-kata` remains canonical-only behind `github.repository == 'can1357/oh-my-pi'`.
+  - Fork native jobs fetch released npm addons. Canonical Rust validation, native builds, cache scope `linux`, and cache reporting remain disabled.
+  - Fork pushes and `workflow_dispatch` MUST leave `is-release=false`. Release jobs and `NPM_TOKEN`, `APPLE_*`, `HOMEBREW_TAP_DEPLOY_KEY`, write permissions, and publishing remain unreachable.
+  - Cache warmers remain canonical-only, including `release-darwin-x64`, `release-darwin-arm64`, and the shared Bun store warmer.
+- **PR destination:** `packages/coding-agent/src/prompts/advisor/system.md` MUST require inspected push-remote or GitHub CLI evidence. Fork-parent metadata NEVER selects the destination.
+- **Session paths:** `packages/coding-agent/src/session/session-manager.ts`, `packages/coding-agent/src/sdk.ts`, `packages/coding-agent/src/extensibility/extensions/runner.ts`, and their tests MUST preserve the execution-CWD/session-home split. Tools and LSP use execution CWD; persistence and artifacts stay at session home until explicit relocation.
+- **Fork history:** Upstream changelog updates MAY merge, but fork-attributed entries in `packages/coding-agent/CHANGELOG.md` MUST remain.
+
+Equivalent upstream implementations MAY replace fork patches only after targeted tests prove the same contracts. Review protected areas even when Git reports no conflict.
+
 ### Package Structure
 
 | Package                 | Description                                                                             |
@@ -29,15 +72,6 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 - A request to address or fix PR feedback permits drafting replies, not posting them without confirmation. A request only to get or check comments is read-only.
 - When authorized to resolve review feedback, MUST verify the fix, obtain approval for a factual reply citing the change and verification, and post it in the existing thread before resolving. NEVER resolve if the reply is unapproved or posting fails.
 - Permission to work on a PR does not authorize unrelated comments or issue creation.
-
-### Pull requests
-
-When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.
-
-- MUST read `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md` first. Preserve the template sections and checklist, including when shortening an existing description.
-- MUST obtain at least one sentence written by the contributor in their own words explaining what changed and why, as required by `CONTRIBUTING.md`. If it is missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
-- For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
-- MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
 
 ## Code Quality
 
@@ -334,8 +368,13 @@ Location: `packages/*/CHANGELOG.md` (per package).
 
 **Attribution:**
 
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/can1357/oh-my-pi/issues/123))`.
-- External contributions: `Added feature X ([#456](https://github.com/can1357/oh-my-pi/pull/456) by [@username](https://github.com/username))`.
+- Fork-originated user-facing changes MUST identify Bwoah My Pi explicitly.
+- Fork PR: `Fixed foo ([Bwoah My Pi #123](https://github.com/btimothy-har/bwoah-my-pi/pull/123) by [@username](https://github.com/username))`.
+- Fork change without a PR: `Fixed foo ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi))`.
+- NEVER use a bare `#123` for fork work; fork and upstream numbers can collide.
+- Upstream issue: `Fixed foo ([#123](https://github.com/can1357/oh-my-pi/issues/123))`.
+- Upstream contribution: `Added feature X ([#456](https://github.com/can1357/oh-my-pi/pull/456) by [@username](https://github.com/username))`.
+- Upstream-synced changes retain upstream attribution; NEVER relabel them as Bwoah My Pi.
 
 ## Releasing
 

@@ -7,6 +7,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import {
 	__resetProfileSnapshotForTests,
 	APP_NAME,
+	DISPLAY_VERSION,
 	getActiveProfile,
 	getAgentDbPath,
 	getAgentDir,
@@ -99,7 +100,7 @@ describe("global --profile flag", () => {
 		await runCli(["--profile=work", "--version"]);
 
 		expect(process.exitCode).toBe(0);
-		expect(writeSpy).toHaveBeenCalled();
+		expect(writeSpy).toHaveBeenCalledWith(`${APP_NAME}/${DISPLAY_VERSION}\n`);
 		expect(getActiveProfile()).toBe("work");
 		expect(getAgentDir()).toBe(path.join(os.homedir(), configDir, "profiles", "work", "agent"));
 	});
