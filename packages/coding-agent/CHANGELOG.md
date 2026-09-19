@@ -3,9 +3,8 @@
 ## [Unreleased]
 ### Fixed
 
-- Fixed the advisor treating a fork's parent repository metadata as the intended pull request target ([#3](https://github.com/btimothy-har/bwoah-my-pi/pull/3) by [@btimothy-har](https://github.com/btimothy-har)).
-- Fixed LSP startup using a resumed session's recorded project after execution fell back to a different active working directory.
-- Fixed LSP startup using a resumed session's recorded project after execution fell back to a different active working directory ([#2](https://github.com/btimothy-har/bwoah-my-pi/pull/2) by [@btimothy-har](https://github.com/btimothy-har)).
+- Fixed the advisor treating a fork's parent repository metadata as the intended pull request target ([Bwoah My Pi #3](https://github.com/btimothy-har/bwoah-my-pi/pull/3) by [@btimothy-har](https://github.com/btimothy-har)).
+- Fixed resumed sessions with an unavailable recorded project coupling tool execution to transcript storage; tools and LSP now use the active working directory while the transcript and artifacts remain in the session's persistent home ([Bwoah My Pi #2](https://github.com/btimothy-har/bwoah-my-pi/pull/2) by [@btimothy-har](https://github.com/btimothy-har)).
 - Fixed clipboard paste stalling on an empty clipboard; image and text clipboard reads now run concurrently so the empty-clipboard status surfaces after the slower read instead of the sum of both.
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

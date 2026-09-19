@@ -1,6 +1,11 @@
+> [!NOTE]
+> This personal fork is generally not open to external contributions. Prefer
+> submitting generally useful changes to [upstream Oh My Pi](https://github.com/can1357/oh-my-pi),
+> or maintain personal customizations in your own fork.
+
 ## What
 
-<!-- Brief description of the change. Include at least one sentence in your own words explaining what changed and why, as required by CONTRIBUTING.md. -->
+<!-- Brief description of the change. Include at least one sentence in your own words explaining what changed and why. -->
 
 ## Why
 
