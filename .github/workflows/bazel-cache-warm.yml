@@ -66,6 +66,7 @@ jobs:
    # in ci.yml — a mismatched scope warms an archive nobody restores.
    warm_darwin:
       name: "Seed darwin release bazel cache: ${{ matrix.target }}"
+      if: github.repository == 'can1357/oh-my-pi'
       strategy:
          fail-fast: false
          matrix:
@@ -89,6 +90,7 @@ jobs:
    # store, no GitHub cache), so this is the sole hosted-runner producer.
    warm_bun:
       name: Seed bun store cache
+      if: github.repository == 'can1357/oh-my-pi'
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
