@@ -105,14 +105,14 @@ jobs:
          # the GitHub release prerelease, and skip the stable-only brew tap.
          channel: ${{ steps.detect.outputs.channel }}
       steps:
-         # Only a main-branch run needs tags fetched, so `git tag --points-at
-         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
-         # tag straight from `github.ref_name`, and fetching `--tags` while
-         # checkout uses an explicit tag refspec makes git refuse — so scope
-         # fetch-tags to main refs.
+         # Release detection is authoritative only in the canonical repository:
+         # forks inherit upstream tags but must never enter publish jobs. A
+         # tag-ref dispatch reads the tag from `github.ref_name`; fetching tags
+         # while checkout uses an explicit tag refspec makes git refuse, so only
+         # fetch them for canonical main runs.
          - uses: actions/checkout@v4
            with:
-              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
+              fetch-tags: ${{ github.repository == 'can1357/oh-my-pi' && github.ref == 'refs/heads/main' }}
          - name: Detect release tag at HEAD
            id: detect
            shell: bash
@@ -120,16 +120,18 @@ jobs:
               is_release=false
               release_tag=""
               channel=stable
-              case "${{ github.ref }}" in
-                refs/tags/v[0-9]*)
-                  release_tag="${{ github.ref_name }}"
-                  ;;
-                refs/heads/main)
-                  if [ "${{ github.event_name }}" != "pull_request" ]; then
-                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
-                  fi
-                  ;;
-              esac
+              if [ "${{ github.repository }}" = "can1357/oh-my-pi" ]; then
+                case "${{ github.ref }}" in
+                  refs/tags/v[0-9]*)
+                    release_tag="${{ github.ref_name }}"
+                    ;;
+                  refs/heads/main)
+                    if [ "${{ github.event_name }}" != "pull_request" ]; then
+                      release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
+                    fi
+                    ;;
+                esac
+              fi
               if [ -n "$release_tag" ]; then
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
@@ -145,7 +147,7 @@ jobs:
 
    check:
       name: Lint, type check & web build
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -153,11 +155,10 @@ jobs:
            run: |
               cargo install --locked --version 0.20.2 cargo-deny
               # `--offline` needs every workspace crate already in the registry
-              # cache. PR runs use a fresh GitHub-hosted runner (see runs-on
-              # above), where the only prior cargo work is the cargo-deny
-              # install, so nothing populates the index for our own graph and
-              # resolution fails. Non-PR events land on omp-kata, whose Cargo
-              # cache is warm, which is why main stayed green. Fetch first.
+              # cache. PR and fork runs use a fresh GitHub-hosted runner (see
+              # runs-on above), where the cargo-deny install has not populated
+              # the index for our own graph. Canonical non-PR runs land on
+              # omp-kata with a warm Cargo cache. Fetch first in both cases.
               cargo fetch --locked
               cargo deny --locked --offline check licenses sources
          - name: Type check workspace
@@ -165,14 +166,13 @@ jobs:
          - name: Build collab web
            run: bun run collab:web:build
 
-   # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
-   # Native-changing PRs are rare enough that they do not warrant PR-side
-   # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # Rust validation (tests, clippy, rustfmt) runs only for canonical non-PR
+   # events. Native-changing PRs and forks use released addons below; Rust is
+   # validated after merge in the canonical repository and again at release.
+   # A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
-      if: github.event_name != 'pull_request'
+      if: github.event_name != 'pull_request' && github.repository == 'can1357/oh-my-pi'
       runs-on: omp-kata
       steps:
          - uses: actions/checkout@v4
@@ -209,23 +209,23 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
 
-   # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the
-   # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
-   # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
-   # Main (kata, cluster remote cache) builds all Linux-hosted targets with
-   # bazel. Job name says "bazel" for continuity with required checks.
+   # Provides the native addons every downstream TS job installs. PRs and forks
+   # fetch the latest release's Linux x64 pair from the
+   # @oh-my-pi/pi-natives-linux-x64 npm leaf. The workspace loader skips its
+   # version sentinel for workspace loads, so release addons load under a newer
+   # checkout; TS tests that depend on changed native behavior fail visibly and
+   # the native side is validated after merge in the canonical repository.
+   # Canonical non-PR runs (kata, cluster remote cache) build all Linux-hosted
+   # targets with bazel. Job name says "bazel" for required-check continuity.
    native_addons:
       name: Build native addons (bazel)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR path: latest release addons from npm ----
+         # ---- PR/fork path: latest release addons from npm ----
          - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request'
+           if: github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi'
            shell: bash
            run: |
               set -euo pipefail
@@ -238,7 +238,7 @@ jobs:
          # A corrupt download must fail here, not as a confusing dlopen error
          # in every downstream test shard.
          - name: Smoke release addons
-           if: github.event_name == 'pull_request'
+           if: github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi'
            shell: bash
            run: |
               set -euo pipefail
@@ -273,14 +273,14 @@ jobs:
                 echo "::notice title=Native sources changed::PR CI tests against the latest release addons by design; native changes are validated post-merge on main and at release."
               fi
 
-         # ---- main path: bazel build of all Linux-hosted targets ----
+         # ---- canonical non-PR path: bazel build of Linux-hosted targets ----
          - id: cache
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' && github.repository == 'can1357/oh-my-pi'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
          - name: Build native addons once
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' && github.repository == 'can1357/oh-my-pi'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -308,7 +308,7 @@ jobs:
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' && github.repository == 'can1357/oh-my-pi'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
@@ -327,7 +327,7 @@ jobs:
 
    test_workspace:
       name: Test TS workspace fast
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -350,7 +350,7 @@ jobs:
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -368,7 +368,7 @@ jobs:
 
    test_ts_native:
       name: Test TS native/integration packages
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -386,7 +386,7 @@ jobs:
 
    test_coding_agent_ui:
       name: Test coding-agent UI/TUI (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -404,7 +404,7 @@ jobs:
 
    test_coding_agent_runtime:
       name: Test coding-agent runtime/session (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -424,7 +424,7 @@ jobs:
 
    test_coding_agent_native:
       name: Test coding-agent native/unit (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -442,7 +442,7 @@ jobs:
 
    test_smoke:
       name: Test CLI smoke (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 15
@@ -458,7 +458,7 @@ jobs:
 
    install_methods:
       name: Install method smoke tests
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi') && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       steps:
