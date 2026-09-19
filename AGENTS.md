@@ -36,7 +36,8 @@ Sync upstream ONLY when the user explicitly requests it.
 Refresh this evidence-based list from the fork/upstream diff before every sync. Listed paths are manual-merge zones, not frozen copies; upstream changes elsewhere SHOULD merge normally.
 
 - **Fork identity:** `README.md`, `CONTRIBUTING.md`, `.github/SECURITY.md`, and this section MUST continue identifying the repository as a personal fork.
-- **Legal notices:** Preserve the fork notice in `LICENSE`, but manually merge upstream copyright, license, and `THIRD-PARTY-NOTICES.txt` changes. NEVER choose either whole file unchanged during a legal-notice conflict.
+- **Fork version:** `packages/utils/src/dirs.ts` MUST keep `VERSION` equal to the upstream package version for update/changelog compatibility and expose the human-facing `DISPLAY_VERSION` with the `+bwoah` build suffix.
+- **Legal notices:** Preserve matching fork notices in `LICENSE` and `packages/coding-agent/src/tools/browser/relay/extension-assets/LICENSE.txt`, but manually merge upstream copyright, license, and `THIRD-PARTY-NOTICES.txt` changes. NEVER choose either whole file unchanged during a legal-notice conflict.
 - **Fork-safe CI paths only:** `.github/workflows/ci.yml` and `.github/workflows/bazel-cache-warm.yml` require manual reconciliation. Other workflows merge normally unless the refreshed diff identifies a fork delta.
   - Fork `ci.yml` jobs use `ubuntu-22.04`; `omp-kata` remains canonical-only behind `github.repository == 'can1357/oh-my-pi'`.
   - Fork native jobs fetch released npm addons. Canonical Rust validation, native builds, cache scope `linux`, and cache reporting remain disabled.

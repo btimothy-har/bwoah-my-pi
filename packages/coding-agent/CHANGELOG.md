@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Changed
+
+- Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
+
 ### Fixed
 
 - Fixed the advisor treating a fork's parent repository metadata as the intended pull request target ([Bwoah My Pi #3](https://github.com/btimothy-har/bwoah-my-pi/pull/3) by [@btimothy-har](https://github.com/btimothy-har)).

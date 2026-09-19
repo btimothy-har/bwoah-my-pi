@@ -21,3 +21,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Fork notice
+
+This repository is a personal fork of Oh My Pi
+(https://github.com/can1357/oh-my-pi). Fork-specific modifications are
+distributed under the same MIT License above. Existing copyright, attribution,
+and third-party license notices remain in effect.

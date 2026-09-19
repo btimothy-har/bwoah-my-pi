@@ -26,11 +26,14 @@ export const CONFIG_DIR_NAME: string = ".omp";
 /** Ordered main settings filenames: canonical write target first, legacy-compatible YAML fallback second. */
 export const MAIN_CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
 
-/** Version (e.g. "1.0.0") */
+/** Upstream package version used for update and changelog compatibility. */
 export const VERSION: string = version;
 
-/** Default User-Agent header string (e.g. "omp/17.2.12") */
-export const USER_AGENT = `omp/${VERSION}`;
+/** Human-facing version identifying this fork without changing SemVer precedence. */
+export const DISPLAY_VERSION = `${VERSION}+bwoah`;
+
+/** Default User-Agent header string (e.g. "omp/17.2.12+bwoah") */
+export const USER_AGENT = `omp/${DISPLAY_VERSION}`;
 
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
