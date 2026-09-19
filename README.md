@@ -14,12 +14,18 @@ git clone --branch main https://github.com/btimothy-har/bwoah-my-pi.git ~/.local
 cd ~/.local/share/bwoah-my-pi
 bun setup
 
-# This source install is updated through Git, not upstream npm releases.
-omp config set startup.checkUpdate false
 omp --version
 ```
 
 `bun setup` installs dependencies, builds the native addon, and links this checkout as the global `omp` command. `omp --version` reports the compatible upstream version with a `+bwoah` suffix.
+
+To stop notifications about official upstream npm releases, optionally disable the update check:
+
+```sh
+omp config set startup.checkUpdate false
+```
+
+Omit this optional command to preserve the current update-check setting.
 
 ## Update
 
