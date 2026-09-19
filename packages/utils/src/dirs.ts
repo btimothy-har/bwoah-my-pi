@@ -32,8 +32,8 @@ export const VERSION: string = version;
 /** Human-facing version identifying this fork without changing SemVer precedence. */
 export const DISPLAY_VERSION = `${VERSION}+bwoah`;
 
-/** Default User-Agent header string (e.g. "omp/17.2.12+bwoah") */
-export const USER_AGENT = `omp/${DISPLAY_VERSION}`;
+/** Default User-Agent header string (e.g. "omp/17.2.12") */
+export const USER_AGENT = `omp/${VERSION}`;
 
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
