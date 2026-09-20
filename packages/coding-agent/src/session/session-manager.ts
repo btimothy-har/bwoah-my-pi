@@ -10,6 +10,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	directoryIsEnterable,
 	getBlobsDir,
@@ -21,6 +22,7 @@ import {
 	isEnotempty,
 	isFsError,
 	logger,
+	normalizePathForComparison,
 	pathIsWithin,
 	stringifyJson,
 	toError,
@@ -116,6 +118,44 @@ function nowIso(): string {
 
 function fileSafeTimestamp(iso: string): string {
 	return iso.replace(/[:.]/g, "-");
+}
+
+/**
+ * True when `executionCwd` belongs to the same repository as the session's
+ * canonical home. Identity is the Git common dir (the metadata root linked
+ * worktrees share), so a linked checkout of the home's repository passes while
+ * an independent repository at the same path fails; checkout roots, branches,
+ * and HEAD legitimately differ and are not compared. A non-Git home returns
+ * true: ordinary directory sessions keep the generic bind-any-directory
+ * contract. Discovery or resolution errors return false — an execution
+ * directory that cannot be verified as same-repository is not adopted.
+ */
+async function executionCwdMatchesSessionRepository(sessionHome: string, executionCwd: string): Promise<boolean> {
+	let homeCommonDir: string;
+	try {
+		const homeRepo = vcs.git(sessionHome);
+		if (!homeRepo) return true;
+		homeCommonDir = homeRepo.info().commonDir;
+	} catch {
+		return false;
+	}
+	let executionCommonDir: string;
+	try {
+		const executionRepo = vcs.git(executionCwd);
+		if (!executionRepo) return false;
+		executionCommonDir = executionRepo.info().commonDir;
+	} catch {
+		return false;
+	}
+	try {
+		const [homeResolved, executionResolved] = await Promise.all([
+			fs.promises.realpath(homeCommonDir),
+			fs.promises.realpath(executionCommonDir),
+		]);
+		return normalizePathForComparison(homeResolved) === normalizePathForComparison(executionResolved);
+	} catch {
+		return false;
+	}
 }
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
@@ -1924,7 +1964,16 @@ export class SessionManager {
 				this.#fallbackRuntimeOnly = false;
 			}
 			if (headerExecutionCwd && headerExecutionCwd !== path.resolve(this.#executionCwd)) {
-				if (await directoryIsEnterable(headerExecutionCwd)) {
+				// A Git-backed home only adopts a saved binding that still belongs
+				// to the home's repository: an enterable path is not proof the
+				// same checkout (or repository) still occupies it. With no usable
+				// header home there is no repository identity to anchor, so the
+				// legacy missing-home handling applies unchanged.
+				const homeUsable = !!headerCwd && (await directoryIsEnterable(headerCwd));
+				if (
+					(await directoryIsEnterable(headerExecutionCwd)) &&
+					(!homeUsable || (await executionCwdMatchesSessionRepository(headerCwd, headerExecutionCwd)))
+				) {
 					this.#executionCwd = headerExecutionCwd;
 					this.#fallbackRuntimeOnly = false;
 					// No breadcrumb re-record: the home-adoption branch above already
@@ -2490,6 +2539,11 @@ export class SessionManager {
 		if (!(await directoryIsEnterable(resolved))) {
 			throw new Error(`Execution directory is not enterable: ${resolved}`);
 		}
+		if (!(await executionCwdMatchesSessionRepository(home, resolved))) {
+			throw new Error(
+				`Execution directory could not be verified as belonging to the session repository: ${resolved}`,
+			);
+		}
 		const previousHeaderExecutionCwd = this.#header.executionCwd;
 		const previousExecutionCwd = this.#executionCwd;
 		const previousFallbackRuntimeOnly = this.#fallbackRuntimeOnly;
@@ -2556,14 +2610,20 @@ export class SessionManager {
 	adoptRecordedCwd(): void {
 		const recordedCwd = this.#header.cwd;
 		if (!recordedCwd) return;
+		// Capture whether the saved binding is already live BEFORE re-anchoring:
+		// a binding rejected at load (missing, unusable, or foreign repository)
+		// must not become live merely because startup re-applies the raw saved
+		// path after adopting the home.
+		const saved = this.#header.executionCwd;
+		const savedIsLive =
+			!!saved && normalizePathForComparison(saved) === normalizePathForComparison(this.#executionCwd);
 		this.#executionCwd = path.resolve(recordedCwd);
 		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
 		this.#fallbackRuntimeOnly = false;
-		// An intentional execution binding survives re-anchoring: a bound session
-		// must not be dragged from its worktree back to the home by a startup
-		// rescope. The binding was verified enterable when the header loaded.
-		const saved = this.#header.executionCwd;
-		if (saved && path.resolve(saved) !== path.resolve(this.#executionCwd)) {
+		// An intentional execution binding survives re-anchoring only when it
+		// was already live: it was verified (enterable, same repository) when
+		// the header loaded, and the restore path never left it live otherwise.
+		if (saved && savedIsLive) {
 			this.#executionCwd = path.resolve(saved);
 		}
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.getSessionHome(), this.#sessionFile);
