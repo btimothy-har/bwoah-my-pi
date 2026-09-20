@@ -1,7 +1,7 @@
 /**
  * `/wt` backing: fork the current checkout into a fresh linked git worktree on
- * a new branch, carrying the uncommitted changes along, so the session can be
- * relocated there without disturbing the original checkout.
+ * a new branch, carrying the uncommitted changes along, then bind it as the
+ * session's execution directory — the canonical home stays in place.
  *
  * The worktree is created through the clone-first path (`worktree.clone`,
  * `isolation.backend`) and lands under the agent-managed worktree base
@@ -34,19 +34,20 @@ export function defaultSessionWorktreeBranch(now = new Date()): string {
 	return `wt/${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
-/** One-line confirmation shown after the session moved into `worktree`. */
+/** One-line confirmation shown after `/wt` bound `worktree` as the execution directory. */
 export function formatSessionWorktreeSummary(worktree: SessionWorktree, sourceCleaned = false): string {
 	const how =
 		worktree.clonedWith === undefined ? "checked out" : `cloned via ${formatIsolationBackend(worktree.clonedWith)}`;
-	const changeStatus = sourceCleaned
-		? "uncommitted changes moved, source checkout cleaned"
-		: "uncommitted changes carried over";
-	return `Moved to worktree ${worktree.path} on branch ${worktree.branch} (${how}, ${changeStatus}).`;
+	const home = sourceCleaned ? "Session home reset to HEAD." : "Session home is unchanged.";
+	return `Now executing in worktree ${worktree.path} on branch ${worktree.branch} (${how}, uncommitted changes carried over). ${home}`;
 }
 
 /**
- * If `worktree.cleanSource` is enabled, resets and cleans the source checkout.
- * Catches git errors and returns `{ cleaned: true }` on success, or `{ cleaned: false, errorMessage }` on failure.
+ * If `worktree.cleanSource` is enabled, resets and cleans the canonical home
+ * after `/wt` bound an execution worktree. Changes were already carried into
+ * the worktree, so this keeps the home pristine without losing work. Catches
+ * git errors and returns `{ cleaned: true }` on success, or
+ * `{ cleaned: false, errorMessage }` on failure.
  */
 export async function cleanSourceCheckoutIfConfigured(
 	sourceCwd: string,
@@ -61,7 +62,7 @@ export async function cleanSourceCheckoutIfConfigured(
 		await repository.clean({});
 		return { cleaned: true };
 	} catch (error) {
-		logger.warn("failed to clean source checkout after /wt", { cwd: sourceCwd, error });
+		logger.warn("failed to clean canonical home after /wt", { cwd: sourceCwd, error });
 		return {
 			cleaned: false,
 			errorMessage: error instanceof Error ? error.message : String(error),

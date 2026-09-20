@@ -224,6 +224,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 		if (!header) return;
 		add(header.title);
 		add(header.cwd);
+		add(header.executionCwd);
 		for (const previousSessionFile of header.previousSessionFiles ?? []) add(previousSessionFile);
 	};
 
@@ -248,6 +249,8 @@ function redactShareHeader(
 		...header,
 		title: header.title === undefined ? undefined : o.obfuscate(header.title, sharedRegexSecretValues),
 		cwd: o.obfuscate(header.cwd, sharedRegexSecretValues),
+		executionCwd:
+			header.executionCwd === undefined ? undefined : o.obfuscate(header.executionCwd, sharedRegexSecretValues),
 		previousSessionFiles: header.previousSessionFiles?.map(previousSessionFile =>
 			o.obfuscate(previousSessionFile, sharedRegexSecretValues),
 		),

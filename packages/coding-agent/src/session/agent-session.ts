@@ -8504,6 +8504,16 @@ export class AgentSession {
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
+	/**
+	 * Bind the execution worktree as this session's execution directory without
+	 * relocating the session (`/wt` activation): home, id, transcript, and
+	 * artifacts stay in place.
+	 */
+	async setExecutionCwd(executionCwd: string): Promise<void> {
+		this.#assertVibeSessionTransitionAllowed("activate an execution worktree");
+		await this.sessionManager.setExecutionCwd(executionCwd);
+	}
+
 	// =========================================================================
 	// Model Management
 	// =========================================================================
@@ -9568,10 +9578,22 @@ export class AgentSession {
 			const newCwd = this.sessionManager.getCwd();
 			const loadedRecordedCwd = this.sessionManager.getRecordedCwd();
 			const recordedCwd = loadedRecordedCwd ?? previousSessionState.cwd;
+			// A bound target legitimately executes at its saved worktree, not its
+			// canonical home. The reject decision must consider the live execution
+			// directory: a callback-less switch onto a bound target would otherwise
+			// silently adopt E while the process stays at the previous cwd — the
+			// desync SESSION_CWD_CHANGE_REJECTED exists to prevent. A missing or
+			// unusable binding already fell back to the home during load, so
+			// decisionCwd degrades to the recorded home and keeps today's behavior.
+			const loadedExecutionCwd = this.sessionManager.getExecutionCwd();
+			const decisionCwd =
+				loadedExecutionCwd !== undefined && path.resolve(loadedExecutionCwd) === path.resolve(newCwd)
+					? newCwd
+					: recordedCwd;
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
 			} else if (sessionFileDisposition === "context-change") {
-				if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
+				if (!options?.onCwdChange && path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd)) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}
 				if (options?.onCwdChange) {
@@ -9580,7 +9602,7 @@ export class AgentSession {
 						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
-					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
+					} else if (path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd)) {
 						throw SESSION_CWD_CHANGE_REJECTED;
 					}
 				}

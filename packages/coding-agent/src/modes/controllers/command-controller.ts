@@ -1229,7 +1229,9 @@ export class CommandController {
 	/**
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
 	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
-	 * then relocate the session there like `/move`.
+	 * then bind it as this session's execution directory. The canonical session
+	 * home, session id, transcript, and artifacts stay in place; `/move`
+	 * remains the session-relocation command.
 	 */
 	async handleWorktreeCommand(branch?: string): Promise<void> {
 		if (this.ctx.session.isStreaming) {
@@ -1238,7 +1240,7 @@ export class CommandController {
 		}
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
-			const cwd = this.ctx.sessionManager.getCwd();
+			const home = this.ctx.sessionManager.getSessionHome();
 			this.ctx.statusContainer.disposeChildren();
 			const loader = new Loader(
 				this.ctx.ui,
@@ -1251,7 +1253,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+				worktree = await createSessionWorktree(home, this.ctx.settings, branchName);
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1265,10 +1267,10 @@ export class CommandController {
 					error: worktree.cloneError,
 				});
 			}
-			if (!(await this.#relocateSession(worktree.path))) return false;
-			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			if (!(await this.#activateExecutionWorktree(worktree.path))) return false;
+			const cleanup = await cleanSourceCheckoutIfConfigured(home, this.ctx.settings);
 			if (cleanup.errorMessage !== undefined) {
-				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+				this.ctx.showWarning(`Worktree bound, but cleaning the canonical home failed: ${cleanup.errorMessage}`);
 			}
 			this.ctx.present([
 				new Spacer(1),
@@ -1294,10 +1296,49 @@ export class CommandController {
 		return this.ctx.withBtwSessionMove(operation);
 	}
 
+	/**
+	 * Bind an execution worktree as this session's execution directory while
+	 * #withSessionMove holds the BTW gate: the session binding changes, the
+	 * home/id/transcript/artifacts do not. False means no successful
+	 * activation; state is rolled back to the captured snapshot.
+	 */
+	async #activateExecutionWorktree(resolvedPath: string): Promise<boolean> {
+		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return true;
+		const previousState = this.ctx.sessionManager.captureState();
+		try {
+			await this.ctx.session.setExecutionCwd(resolvedPath);
+		} catch (err) {
+			this.ctx.showError(`Worktree activation failed: ${err instanceof Error ? err.message : String(err)}`);
+			return false;
+		}
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return false;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return false;
+		}
+		this.ctx.updateEditorBorderColor();
+		await this.ctx.reloadTodos();
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
 	/** Relocate only while #withSessionMove holds the BTW gate; false means no successful move. */
 	async #relocateSession(resolvedPath: string): Promise<boolean> {
-		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
-
+		// Settled only when E AND H both equal the target. A bound session whose
+		// worktree is the target is an explicit re-anchoring request: fall through
+		// so the transcript re-homes and the binding clears.
+		if (
+			resolvedPath === path.resolve(this.ctx.sessionManager.getCwd()) &&
+			resolvedPath === path.resolve(this.ctx.sessionManager.getSessionHome())
+		) {
+			return false;
+		}
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
 			await this.ctx.session.moveSession(resolvedPath);

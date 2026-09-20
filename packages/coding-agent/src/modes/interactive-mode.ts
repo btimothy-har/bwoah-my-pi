@@ -1590,6 +1590,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					`Session persistence failed: ${detail}. Unsaved entries remain in memory; persistence will retry on the next entry.`,
 				);
 			}),
+			this.sessionManager.onExecutionCwdFallback(fallback => {
+				const missing = truncateToWidth(replaceTabs(fallback.missingCwd), TRUNCATE_LENGTHS.LINE);
+				this.showWarning(
+					`Execution worktree ${missing} is not accessible; running in ${fallback.home} instead. Run /wt <branch> to activate an execution worktree.`,
+				);
+			}),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();

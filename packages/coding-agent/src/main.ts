@@ -852,6 +852,24 @@ async function moveMissingCwdSessionIfNeeded(
 
 type ResumedProjectResult = { cwd: string; chdirFailed?: string };
 
+/**
+ * Startup rescope target for a resumed session: a live execution binding scopes
+ * the process to the worktree (E); anything else — no binding, or a binding
+ * that fell back to the home because the saved worktree is gone — scopes to the
+ * recorded home. The raw saved field is never used directly: after a fallback
+ * it names a missing directory, which would silently skip the rescope.
+ */
+function resumeRescopeCwd(sessionManager: SessionManager, listedCwd?: string): string {
+	const saved = sessionManager.getExecutionCwd();
+	if (
+		saved !== undefined &&
+		normalizePathForComparison(saved) === normalizePathForComparison(sessionManager.getCwd())
+	) {
+		return sessionManager.getCwd();
+	}
+	return listedCwd ?? sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
+}
+
 async function switchToResumedProject(
 	resumedCwd: string | undefined,
 	activeSettings: Settings,
@@ -1940,7 +1958,7 @@ export async function runRootCommand(
 
 		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager && !parsedArgs.noSession) {
 			const previousCwd = cwd;
-			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
+			const recordedCwd = resumeRescopeCwd(sessionManager);
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
 				settingsInstance,
@@ -2013,9 +2031,37 @@ export async function runRootCommand(
 			}
 			sessionManager = await SessionManager.open(selected.path);
 			const previousCwd = cwd;
-			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
+			const recordedCwd = resumeRescopeCwd(sessionManager, selected.cwd);
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
+				settingsInstance,
+				pluginPreloadPromise,
+				sessionManager,
+			);
+			cwd = resumedProject.cwd;
+			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
+			if (cwd !== previousCwd) {
+				parsedArgs.cwd = cwd;
+				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+			}
+		}
+
+		// --continue / auto-resume skip the explicit-resume and picker blocks
+		// above, so a bound session restored with its live execution directory
+		// (E) would otherwise keep launch-scoped settings, plugins, and project
+		// dir while tools run in the worktree. Rescope to the resolved execution
+		// scope before session construction.
+		if (
+			sessionManager &&
+			!parsedArgs.noSession &&
+			parsedArgs.continue &&
+			typeof parsedArgs.resume !== "string" &&
+			parsedArgs.resume !== true &&
+			!foreignSource
+		) {
+			const previousCwd = cwd;
+			const resumedProject = await switchToResumedProject(
+				resumeRescopeCwd(sessionManager),
 				settingsInstance,
 				pluginPreloadPromise,
 				sessionManager,

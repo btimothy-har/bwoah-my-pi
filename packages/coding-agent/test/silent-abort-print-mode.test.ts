@@ -51,6 +51,7 @@ function createMockSession(
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
+			onExecutionCwdFallback: () => () => {},
 		},
 		extensionRunner: undefined,
 		subscribe: () => () => {},

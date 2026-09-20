@@ -5000,9 +5000,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			group: "Isolation",
-			label: "Clean Source Checkout on /wt",
+			label: "Clean Canonical Home on /wt",
 			description:
-				"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
+				"After `/wt` binds an execution worktree, reset tracked changes and remove untracked files from the canonical home. Uncommitted changes are already carried into the worktree, so nothing is lost",
 		},
 	},
 

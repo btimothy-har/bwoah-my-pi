@@ -597,6 +597,14 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
+/** Raised when a resumed session's saved execution directory is missing or unusable. */
+export interface ExecutionCwdFallback {
+	/** Saved `executionCwd` that could not be entered. */
+	missingCwd: string;
+	/** Canonical session home (`cwd`) the session fell back to. */
+	home: string;
+}
+
 interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
@@ -789,6 +797,9 @@ export class SessionManager {
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
+	/** Latched: resumed session could not enter its saved execution directory. */
+	#executionCwdFallback: ExecutionCwdFallback | undefined;
+	#executionCwdFallbackCallbacks = new Set<(fallback: ExecutionCwdFallback) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#executionCwd = cwd;
@@ -811,7 +822,7 @@ export class SessionManager {
 	 */
 	#materializeBreadcrumb(): void {
 		if (!this.#breadcrumbFresh || !this.#sessionFile) return;
-		this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile, false);
+		this.#rememberBreadcrumb(this.getSessionHome(), this.#sessionFile, false);
 	}
 
 	#clearDiskError(): void {
@@ -1470,8 +1481,20 @@ export class SessionManager {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
+		// Capture the anchor before the fallback reconcile clears the flag: a
+		// runtime-only fallback (recorded home gone) anchors the new conversation
+		// where the user actually is, not at the missing home. Otherwise anchor at
+		// the canonical home (H): `/new` on a worktree-bound session keeps its
+		// transcript bucket and header under H. Carry the binding forward only
+		// when it is live (E matches the saved E) — a recovery fallback at H
+		// starts the new conversation without the stale override.
+		const anchor = this.#fallbackRuntimeOnly ? this.#executionCwd : this.getSessionHome();
 		this.#reconcileSessionDirForFallback();
-		const sessionHome = this.#executionCwd;
+		const sessionHome = anchor;
+		const liveExecutionCwd =
+			this.#header?.executionCwd && path.resolve(this.#header.executionCwd) === path.resolve(this.#executionCwd)
+				? this.#header.executionCwd
+				: undefined;
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -1485,11 +1508,12 @@ export class SessionManager {
 			id: this.#sessionId,
 			timestamp,
 			cwd: sessionHome,
+			executionCwd: liveExecutionCwd,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 		};
 		const workspace = normalizeSessionWorkspace({
-			cwd: this.#executionCwd,
+			cwd: sessionHome,
 			directories: options?.additionalDirectories ?? [],
 		});
 		this.#additionalDirectories = additionalWorkspaceDirectories(workspace);
@@ -1518,7 +1542,9 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-			this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile, true);
+			// Breadcrumbs stay home-keyed: a worktree-bound session's crumb must
+			// not point at a disposable execution directory.
+			this.#rememberBreadcrumb(sessionHome, this.#sessionFile, true);
 		} else {
 			this.#sessionFile = undefined;
 		}
@@ -1733,7 +1759,9 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
 
-		if (this.#sessionFile) this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
+		// Home-keyed: the restored header carries the canonical home even when
+		// the snapshot's live E was a worktree binding.
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.getSessionHome(), this.#sessionFile);
 	}
 
 	/**
@@ -1749,6 +1777,24 @@ export class SessionManager {
 	 * target) and the error names where the session file actually lives.
 	 */
 	async rollbackMove(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		const currentFile = this.#sessionFile ? path.resolve(this.#sessionFile) : undefined;
+		const snapshotFile = snapshot.sessionFile ? path.resolve(snapshot.sessionFile) : undefined;
+		if (currentFile === snapshotFile && path.resolve(this.#sessionDir) === path.resolve(snapshot.sessionDir)) {
+			// Execution-only binding change: the transcript and artifacts never
+			// moved, so there is nothing to rename back. Restore the captured state
+			// and persist the captured header against the CURRENT expected disk
+			// size — bytes appended since the capture are on disk now, and the
+			// snapshot size would fail the atomic expected-size check.
+			const currentDiskSize = this.#expectedDiskSize;
+			this.restoreState(snapshot);
+			this.#expectedDiskSize = currentDiskSize;
+			if (this.#persist && this.#sessionFile) {
+				this.#forceFileCreation = true;
+				this.#rewriteRequired = true;
+				await this.#rewriteAtomically();
+			}
+			return;
+		}
 		try {
 			const targetSessionDir = snapshot.sessionFile ? path.dirname(snapshot.sessionFile) : snapshot.sessionDir;
 			await this.moveTo(snapshot.cwd, targetSessionDir);
@@ -1790,6 +1836,9 @@ export class SessionManager {
 		const previousSessionFile = this.#sessionFile;
 		const previousSessionId = this.#sessionId;
 		const previousHeaderCwd = this.#header?.cwd ? path.resolve(this.#header.cwd) : undefined;
+		const previousHeaderExecutionCwd = this.#header?.executionCwd
+			? path.resolve(this.#header.executionCwd)
+			: undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
@@ -1806,7 +1855,9 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = resolvedSessionFile;
-		this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
+		// Home-keyed: a bound session's live E is a disposable worktree, and the
+		// context-adoption branches below re-record once the header is parsed.
+		this.#rememberBreadcrumb(this.getSessionHome(), resolvedSessionFile);
 
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
@@ -1831,11 +1882,13 @@ export class SessionManager {
 		const header = fileEntries[0] as SessionHeader;
 
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
+		const headerExecutionCwd = header.executionCwd ? path.resolve(header.executionCwd) : undefined;
 		const unchangedSessionContext =
 			previousSessionFile !== undefined &&
 			path.resolve(previousSessionFile) === resolvedSessionFile &&
 			previousSessionId === header.id &&
-			previousHeaderCwd === headerCwd;
+			previousHeaderCwd === headerCwd &&
+			previousHeaderExecutionCwd === headerExecutionCwd;
 
 		// Reloading the same logical conversation refreshes transcript content
 		// without changing its established execution binding. Other contexts
@@ -1847,6 +1900,15 @@ export class SessionManager {
 		// (extension UI, RPC) would otherwise track a directory the process
 		// cannot enter. Keep the current cwd so the session stays where the
 		// user already is.
+		// Intentional execution binding (see `executionCwd` on SessionHeader):
+		// restore the saved execution directory after the home adoption above.
+		// A same-context reload keeps its established binding untouched. A
+		// missing/unusable saved E runs at home with the stale field retained
+		// until explicit activation or relocation replaces it — never recreate
+		// the worktree automatically. The fallback notice is deferred until the
+		// header is applied: #raiseExecutionCwdFallback reports the home via
+		// getSessionHome(), which still describes the PREVIOUS session here.
+		let pendingExecutionCwdFallback: string | undefined;
 		if (!unchangedSessionContext) {
 			if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
 				this.#executionCwd = headerCwd;
@@ -1861,9 +1923,21 @@ export class SessionManager {
 			} else {
 				this.#fallbackRuntimeOnly = false;
 			}
+			if (headerExecutionCwd && headerExecutionCwd !== path.resolve(this.#executionCwd)) {
+				if (await directoryIsEnterable(headerExecutionCwd)) {
+					this.#executionCwd = headerExecutionCwd;
+					this.#fallbackRuntimeOnly = false;
+					// No breadcrumb re-record: the home-adoption branch above already
+					// recorded the home-keyed breadcrumb, and the transcript never
+					// moved out of the home bucket.
+				} else {
+					pendingExecutionCwdFallback = header.executionCwd!;
+				}
+			}
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		if (pendingExecutionCwdFallback) this.#raiseExecutionCwdFallback(pendingExecutionCwdFallback);
 		this.#expectedDiskSize = sourceSize;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
@@ -1912,8 +1986,16 @@ export class SessionManager {
 		const parentSessionId = this.#sessionId;
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
+		// Same anchor rules as `#resetToNewSession`: a runtime-only fallback
+		// anchors at the live execution cwd, a bound session anchors at the
+		// canonical home with the live binding carried over.
+		const anchor = this.#fallbackRuntimeOnly ? this.#executionCwd : this.getSessionHome();
 		this.#reconcileSessionDirForFallback();
-		const sessionHome = this.#executionCwd;
+		const sessionHome = anchor;
+		const liveExecutionCwd =
+			this.#header.executionCwd && path.resolve(this.#header.executionCwd) === path.resolve(this.#executionCwd)
+				? this.#header.executionCwd
+				: undefined;
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
@@ -1927,6 +2009,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: sessionHome,
+			executionCwd: liveExecutionCwd,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
@@ -1941,7 +2024,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
-		this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
+		this.#rememberBreadcrumb(sessionHome, this.#sessionFile);
 
 		await this.#rewriteAtomically();
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
@@ -1963,6 +2046,11 @@ export class SessionManager {
 			: undefined;
 		if (
 			resolvedCwd === path.resolve(this.#executionCwd) &&
+			// Settled means E AND H both at the target: a bound session whose
+			// execution worktree IS the target (`/move .` after `/wt`) is an
+			// explicit re-anchoring request and must fall through to a real
+			// relocation (re-home + binding clear), not a silent no-op.
+			resolvedCwd === path.resolve(this.getSessionHome()) &&
 			!this.#fallbackRuntimeOnly &&
 			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir)) &&
 			(!expectedSessionFile || path.resolve(this.#sessionFile!) === path.resolve(expectedSessionFile))
@@ -2068,6 +2156,9 @@ export class SessionManager {
 			this.#executionCwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
+			// Relocation re-anchors the home; any prior execution binding pointed
+			// at the old home's worktree and is stale. H and E coincide again.
+			this.#header.executionCwd = undefined;
 			// Clear only after the rename has landed. If the move threw,
 			// keep the flag so the next relocation retries.
 			this.#fallbackRuntimeOnly = false;
@@ -2375,6 +2466,81 @@ export class SessionManager {
 		return this.#header?.cwd;
 	}
 
+	/**
+	 * Saved intentional execution directory from the header, if any. `undefined`
+	 * for sessions that never activated an execution worktree.
+	 */
+	getExecutionCwd(): string | undefined {
+		const saved = this.#header?.executionCwd;
+		return saved ? path.resolve(saved) : undefined;
+	}
+
+	/**
+	 * Bind an intentional execution directory without relocating the session:
+	 * `/wt` activation moves only the live execution cwd (E) while the canonical
+	 * session home (H, header `cwd`), session id, transcript path, and artifact
+	 * location stay in place. Relative inputs resolve against H; selecting H
+	 * clears the binding. Recovery-only fallback state is cleared — an
+	 * intentional binding is not a fallback. Transactional: a failed header
+	 * rewrite restores the prior in-memory header, E, and recovery state.
+	 */
+	async setExecutionCwd(executionCwd: string): Promise<void> {
+		const home = this.getSessionHome();
+		const resolved = path.resolve(home, executionCwd);
+		if (!(await directoryIsEnterable(resolved))) {
+			throw new Error(`Execution directory is not enterable: ${resolved}`);
+		}
+		const previousHeaderExecutionCwd = this.#header.executionCwd;
+		const previousExecutionCwd = this.#executionCwd;
+		const previousFallbackRuntimeOnly = this.#fallbackRuntimeOnly;
+		const previousDraftOnlySessionCleanupArmed = this.#draftOnlySessionCleanupArmed;
+		this.#header.executionCwd = path.resolve(resolved) === path.resolve(home) ? undefined : resolved;
+		this.#executionCwd = resolved;
+		this.#fallbackRuntimeOnly = false;
+		// The binding is durable session state: a draft-only session that binds
+		// must survive close() like any ensureOnDisk materialization.
+		this.#draftOnlySessionCleanupArmed = false;
+		try {
+			// Persist even a header-only session so an immediate exit/resume keeps
+			// the binding; ordinary unbound sessions stay lazy.
+			if (this.#persist && this.#sessionFile) {
+				this.#forceFileCreation = true;
+				await this.#rewriteAtomically();
+			}
+		} catch (error) {
+			this.#header.executionCwd = previousHeaderExecutionCwd;
+			this.#executionCwd = previousExecutionCwd;
+			this.#fallbackRuntimeOnly = previousFallbackRuntimeOnly;
+			this.#draftOnlySessionCleanupArmed = previousDraftOnlySessionCleanupArmed;
+			throw error;
+		}
+		// No breadcrumb re-record: the transcript never moved, so the existing
+		// home-keyed breadcrumb stays accurate. Pointing it at a disposable
+		// worktree would pollute `--continue` discovery after the worktree is
+		// removed.
+	}
+
+	/**
+	 * Subscribe to execution-directory fallbacks: a resumed session's saved
+	 * `executionCwd` was missing or unusable, so the session runs at its
+	 * canonical home with the guard closed. Delivery mirrors
+	 * {@link onPersistenceError}: late subscribers receive the latched notice.
+	 */
+	onExecutionCwdFallback(cb: (fallback: ExecutionCwdFallback) => void): () => void {
+		this.#executionCwdFallbackCallbacks.add(cb);
+		const latched = this.#executionCwdFallback;
+		if (latched) cb(latched);
+		return () => {
+			this.#executionCwdFallbackCallbacks.delete(cb);
+		};
+	}
+
+	#raiseExecutionCwdFallback(missingCwd: string): void {
+		const fallback: ExecutionCwdFallback = { missingCwd, home: this.getSessionHome() };
+		this.#executionCwdFallback = fallback;
+		for (const cb of this.#executionCwdFallbackCallbacks) cb(fallback);
+	}
+
 	setCwdWithoutRelocation(newCwd: string): void {
 		const resolvedCwd = path.resolve(newCwd);
 		if (resolvedCwd === path.resolve(this.#executionCwd)) {
@@ -2393,7 +2559,14 @@ export class SessionManager {
 		this.#executionCwd = path.resolve(recordedCwd);
 		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
 		this.#fallbackRuntimeOnly = false;
-		if (this.#sessionFile) this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
+		// An intentional execution binding survives re-anchoring: a bound session
+		// must not be dragged from its worktree back to the home by a startup
+		// rescope. The binding was verified enterable when the header loaded.
+		const saved = this.#header.executionCwd;
+		if (saved && path.resolve(saved) !== path.resolve(this.#executionCwd)) {
+			this.#executionCwd = path.resolve(saved);
+		}
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.getSessionHome(), this.#sessionFile);
 	}
 
 	/**
@@ -3211,8 +3384,16 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		const newSessionId = mintSessionId();
+		// Same anchor rules as `#resetToNewSession`/`fork`: a runtime-only
+		// fallback anchors at the live execution cwd, a bound session anchors at
+		// the canonical home with the live binding carried over.
+		const anchor = this.#fallbackRuntimeOnly ? this.#executionCwd : this.getSessionHome();
 		this.#reconcileSessionDirForFallback();
-		const sessionHome = this.#executionCwd;
+		const sessionHome = anchor;
+		const liveExecutionCwd =
+			this.#header.executionCwd && path.resolve(this.#header.executionCwd) === path.resolve(this.#executionCwd)
+				? this.#header.executionCwd
+				: undefined;
 		const newSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${newSessionId}.jsonl`);
 		const header: SessionHeader = {
 			type: "session",
@@ -3220,6 +3401,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: sessionHome,
+			executionCwd: liveExecutionCwd,
 			title: this.#sessionName,
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
@@ -3263,7 +3445,7 @@ export class SessionManager {
 		this.#sessionFile = newSessionFile;
 		this.#expectedDiskSize = null;
 		this.#rewriteSynchronously();
-		this.#rememberBreadcrumb(this.#executionCwd, newSessionFile);
+		this.#rememberBreadcrumb(sessionHome, newSessionFile);
 		return newSessionFile;
 	}
 

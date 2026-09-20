@@ -1335,8 +1335,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
-	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
+	// A supplied manager may carry an intentional execution binding (`/wt`): its
+	// live cwd is the authoritative execution directory, so every cwd-scoped
+	// discovery below (settings, skills, extensions, tools) scopes to it — or to
+	// the session home when a saved worktree fell back. Unbound callers keep the
+	// legacy `options.cwd` behavior untouched.
+	const cwd =
+		options.sessionManager && options.sessionManager.getExecutionCwd()
+			? options.sessionManager.getCwd()
+			: (options.cwd ?? getProjectDir());
 	const eventBus = options.eventBus ?? new EventBus();
 	const subagentEventBus = options.subagentEventBus ?? new EventBus();
 

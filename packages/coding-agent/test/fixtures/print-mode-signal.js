@@ -11,6 +11,7 @@ const session = {
 		buildSessionContext: () => ({ messages: [] }),
 		getEntries: () => [],
 		onPersistenceError: () => () => {},
+	onExecutionCwdFallback: () => () => {},
 	},
 	setTextOutputCommitted() {},
 	async prompt() {
