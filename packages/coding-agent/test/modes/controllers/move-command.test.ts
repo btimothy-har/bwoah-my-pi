@@ -9,7 +9,13 @@ import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-work
 import { Container } from "@oh-my-pi/pi-tui";
 
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
-	const state = { cwd: sourceDir, movedTo: undefined as string | undefined, completedBtwVisible: true };
+	const state = {
+		cwd: sourceDir,
+		home: sourceDir,
+		executionCwd: undefined as string | undefined,
+		movedTo: undefined as string | undefined,
+		completedBtwVisible: true,
+	};
 	const present = vi.fn();
 	const applyCwdChange = vi.fn(async (cwd: string) => {
 		expect(state.cwd).toBe(cwd);
@@ -18,6 +24,10 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 	const moveSession = vi.fn(async (cwd: string) => {
 		state.cwd = cwd;
 		state.movedTo = cwd;
+	});
+	const setExecutionCwd = vi.fn(async (cwd: string) => {
+		state.executionCwd = cwd;
+		state.cwd = cwd;
 	});
 	const sessionDir = `${sourceDir}/.sessions`;
 	const captureState = vi.fn(() => ({ cwd: state.cwd, sessionDir, movedTo: state.movedTo }));
@@ -36,9 +46,11 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		return moved;
 	});
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: { isStreaming: false, moveSession, setExecutionCwd },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getSessionHome: () => state.home,
+			getExecutionCwd: () => state.executionCwd,
 			captureState,
 			restoreState,
 			rollbackMove,
@@ -46,6 +58,9 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		},
 		settings: {
 			flush: vi.fn(settingsFlush ?? (async () => {})),
+			// The real /wt flow consults worktree.cleanSource after binding; the
+			// fixture keeps it disabled so cleaning never runs in these tests.
+			get: () => false,
 		},
 		showHookCustom: vi.fn(),
 		showHookConfirm: vi.fn(),
@@ -95,12 +110,12 @@ describe("CommandController /move", () => {
 		}
 	});
 
-	it("holds one migration gate through worktree creation, relocation and source cleanup", async () => {
+	it("holds one migration gate through worktree creation and execution binding", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-lifecycle-"));
 		const creating = Promise.withResolvers<void>();
 		const created = Promise.withResolvers<void>();
-		const relocating = Promise.withResolvers<void>();
-		const relocated = Promise.withResolvers<void>();
+		const binding = Promise.withResolvers<void>();
+		const bound = Promise.withResolvers<void>();
 		let command: Promise<void> | undefined;
 		try {
 			const { ctx, state } = createMoveContext(sourceDir);
@@ -125,36 +140,34 @@ describe("CommandController /move", () => {
 				await fs.mkdir(target);
 				return { path: target, branch: "feature" };
 			});
-			ctx.session.moveSession = async cwd => {
+			ctx.session.setExecutionCwd = vi.fn(async cwd => {
 				expect(held).toBe(true);
-				relocating.resolve();
-				await relocated.promise;
+				binding.resolve();
+				await bound.promise;
+				state.executionCwd = cwd;
 				state.cwd = cwd;
-			};
-			const cleanup = vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured").mockImplementation(async () => {
-				expect(held).toBe(true);
-				expect(state.cwd).toBe(target);
-				return { cleaned: false };
 			});
 			command = new CommandController(ctx).handleWorktreeCommand("feature");
 			await creating.promise;
 			expect(held).toBe(true);
 			expect(commits).toBe(0);
 			created.resolve();
-			await relocating.promise;
+			await binding.promise;
 			expect(held).toBe(true);
 			expect(state.cwd).toBe(sourceDir);
-			expect(cleanup).not.toHaveBeenCalled();
-			relocated.resolve();
+			bound.resolve();
 			await command;
 			expect(held).toBe(false);
 			expect(commits).toBe(1);
 			expect(state.cwd).toBe(target);
+			expect(state.executionCwd).toBe(target);
+			// The transcript is never relocated by /wt.
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(ctx.present).toHaveBeenCalled();
 			expect(ctx.statusContainer.children).toHaveLength(0);
 		} finally {
 			created.resolve();
-			relocated.resolve();
+			bound.resolve();
 			await command;
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}

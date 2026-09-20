@@ -168,6 +168,61 @@ async function relocateHeadlessSession(
 	return undefined;
 }
 
+/**
+ * Bind an execution worktree for a headless session (`/wt`): flush settings,
+ * record the execution directory on the session without moving the transcript,
+ * re-scope the process, rolling back on failure. Returns a result when the
+ * activation did not complete; `undefined` on success so the caller can report
+ * its own confirmation. The canonical home, session id, transcript, and
+ * artifacts stay in place.
+ */
+async function activateHeadlessExecutionWorktree(
+	runtime: SlashCommandRuntime,
+	resolvedPath: string,
+): Promise<SlashCommandResult | undefined> {
+	if (resolvedPath === path.resolve(runtime.sessionManager.getCwd())) return undefined;
+	try {
+		await runtime.settings.flush();
+	} catch (err) {
+		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
+	}
+	const previousState = runtime.sessionManager.captureState();
+	try {
+		await runtime.session.setExecutionCwd(resolvedPath);
+	} catch (err) {
+		return usage(`Worktree activation failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		await rescopeHeadlessToCwd(runtime, resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+			await rescopeHeadlessToCwd(runtime, previousState.cwd);
+		} catch (rollbackError) {
+			const actual = runtime.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				await rescopeHeadlessToCwd(runtime, actual);
+				realigned = true;
+			} catch {}
+			if (!realigned) {
+				return fatalMoveFailure(
+					`Worktree activation failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+					runtime,
+				);
+			}
+			return usage(
+				`Worktree activation failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+				runtime,
+			);
+		}
+		return usage(`Worktree activation failed: ${errorMessage(err)}`, runtime);
+	}
+	await runtime.notifyConfigChanged?.();
+	await runtime.notifyTitleChanged?.();
+	return undefined;
+}
+
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
@@ -760,26 +815,26 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "wt",
 		aliases: ["worktree"],
 		icon: "folderMove",
-		description: "Move this session into a new worktree, changes included",
-		acpDescription: "Move this session into a new worktree, changes included",
+		description: "Bind this session to a new worktree for execution, changes included",
+		acpDescription: "Bind this session to a new worktree for execution, changes included",
 		inlineHint: "[<branch>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot create a worktree while streaming.", runtime);
 			const branch = command.args.trim() || defaultSessionWorktreeBranch();
-			const sourceCwd = runtime.sessionManager.getCwd();
+			const sourceHome = runtime.sessionManager.getSessionHome();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch);
+				worktree = await createSessionWorktree(sourceHome, runtime.settings, branch);
 			} catch (err) {
 				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
 			}
-			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			const failure = await activateHeadlessExecutionWorktree(runtime, worktree.path);
 			if (failure) return failure;
-			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
+			const cleanup = await cleanSourceCheckoutIfConfigured(sourceHome, runtime.settings);
 			if (cleanup.errorMessage !== undefined) {
 				await runtime.output(
-					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,
+					`Warning: Worktree bound, but cleaning the canonical home failed: ${cleanup.errorMessage}`,
 				);
 			}
 			await runtime.output(formatSessionWorktreeSummary(worktree, cleanup.cleaned));

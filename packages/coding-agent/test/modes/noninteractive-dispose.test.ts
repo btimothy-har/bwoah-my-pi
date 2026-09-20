@@ -38,6 +38,7 @@ describe("print mode disposes the session before terminating", () => {
 				getEntries: () => [],
 				// Print mode subscribes to store failures (issue #11493).
 				onPersistenceError: () => () => {},
+				onExecutionCwdFallback: () => () => {},
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
@@ -116,6 +117,7 @@ describe("print mode disposes the session before terminating", () => {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onExecutionCwdFallback: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
 			prepareForHeadlessAdvisorDrain: () => {},

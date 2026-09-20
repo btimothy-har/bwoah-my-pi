@@ -41,6 +41,15 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	/**
+	 * Intentional execution directory bound by `/wt` when it differs from the
+	 * canonical home `cwd`. Absolute. Absent on sessions that never activated
+	 * an execution worktree (and after a relocation re-anchored the home).
+	 * Restore/resume adopts this as the live execution directory when enterable;
+	 * a missing path falls back to `cwd` and raises an
+	 * {@link ExecutionCwdFallback} notice without recreating anything.
+	 */
+	executionCwd?: string;
+	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
 	 * See {@link SessionWorkspace} in `./session-workspace`.

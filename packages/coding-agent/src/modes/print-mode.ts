@@ -216,6 +216,13 @@ async function runPrintModeCore(
 		persistenceFailure = error;
 		writeStderrLine(formatPersistenceFailure(error.message));
 	});
+	// A resumed session whose saved execution worktree vanished keeps stdout
+	// parseable; the fallback report goes to stderr only.
+	session.sessionManager.onExecutionCwdFallback(fallback => {
+		writeStderrLine(
+			`Execution worktree ${fallback.missingCwd} is not accessible; running in ${fallback.home} instead. Run /wt <branch> to activate an execution worktree.`,
+		);
+	});
 
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {

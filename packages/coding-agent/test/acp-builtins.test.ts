@@ -43,6 +43,7 @@ interface FakeAcpBuiltinSession {
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
+	setExecutionCwd(executionCwd: string): Promise<void>;
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
 	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
@@ -126,6 +127,10 @@ function createRuntime() {
 			if (!fakeSessionManager) throw new Error("fake session manager not initialized");
 			await fakeSessionManager.moveTo(newCwd);
 		},
+		async setExecutionCwd(executionCwd: string) {
+			if (!fakeSessionManager) throw new Error("fake session manager not initialized");
+			await fakeSessionManager.setExecutionCwd(executionCwd);
+		},
 		markMovedFromEmptySessionFile(sessionFile: string) {
 			this._movedFromEmptySessionFile = path.resolve(sessionFile);
 		},
@@ -171,6 +176,8 @@ function createRuntime() {
 	const fakeSessionManager = {
 		_sessionFile: undefined as string | undefined,
 		_cwd: "/tmp/project",
+		_home: "/tmp/project",
+		_executionCwd: undefined as string | undefined,
 		_entries: [] as { type: string }[],
 		_customEntries: [] as Array<{ customType: string; data: unknown }>,
 		_movedTo: undefined as string | undefined,
@@ -199,17 +206,37 @@ function createRuntime() {
 		async moveTo(newCwd: string) {
 			this._cwd = newCwd;
 			this._movedTo = newCwd;
+			// Relocation re-anchors the home and drops a stale execution binding.
+			this._home = newCwd;
+			this._executionCwd = undefined;
 		},
 		captureState() {
-			return { cwd: this._cwd, sessionDir: "/tmp/fake-sessions", movedTo: this._movedTo };
+			return {
+				cwd: this._cwd,
+				sessionDir: "/tmp/fake-sessions",
+				movedTo: this._movedTo,
+				executionCwd: this._executionCwd,
+			};
 		},
-		restoreState(snapshot: { cwd: string }) {
+		restoreState(snapshot: { cwd: string; executionCwd?: string }) {
 			this._cwd = snapshot.cwd;
 			this._movedTo = snapshot.cwd;
+			this._executionCwd = snapshot.executionCwd;
 		},
-		async rollbackMove(snapshot: { cwd: string; sessionDir: string }) {
+		async rollbackMove(snapshot: { cwd: string; sessionDir: string; executionCwd?: string }) {
 			await this.moveTo(snapshot.cwd);
 			this.restoreState(snapshot);
+		},
+		getSessionHome(): string {
+			// Unbound sessions keep home == cwd, matching the real invariant.
+			return this._executionCwd ? this._home : this._cwd;
+		},
+		getExecutionCwd(): string | undefined {
+			return this._executionCwd;
+		},
+		async setExecutionCwd(executionCwd: string) {
+			this._executionCwd = path.resolve(executionCwd);
+			this._cwd = this._executionCwd;
 		},
 		async setSessionFile(sessionFile: string) {
 			this._sessionFile = path.resolve(sessionFile);
@@ -914,7 +941,7 @@ describe("wave 3 commands", () => {
 		}
 	});
 
-	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+	it("/wt: creates a worktree carrying uncommitted changes and binds execution to it without relocating the session", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
 		const repoDir = path.join(root, "repo");
@@ -941,22 +968,28 @@ describe("wave 3 commands", () => {
 			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
 			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
 			fakeSessionManager._cwd = repoDir;
+			fakeSessionManager._home = repoDir;
 
 			const result = await executeAcpBuiltinSlashCommand("/wt feature/x", runtime);
 
 			expect(result).toEqual({ consumed: true });
-			const movedTo = fakeSessionManager._movedTo;
-			expect(movedTo).toBeDefined();
-			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
-			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/x`);
-			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
-			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
-			const headRef = (await Bun.file(path.join(movedTo!, ".git")).text()).trim();
+			const bound = fakeSessionManager._executionCwd;
+			expect(bound).toBeDefined();
+			expect(bound!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			// The transcript never moved: no relocation was recorded.
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(fakeSessionManager.getCwd()).toBe(bound!);
+			expect(fakeSessionManager.getSessionHome()).toBe(repoDir);
+			expect(output[0]).toContain(`Now executing in worktree ${bound} on branch feature/x`);
+			expect(await Bun.file(path.join(bound!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(bound!, "untracked.txt")).text()).toBe("new\n");
+			const headRef = (await Bun.file(path.join(bound!, ".git")).text()).trim();
 			expect(headRef.startsWith("gitdir: ")).toBe(true);
 			const branches = await git("worktree", "list", "--porcelain");
 			expect(branches).toContain("branch refs/heads/feature/x");
 			// The source checkout is untouched.
 			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(repoDir, "untracked.txt")).text()).toBe("new\n");
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
 		} finally {
 			setProjectDir(originalProjectDir);
@@ -966,7 +999,65 @@ describe("wave 3 commands", () => {
 		}
 	});
 
-	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+	it("/wt: repeated activation rebinds execution to a fresh worktree while the home stays fixed", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+			fakeSessionManager._home = repoDir;
+
+			const first = await executeAcpBuiltinSlashCommand("/wt feature/first", runtime);
+			expect(first).toEqual({ consumed: true });
+			const firstBound = fakeSessionManager._executionCwd;
+			expect(firstBound).toBeDefined();
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/second", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const bound = fakeSessionManager._executionCwd;
+			expect(bound).toBeDefined();
+			expect(bound).not.toBe(firstBound);
+			expect(bound!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output.at(-1)).toContain(`Now executing in worktree ${bound} on branch feature/second`);
+			// The transcript never moved on either activation.
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(fakeSessionManager.getCwd()).toBe(bound!);
+			expect(fakeSessionManager.getSessionHome()).toBe(repoDir);
+			// The home keeps every uncommitted change across both activations.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(repoDir, "untracked.txt")).text()).toBe("new\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: with worktree.cleanSource=true, resets the canonical home after binding while the worktree carries the changes", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		runtime.settings.override("worktree.cleanSource", true);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
@@ -994,25 +1085,28 @@ describe("wave 3 commands", () => {
 			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
 			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
 			fakeSessionManager._cwd = repoDir;
+			fakeSessionManager._home = repoDir;
 
 			const result = await executeAcpBuiltinSlashCommand("/wt feature/clean", runtime);
 
 			expect(result).toEqual({ consumed: true });
-			const movedTo = fakeSessionManager._movedTo;
-			expect(movedTo).toBeDefined();
-			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
-			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/clean`);
-			expect(output[0]).toContain("uncommitted changes moved, source checkout cleaned");
-			// The worktree carries all uncommitted changes.
-			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
-			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
-			// The source checkout was reset and cleaned.
+			const bound = fakeSessionManager._executionCwd;
+			expect(bound).toBeDefined();
+			expect(bound!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			// The worktree carries all uncommitted changes: cleaning the home
+			// loses nothing.
+			expect(await Bun.file(path.join(bound!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(bound!, "untracked.txt")).text()).toBe("new\n");
+			// The canonical home was reset to HEAD after binding.
+			expect(output.at(-1)).toContain("Session home reset to HEAD.");
 			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("committed\n");
 			expect(await Bun.file(path.join(repoDir, "untracked.txt")).exists()).toBe(false);
-			// Ignored files survive in the source checkout.
+			// Ignored files survive in the home.
 			expect(await Bun.file(path.join(repoDir, "build/out.txt")).text()).toBe("ignored\n");
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
-			expect(await git("status", "--porcelain")).toBe("");
+			// The transcript never moved.
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(fakeSessionManager.getSessionHome()).toBe(repoDir);
 		} finally {
 			setProjectDir(originalProjectDir);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;

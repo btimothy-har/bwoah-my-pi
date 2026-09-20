@@ -806,12 +806,24 @@ export function registerRpcPersistenceSurface(
 	output: (frame: object) => void,
 	onFailure?: (error: Error) => void,
 ): () => void {
-	return session.sessionManager.onPersistenceError(error => {
+	const unsubscribePersistence = session.sessionManager.onPersistenceError(error => {
 		onFailure?.(error);
 		const message = formatPersistenceFailure(error.message);
 		output({ type: "notice", level: "error", message, source: "session-persistence" });
 		process.stderr.write(`${message}\n`);
 	});
+	// A missing execution worktree is reported as a warning notice frame; the
+	// stderr mirror keeps text clients informed without touching the JSON
+	// stdout channel's frame stream.
+	const unsubscribeExecutionFallback = session.sessionManager.onExecutionCwdFallback(fallback => {
+		const message = `Execution worktree ${fallback.missingCwd} is not accessible; running in ${fallback.home} instead. Run /wt <branch> to activate an execution worktree.`;
+		output({ type: "notice", level: "warning", message, source: "execution-cwd-fallback" });
+		process.stderr.write(`${message}\n`);
+	});
+	return () => {
+		unsubscribePersistence();
+		unsubscribeExecutionFallback();
+	};
 }
 
 /**

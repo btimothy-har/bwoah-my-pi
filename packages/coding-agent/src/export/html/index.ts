@@ -185,6 +185,8 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 	if (!header) return null;
 	const exported = { ...header };
 	delete exported.previousSessionFiles;
+	// Local execution routing: meaningless outside this machine's session store.
+	delete exported.executionCwd;
 	return exported;
 }
 
