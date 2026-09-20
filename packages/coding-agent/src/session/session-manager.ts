@@ -104,6 +104,8 @@ const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 
+export type SessionFileLoadDisposition = "same-context" | "context-change";
+
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
@@ -1771,16 +1773,16 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/** Switch to a session file and report whether its logical context changed. */
+	setSessionFile(sessionFile: string): Promise<SessionFileLoadDisposition> {
+		return this.#setSessionFile(sessionFile);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
 		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
-	): Promise<void> {
+	): Promise<SessionFileLoadDisposition> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -1820,7 +1822,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
-			return;
+			return "context-change";
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
@@ -1873,6 +1875,7 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		return unchangedSessionContext ? "same-context" : "context-change";
 	}
 
 	/**
