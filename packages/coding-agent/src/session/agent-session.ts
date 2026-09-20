@@ -9563,13 +9563,14 @@ export class AgentSession {
 				// still observe message_end, then mute before swapping files.
 				await this.#advisors.drainAndDetachRecorders();
 			}
-			await this.sessionManager.setSessionFile(sessionPath);
+			const sessionFileDisposition = await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
-			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
+			const loadedRecordedCwd = this.sessionManager.getRecordedCwd();
+			const recordedCwd = loadedRecordedCwd ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
-			} else {
+			} else if (sessionFileDisposition === "context-change") {
 				if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}

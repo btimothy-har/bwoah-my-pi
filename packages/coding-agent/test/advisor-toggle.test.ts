@@ -620,9 +620,10 @@ describe("AgentSession advisor toggle", () => {
 		await writeAdvisorTranscript(targetSessionFile, "__advisor.jsonl", [0.25]);
 		const setSessionFile = sessionManager.setSessionFile.bind(sessionManager);
 		vi.spyOn(sessionManager, "setSessionFile").mockImplementation(async file => {
-			await setSessionFile(file);
+			const disposition = await setSessionFile(file);
 			// Reproduce an old advisor finishing after the target file became active.
 			appendAdvisorCost(advisor, 9, 2);
+			return disposition;
 		});
 
 		expect(await session.switchSession(targetSessionFile)).toBe(true);

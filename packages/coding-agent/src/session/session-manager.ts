@@ -104,6 +104,8 @@ const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 
+export type SessionFileLoadDisposition = "same-context" | "context-change";
+
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
@@ -1771,19 +1773,23 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/** Switch to a session file and report whether its logical context changed. */
+	setSessionFile(sessionFile: string): Promise<SessionFileLoadDisposition> {
+		return this.#setSessionFile(sessionFile);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
 		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
-	): Promise<void> {
+	): Promise<SessionFileLoadDisposition> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+
+		const previousSessionFile = this.#sessionFile;
+		const previousSessionId = this.#sessionId;
+		const previousHeaderCwd = this.#header?.cwd ? path.resolve(this.#header.cwd) : undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
@@ -1816,7 +1822,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
-			return;
+			return "context-change";
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
@@ -1824,7 +1830,16 @@ export class SessionManager {
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
-		// Adopt the loaded session's working directory only when it is verifiably
+		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
+		const unchangedSessionContext =
+			previousSessionFile !== undefined &&
+			path.resolve(previousSessionFile) === resolvedSessionFile &&
+			previousSessionId === header.id &&
+			previousHeaderCwd === headerCwd;
+
+		// Reloading the same logical conversation refreshes transcript content
+		// without changing its established execution binding. Other contexts
+		// adopt the loaded session's working directory only when it is verifiably
 		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
 		// session from another project must re-point cwd/sessionDir at that
 		// project — but a deleted OR permission-blocked directory (macOS TCC
@@ -1832,19 +1847,20 @@ export class SessionManager {
 		// (extension UI, RPC) would otherwise track a directory the process
 		// cannot enter. Keep the current cwd so the session stays where the
 		// user already is.
-		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
-			this.#executionCwd = headerCwd;
-			this.#sessionDir = path.dirname(resolvedSessionFile);
-			this.#fallbackRuntimeOnly = false;
-			this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
-		} else if (headerCwd && headerCwd !== path.resolve(this.#executionCwd)) {
-			// Header cwd not enterable: keep runtime cwd but mark fallback
-			// so workspace changes stay runtime-only until the transcript
-			// is relocated.
-			this.#fallbackRuntimeOnly = true;
-		} else {
-			this.#fallbackRuntimeOnly = false;
+		if (!unchangedSessionContext) {
+			if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
+				this.#executionCwd = headerCwd;
+				this.#sessionDir = path.dirname(resolvedSessionFile);
+				this.#fallbackRuntimeOnly = false;
+				this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
+			} else if (headerCwd && headerCwd !== path.resolve(this.#executionCwd)) {
+				// Header cwd not enterable: keep runtime cwd but mark fallback
+				// so workspace changes stay runtime-only until the transcript
+				// is relocated.
+				this.#fallbackRuntimeOnly = true;
+			} else {
+				this.#fallbackRuntimeOnly = false;
+			}
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
@@ -1859,6 +1875,7 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		return unchangedSessionContext ? "same-context" : "context-change";
 	}
 
 	/**
