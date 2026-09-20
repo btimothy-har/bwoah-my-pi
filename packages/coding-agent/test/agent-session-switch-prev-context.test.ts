@@ -133,11 +133,12 @@ describe("AgentSession.switchSession previous-context build", () => {
 
 	it("builds the previous display context for same-session reloads", async () => {
 		const tempDir = TempDir.createSync("@pi-switch-prev-ctx-reload-");
-		tempDirs.push(tempDir);
+		const workspaceDir = TempDir.createSync("@pi-switch-prev-ctx-workspace-");
+		tempDirs.push(tempDir, workspaceDir);
 
 		const { session, sessionManager } = buildSession(tempDir);
 		sessionManager.appendMessage({ role: "user", content: "current", timestamp: 1 });
-		await sessionManager.flush();
+		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		expect(sessionFile).toBeString();
 
@@ -150,6 +151,18 @@ describe("AgentSession.switchSession previous-context build", () => {
 			restore();
 		}
 
+		expect(
+			session.agent.state.messages.some(message => message.role === "user" && message.content === "current"),
+		).toBe(true);
+		await sessionManager.addWorkspaceDirectory(workspaceDir.path());
+		await sessionManager.flush();
+		const reopened = await SessionManager.open(sessionFile!);
+		try {
+			expect(reopened.getAdditionalDirectories()).toEqual([workspaceDir.path()]);
+		} finally {
+			await reopened.close();
+		}
+
 		// Same-session reload must snapshot the pre-reload context so
 		// `#didSessionMessagesChange` can detect rollback edits.
 		expect(calls).toEqual([
@@ -157,6 +170,54 @@ describe("AgentSession.switchSession previous-context build", () => {
 			{ sessionFile: sessionFile!, transcript: undefined },
 		]);
 	});
+
+	it.each(["id", "cwd"] as const)(
+		"rejects callback-free same-path switches when the header %s changes",
+		async changedField => {
+			const homeDir = TempDir.createSync(`@pi-switch-same-path-${changedField}-home-`);
+			const executionDir = TempDir.createSync(`@pi-switch-same-path-${changedField}-execution-`);
+			const foreignDir = TempDir.createSync(`@pi-switch-same-path-${changedField}-foreign-`);
+			tempDirs.push(homeDir, executionDir, foreignDir);
+
+			const { session, sessionManager } = buildSession(homeDir);
+			sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+			await sessionManager.ensureOnDisk();
+			sessionManager.setCwdWithoutRelocation(executionDir.path());
+			const sessionFile = sessionManager.getSessionFile();
+			expect(sessionFile).toBeString();
+			const originalSessionId = sessionManager.getSessionId();
+			const originalBytes = await Bun.file(sessionFile!).text();
+			const lines = originalBytes.split("\n");
+			const headerIndex = lines.findIndex(line => {
+				try {
+					const parsed = JSON.parse(line) as Record<string, unknown>;
+					return parsed.type === "session";
+				} catch {
+					return false;
+				}
+			});
+			if (headerIndex === -1) throw new Error("Expected a generated session header");
+			const header = JSON.parse(lines[headerIndex]!) as Record<string, unknown>;
+			if (changedField === "id") {
+				header.id = `${String(header.id)}-replacement`;
+			} else {
+				header.cwd = foreignDir.path();
+			}
+			lines[headerIndex] = JSON.stringify(header);
+			await Bun.write(sessionFile!, lines.join("\n"));
+
+			try {
+				expect(await session.switchSession(sessionFile!)).toBe(false);
+				expect(session.sessionId).toBe(originalSessionId);
+				expect(sessionManager.getSessionId()).toBe(originalSessionId);
+				expect(sessionManager.getSessionHome()).toBe(homeDir.path());
+				expect(sessionManager.getCwd()).toBe(executionDir.path());
+				expect(sessionManager.getSessionFile()).toBe(sessionFile);
+			} finally {
+				await Bun.write(sessionFile!, originalBytes);
+			}
+		},
+	);
 
 	it("restores the previous session when cwd adoption is rejected", async () => {
 		const sourceDir = TempDir.createSync("@pi-switch-cwd-source-");
@@ -278,23 +339,33 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(session.isDisposed).toBe(true);
 	});
 	it("rejects reload when the session-before-switch hook cancels", async () => {
-		const tempDir = TempDir.createSync("@pi-switch-reload-cancel-");
-		tempDirs.push(tempDir);
+		const homeDir = TempDir.createSync("@pi-switch-reload-cancel-home-");
+		const executionDir = TempDir.createSync("@pi-switch-reload-cancel-execution-");
+		tempDirs.push(homeDir, executionDir);
 
 		const emit = vi.fn(async () => ({ cancel: true }));
 		const extensionRunner = {
 			hasHandlers: (eventType: string) => eventType === "session_before_switch",
 			emit,
 		} as unknown as ExtensionRunner;
-		const { session, sessionManager } = buildSession(tempDir, extensionRunner);
+		const { session, sessionManager } = buildSession(homeDir, extensionRunner);
 		sessionManager.appendMessage({ role: "user", content: "current", timestamp: 1 });
-		await sessionManager.flush();
+		await sessionManager.ensureOnDisk();
+		sessionManager.setCwdWithoutRelocation(executionDir.path());
 		const sessionFile = session.sessionFile;
+		const sessionId = session.sessionId;
 		expect(sessionFile).toBeString();
 
-		await expect(session.reload()).rejects.toThrow("Session reload cancelled");
+		await expect(session.reload()).rejects.toBeInstanceOf(Error);
 		expect(emit).toHaveBeenCalledWith(
 			expect.objectContaining({ type: "session_before_switch", targetSessionFile: sessionFile }),
 		);
+		expect(session.sessionId).toBe(sessionId);
+		expect(session.sessionFile).toBe(sessionFile);
+		expect(sessionManager.getSessionId()).toBe(sessionId);
+		expect(sessionManager.getSessionHome()).toBe(homeDir.path());
+		expect(sessionManager.getRecordedCwd()).toBe(homeDir.path());
+		expect(sessionManager.getCwd()).toBe(executionDir.path());
+		expect(sessionManager.getSessionFile()).toBe(sessionFile);
 	});
 });

@@ -1785,6 +1785,10 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 
+		const previousSessionFile = this.#sessionFile;
+		const previousSessionId = this.#sessionId;
+		const previousHeaderCwd = this.#header?.cwd ? path.resolve(this.#header.cwd) : undefined;
+
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		const sourceSize =
@@ -1824,7 +1828,16 @@ export class SessionManager {
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
-		// Adopt the loaded session's working directory only when it is verifiably
+		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
+		const unchangedSessionContext =
+			previousSessionFile !== undefined &&
+			path.resolve(previousSessionFile) === resolvedSessionFile &&
+			previousSessionId === header.id &&
+			previousHeaderCwd === headerCwd;
+
+		// Reloading the same logical conversation refreshes transcript content
+		// without changing its established execution binding. Other contexts
+		// adopt the loaded session's working directory only when it is verifiably
 		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
 		// session from another project must re-point cwd/sessionDir at that
 		// project — but a deleted OR permission-blocked directory (macOS TCC
@@ -1832,19 +1845,20 @@ export class SessionManager {
 		// (extension UI, RPC) would otherwise track a directory the process
 		// cannot enter. Keep the current cwd so the session stays where the
 		// user already is.
-		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
-			this.#executionCwd = headerCwd;
-			this.#sessionDir = path.dirname(resolvedSessionFile);
-			this.#fallbackRuntimeOnly = false;
-			this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
-		} else if (headerCwd && headerCwd !== path.resolve(this.#executionCwd)) {
-			// Header cwd not enterable: keep runtime cwd but mark fallback
-			// so workspace changes stay runtime-only until the transcript
-			// is relocated.
-			this.#fallbackRuntimeOnly = true;
-		} else {
-			this.#fallbackRuntimeOnly = false;
+		if (!unchangedSessionContext) {
+			if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
+				this.#executionCwd = headerCwd;
+				this.#sessionDir = path.dirname(resolvedSessionFile);
+				this.#fallbackRuntimeOnly = false;
+				this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
+			} else if (headerCwd && headerCwd !== path.resolve(this.#executionCwd)) {
+				// Header cwd not enterable: keep runtime cwd but mark fallback
+				// so workspace changes stay runtime-only until the transcript
+				// is relocated.
+				this.#fallbackRuntimeOnly = true;
+			} else {
+				this.#fallbackRuntimeOnly = false;
+			}
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);

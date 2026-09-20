@@ -432,7 +432,7 @@ describe("createAgentSession cwd after /move", () => {
 		}
 	});
 
-	it("keeps native execution on the divergent cwd while persistence stays home", async () => {
+	it("preserves the divergent cwd across reload while persistence stays home", async () => {
 		const fixture = await createDivergentNativeFixture(false);
 		try {
 			const startupEvent = await withTimeout(fixture.startup, 10_000, "Timed out waiting for native LSP warmup");
@@ -443,6 +443,10 @@ describe("createAgentSession cwd after /move", () => {
 			expect(fixture.lspServers).toEqual([
 				expect.objectContaining({ name: "fake-native", status: "ready", fileTypes: [".native"] }),
 			]);
+
+			const originalSessionId = fixture.session.sessionId;
+			await fixture.session.reload();
+			expect(fixture.session.sessionId).toBe(originalSessionId);
 
 			const bashTool = fixture.session.getToolByName("bash");
 			const readTool = fixture.session.getToolByName("read");
@@ -576,6 +580,7 @@ describe("createAgentSession cwd after /move", () => {
 				expect.objectContaining({ name: "fake-native", status: "available", fileTypes: [".native"] }),
 			]);
 			expect(await lspClient.getActiveOrPendingClient(fixture.serverConfig, fixture.execution)).toBeUndefined();
+			await fixture.session.reload();
 			const lspTool = fixture.session.getToolByName("lsp");
 			if (!lspTool) throw new Error("Expected native lsp tool");
 			const contextResult = await lspTool.execute("native-cwd-lazy-lsp", {
