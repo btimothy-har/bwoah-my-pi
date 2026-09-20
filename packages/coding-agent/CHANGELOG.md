@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed `/wt` execution bindings silently adopting a directory that now belongs to a different Git repository; binding and restore now verify the candidate shares the session home's repository and fall back to the home with the existing unavailable-worktree notice ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed the advisor treating a fork's parent repository metadata as the intended pull request target ([Bwoah My Pi #3](https://github.com/btimothy-har/bwoah-my-pi/pull/3) by [@btimothy-har](https://github.com/btimothy-har)).
 - Fixed resumed sessions with an unavailable recorded project coupling tool execution to transcript storage; tools and LSP now use the active working directory while the transcript and artifacts remain in the session's persistent home ([Bwoah My Pi #2](https://github.com/btimothy-har/bwoah-my-pi/pull/2) by [@btimothy-har](https://github.com/btimothy-har)).
 - Fixed same-session reloads re-adopting the persistent session home as the execution directory; tools and LSP now remain bound to the active working directory across reloads ([Bwoah My Pi #6](https://github.com/btimothy-har/bwoah-my-pi/pull/6) by [@btimothy-har](https://github.com/btimothy-har)).
