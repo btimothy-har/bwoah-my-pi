@@ -48,10 +48,9 @@ export interface SessionHeader {
 	 * enterable and — for Git-backed homes — verifiably belonging to the
 	 * home's repository (a linked worktree of the same repository passes; an
 	 * independent repository occupying the path does not). A missing, unusable,
-	 * or foreign path falls back to `cwd` and raises an
-	 * {@link ExecutionCwdFallback} notice without recreating anything; the
-	 * saved field is retained for diagnosis until explicit activation or
-	 * relocation replaces it.
+	 * or foreign path falls back to `cwd`, raises an
+	 * {@link ExecutionCwdFallback} notice without recreating anything, and
+	 * persists the header without the rejected binding.
 	 */
 	executionCwd?: string;
 	/**

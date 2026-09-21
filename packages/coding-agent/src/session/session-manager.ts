@@ -1943,11 +1943,11 @@ export class SessionManager {
 		// Intentional execution binding (see `executionCwd` on SessionHeader):
 		// restore the saved execution directory after the home adoption above.
 		// A same-context reload keeps its established binding untouched. A
-		// missing/unusable saved E runs at home with the stale field retained
-		// until explicit activation or relocation replaces it — never recreate
-		// the worktree automatically. The fallback notice is deferred until the
-		// header is applied: #raiseExecutionCwdFallback reports the home via
-		// getSessionHome(), which still describes the PREVIOUS session here.
+		// missing/unusable saved E runs at home and discards the rejected
+		// binding without recreating the worktree. The fallback notice is
+		// deferred until the header is applied: #raiseExecutionCwdFallback
+		// reports the home via getSessionHome(), which still describes the
+		// PREVIOUS session here.
 		let pendingExecutionCwdFallback: string | undefined;
 		if (!unchangedSessionContext) {
 			if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
@@ -1981,6 +1981,7 @@ export class SessionManager {
 					// moved out of the home bucket.
 				} else {
 					pendingExecutionCwdFallback = header.executionCwd!;
+					header.executionCwd = undefined;
 				}
 			}
 		}
@@ -1992,12 +1993,21 @@ export class SessionManager {
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
-		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
+		this.#rewriteRequired = migrated || loaded.malformedRecords > 0 || pendingExecutionCwdFallback !== undefined;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		if (pendingExecutionCwdFallback !== undefined) {
+			try {
+				await this.#rewriteAtomically();
+			} catch {
+				// Opening the conversation at home remains safe. The disk queue
+				// has latched and reported the failed binding discard; flush/close
+				// keep surfacing it until a later full rewrite succeeds.
+			}
+		}
 		return unchangedSessionContext ? "same-context" : "context-change";
 	}
 
@@ -2517,7 +2527,7 @@ export class SessionManager {
 
 	/**
 	 * Saved intentional execution directory from the header, if any. `undefined`
-	 * for sessions that never activated an execution worktree.
+	 * for unbound sessions, including a binding discarded during restore.
 	 */
 	getExecutionCwd(): string | undefined {
 		const saved = this.#header?.executionCwd;
