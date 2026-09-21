@@ -7,8 +7,11 @@
  * minted conversations (`/new`, `/fork`, `/branch`) anchor at H and carry a
  * live binding forward.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,6 +21,7 @@ describe("worktree execution binding", () => {
 	let root: string;
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		if (root) await fs.rm(root, { recursive: true, force: true });
 	});
 
@@ -72,6 +76,12 @@ describe("worktree execution binding", () => {
 		if (!repo) throw new Error(`git repository not discovered at ${homeDir}`);
 		await repo.worktreeRemove(worktreePath, true);
 		await fs.rm(worktreePath, { recursive: true, force: true });
+	}
+
+	async function readSessionHeader(sessionFile: string): Promise<SessionHeader> {
+		const header = (await loadEntriesFromFile(sessionFile)).find(entry => entry.type === "session");
+		if (!header) throw new Error(`session header not found in ${sessionFile}`);
+		return header;
 	}
 
 	it("persists a header-only activation so a fresh open of the same transcript restores the binding", async () => {
@@ -226,11 +236,12 @@ describe("worktree execution binding", () => {
 		reopened.onExecutionCwdFallback(fallback => fallbacks.push(fallback));
 		try {
 			// The conversation runs at the canonical home; the foreign path is
-			// declined and retained only as a recorded, unusable binding.
+			// declined and the saved binding is cleared.
 			expect(reopened.getCwd()).toBe(home);
 			expect(reopened.getSessionHome()).toBe(home);
-			expect(reopened.getExecutionCwd()).toBe(worktree);
+			expect(reopened.getExecutionCwd()).toBeUndefined();
 			expect(fallbacks).toEqual([{ missingCwd: worktree, home }]);
+			expect((await readSessionHeader(sessionFile)).executionCwd).toBeUndefined();
 			expect(reopened.getEntries().some(entry => entry.type === "message" && entry.message.role === "user")).toBe(
 				true,
 			);
@@ -248,50 +259,150 @@ describe("worktree execution binding", () => {
 		expect(await Bun.file(path.join(home, "README.md")).text()).toBe("seed\n");
 	});
 
-	it("declines restoration when the saved execution path is missing or holds no repository", async () => {
+	it("discards a saved binding when its execution path is missing", async () => {
 		root ??= await fs.mkdtemp(path.join(os.tmpdir(), "omp-exec-binding-"));
 		const home = path.join(root, "home");
 		await initRepoAt(home);
 		const worktree = path.join(root, "wt");
-		await makeLinkedWorktree(home, worktree, "feature/x");
+		await makeLinkedWorktree(home, worktree, "feature/missing");
 
 		const manager = SessionManager.create(home, path.join(root, "sessions"));
 		const sessionFile = manager.getSessionFile()!;
 		await manager.setExecutionCwd(worktree);
 		await manager.close();
-
-		// Missing E: fall back to the home, keep the saved field for diagnosis,
-		// and never recreate the worktree.
 		await removeWorktree(home, worktree);
-		const missingFallbacks: Array<{ missingCwd: string; home: string }> = [];
-		const missing = await SessionManager.open(sessionFile);
-		missing.onExecutionCwdFallback(fallback => missingFallbacks.push(fallback));
+
+		const fallbacks: Array<{ missingCwd: string; home: string }> = [];
+		const reopened = await SessionManager.open(sessionFile);
+		reopened.onExecutionCwdFallback(fallback => fallbacks.push(fallback));
 		try {
-			expect(missing.getCwd()).toBe(home);
-			expect(missing.getExecutionCwd()).toBe(worktree);
-			expect(missingFallbacks).toEqual([{ missingCwd: worktree, home }]);
+			expect(reopened.getCwd()).toBe(home);
+			expect(reopened.getExecutionCwd()).toBeUndefined();
+			expect(fallbacks).toEqual([{ missingCwd: worktree, home }]);
+			expect((await readSessionHeader(sessionFile)).executionCwd).toBeUndefined();
 			await expect(fs.stat(worktree)).rejects.toThrow();
 			expect(vcs.git(home)).not.toBeNull();
 		} finally {
-			await missing.close();
+			await reopened.close();
 		}
+	});
 
-		// Enterable but non-Git E: still declined for a Git-backed home, and no
-		// repository gets provisioned at the path.
+	it("discards a saved binding when its execution path is not a repository", async () => {
+		root ??= await fs.mkdtemp(path.join(os.tmpdir(), "omp-exec-binding-"));
+		const home = path.join(root, "home");
+		await initRepoAt(home);
+		const worktree = path.join(root, "wt");
+		await makeLinkedWorktree(home, worktree, "feature/plain");
+
+		const manager = SessionManager.create(home, path.join(root, "sessions"));
+		const sessionFile = manager.getSessionFile()!;
+		await manager.setExecutionCwd(worktree);
+		await manager.close();
+		await removeWorktree(home, worktree);
 		await fs.mkdir(worktree, { recursive: true });
-		const plainFallbacks: Array<{ missingCwd: string; home: string }> = [];
-		const plain = await SessionManager.open(sessionFile);
-		plain.onExecutionCwdFallback(fallback => plainFallbacks.push(fallback));
+
+		const fallbacks: Array<{ missingCwd: string; home: string }> = [];
+		const reopened = await SessionManager.open(sessionFile);
+		reopened.onExecutionCwdFallback(fallback => fallbacks.push(fallback));
 		try {
-			expect(plain.getCwd()).toBe(home);
-			expect(plain.getExecutionCwd()).toBe(worktree);
-			expect(plainFallbacks).toEqual([{ missingCwd: worktree, home }]);
+			expect(reopened.getCwd()).toBe(home);
+			expect(reopened.getExecutionCwd()).toBeUndefined();
+			expect(fallbacks).toEqual([{ missingCwd: worktree, home }]);
+			expect((await readSessionHeader(sessionFile)).executionCwd).toBeUndefined();
 			expect(vcs.git(worktree)).toBeNull();
 			expect(vcs.git(home)).not.toBeNull();
 			expect(await Bun.file(path.join(home, "README.md")).text()).toBe("seed\n");
 		} finally {
-			await plain.close();
+			await reopened.close();
 		}
+	});
+
+	it("persists a missing binding discard so a recreated worktree path cannot revive it", async () => {
+		root ??= await fs.mkdtemp(path.join(os.tmpdir(), "omp-exec-binding-"));
+		const home = path.join(root, "home");
+		await initRepoAt(home);
+		const worktree = path.join(root, "wt");
+		await makeLinkedWorktree(home, worktree, "feature/original");
+
+		const manager = SessionManager.create(home, path.join(root, "sessions"));
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile()!;
+		await manager.setExecutionCwd(worktree);
+		await manager.close();
+		await removeWorktree(home, worktree);
+
+		const firstFallbacks: Array<{ missingCwd: string; home: string }> = [];
+		const discarded = await SessionManager.open(sessionFile);
+		discarded.onExecutionCwdFallback(fallback => firstFallbacks.push(fallback));
+		let firstExecutionCwd: string | undefined;
+		let firstHeaderExecutionCwd: string | undefined;
+		try {
+			expect(discarded.getCwd()).toBe(home);
+			expect(discarded.getSessionId()).toBe(sessionId);
+			expect(discarded.getSessionFile()).toBe(sessionFile);
+			expect(firstFallbacks).toEqual([{ missingCwd: worktree, home }]);
+			firstExecutionCwd = discarded.getExecutionCwd();
+			firstHeaderExecutionCwd = (await readSessionHeader(sessionFile)).executionCwd;
+		} finally {
+			await discarded.close();
+		}
+
+		await makeLinkedWorktree(home, worktree, "feature/reappeared");
+		const secondFallbacks: Array<{ missingCwd: string; home: string }> = [];
+		const reopened = await SessionManager.open(sessionFile);
+		reopened.onExecutionCwdFallback(fallback => secondFallbacks.push(fallback));
+		try {
+			expect(reopened.getCwd()).toBe(home);
+			expect(reopened.getExecutionCwd()).toBeUndefined();
+			expect(secondFallbacks).toEqual([]);
+			expect(firstExecutionCwd).toBeUndefined();
+			expect(firstHeaderExecutionCwd).toBeUndefined();
+			expect(reopened.getSessionId()).toBe(sessionId);
+			expect(reopened.getSessionFile()).toBe(sessionFile);
+			await reopened.setSessionFile(sessionFile);
+			expect(reopened.getCwd()).toBe(home);
+			expect(reopened.getExecutionCwd()).toBeUndefined();
+		} finally {
+			await reopened.close();
+		}
+	});
+
+	it("opens at home and surfaces a transient binding-discard persistence failure", async () => {
+		root ??= await fs.mkdtemp(path.join(os.tmpdir(), "omp-exec-binding-"));
+		const home = path.join(root, "home");
+		await initRepoAt(home);
+		const worktree = path.join(root, "wt");
+		await makeLinkedWorktree(home, worktree, "feature/persist-failure");
+		const storage = new FileSessionStorage();
+
+		const manager = SessionManager.create(home, path.join(root, "sessions"), storage);
+		manager.appendMessage({ role: "user", content: "before failure", timestamp: Date.now() } as never);
+		await manager.rewriteEntries();
+		const sessionFile = manager.getSessionFile()!;
+		await manager.setExecutionCwd(worktree);
+		await manager.close();
+		await removeWorktree(home, worktree);
+
+		const failure = new Error("binding discard write failed");
+		const rewrite = vi.spyOn(storage, "writeTextAtomic").mockRejectedValueOnce(failure);
+		const reopened = await SessionManager.open(sessionFile, undefined, storage);
+		const observed: Error[] = [];
+		reopened.onPersistenceError(error => observed.push(error));
+		expect(reopened.getCwd()).toBe(home);
+		expect(reopened.getExecutionCwd()).toBeUndefined();
+		expect(reopened.getEntries().some(entry => entry.type === "message" && entry.message.role === "user")).toBe(true);
+		expect(observed).toEqual([failure]);
+		expect((await readSessionHeader(sessionFile)).executionCwd).toBe(worktree);
+		await expect(reopened.flush()).rejects.toBe(failure);
+
+		rewrite.mockRestore();
+		reopened.appendMessage({ role: "user", content: "after failure", timestamp: Date.now() } as never);
+		await reopened.flush();
+		const entries = await loadEntriesFromFile(sessionFile);
+		const header = entries.find(entry => entry.type === "session");
+		expect(header?.executionCwd).toBeUndefined();
+		expect(entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(2);
+		await reopened.close();
 	});
 
 	it("rejects binding execution to an independent repository and keeps the prior binding", async () => {
@@ -360,8 +471,9 @@ describe("worktree execution binding", () => {
 			// foreign execution path was declined against that loaded home.
 			expect(managerB.getSessionHome()).toBe(homeA);
 			expect(managerB.getCwd()).toBe(homeA);
-			expect(managerB.getExecutionCwd()).toBe(worktreeA);
+			expect(managerB.getExecutionCwd()).toBeUndefined();
 			expect(fallbacks).toEqual([{ missingCwd: worktreeA, home: homeA }]);
+			expect((await readSessionHeader(fileA)).executionCwd).toBeUndefined();
 		} finally {
 			await managerB.close();
 		}

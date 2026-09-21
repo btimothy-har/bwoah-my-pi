@@ -223,14 +223,15 @@ jobs:
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR/fork path: latest release addons from npm ----
+         # ---- PR/fork path: source-version release addons from npm ----
          - name: Fetch release native addons (npm)
            if: github.event_name == 'pull_request' || github.repository != 'can1357/oh-my-pi'
            shell: bash
            run: |
               set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
+              native_version="$(node -p "require('./packages/natives/package.json').version")"
+              tarball="$(npm view "@oh-my-pi/pi-natives-linux-x64@${native_version}" dist.tarball)"
+              echo "Fetching @oh-my-pi/pi-natives-linux-x64@${native_version} from $tarball"
               curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
               mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
               cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
