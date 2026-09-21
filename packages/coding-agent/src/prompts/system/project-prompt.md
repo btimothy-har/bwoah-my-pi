@@ -19,6 +19,7 @@ MUST follow these context files for all tasks:
 {{#if agentsMdSearch.files.length}}
 <dir-context>
 Some directories may have rules; deeper rules override higher ones.
+{{#if separateSessionHome}}Rules below come from {{sessionHome}} and apply to matching relative paths under {{cwd}}.{{/if}}
 Before changes in these directories, MUST read:
 {{#list agentsMdSearch.files join="\n"}}- {{this}}{{/list}}
 </dir-context>
