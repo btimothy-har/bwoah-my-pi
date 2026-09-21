@@ -522,7 +522,12 @@ export function loadConfig(roots: LspConfigRoots): LspConfig {
 		if (!hasRootMarkers(roots.cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, roots.cwd);
 		if (!resolved) continue;
-		servers[name] = { ...config, resolvedCommand: resolved, sessionHome: roots.sessionHome, resolvedIdleTimeoutMs: idleTimeoutMs };
+		servers[name] = {
+			...config,
+			resolvedCommand: resolved,
+			sessionHome: roots.sessionHome,
+			resolvedIdleTimeoutMs: idleTimeoutMs,
+		};
 	}
 	selectTypescriptServer(servers);
 

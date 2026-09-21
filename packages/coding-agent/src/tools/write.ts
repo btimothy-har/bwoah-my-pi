@@ -650,13 +650,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		this.#deferredDiagnostics =
 			enableDiagnostics && session.queueDeferredDiagnostics ? new DeferredDiagnostics(session, dedup) : undefined;
 		this.#writethrough = enableLsp
-			? createLspWritethrough({ sessionHome: getToolSessionHome(session), cwd: session.cwd }, {
-					enableFormat,
-					enableDiagnostics,
-					transformDiagnostics: dedup
-						? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
-						: undefined,
-				})
+			? createLspWritethrough(
+					{ sessionHome: getToolSessionHome(session), cwd: session.cwd },
+					{
+						enableFormat,
+						enableDiagnostics,
+						transformDiagnostics: dedup
+							? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
+							: undefined,
+					},
+				)
 			: writethroughNoop;
 	}
 

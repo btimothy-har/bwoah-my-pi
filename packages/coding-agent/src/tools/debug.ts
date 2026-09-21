@@ -475,12 +475,7 @@ const ADAPTER_CANONICAL_COMMANDS: Readonly<Record<string, string>> = {
 	"js-debug-adapter": "js-debug-adapter",
 };
 
-function formatAdapterUnavailable(
-	adapterName: string,
-	command: string,
-	cwd: string,
-	sessionHome?: string,
-): string {
+function formatAdapterUnavailable(adapterName: string, command: string, cwd: string, sessionHome?: string): string {
 	const displayName = truncateToWidth(replaceTabs(adapterName), TRUNCATE_LENGTHS.SHORT);
 	const canonicalCommand = ADAPTER_CANONICAL_COMMANDS[adapterName] ?? adapterName;
 	if (command !== canonicalCommand) {

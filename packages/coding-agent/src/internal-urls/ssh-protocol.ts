@@ -102,7 +102,10 @@ function remotePathFromUrl(url: InternalUrl): string {
 
 /** Load the configured SSH hosts from the `ssh` capability (managed/project `ssh.json`). */
 async function loadConfiguredHosts(sessionHome?: string): Promise<SSHHost[]> {
-	const { items } = await capability.loadCapability<SSHHost>(sshCapability.id, sessionHome ? { cwd: sessionHome } : {});
+	const { items } = await capability.loadCapability<SSHHost>(
+		sshCapability.id,
+		sessionHome ? { cwd: sessionHome } : {},
+	);
 	return items;
 }
 

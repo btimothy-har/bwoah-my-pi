@@ -1455,7 +1455,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	};
 	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
 	activeRepoContextPromise.catch(() => {});
-	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(sessionHome, agentDir));
+	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () =>
+		discoverWatchdogFiles(sessionHome, agentDir),
+	);
 	watchdogFilesPromise.catch(() => {});
 	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () =>
 		discoverAdvisorConfigs(sessionHome, agentDir),
@@ -2891,9 +2893,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cwd,
 			sessionManager,
 			modelRegistry,
-		// Memory storage identity follows the session home (H): recall/retain
-		// target the owning project's banks across execution rebinds.
-		() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, sessionManager.getSessionHome()) : undefined),
+			// Memory storage identity follows the session home (H): recall/retain
+			// target the owning project's banks across execution rebinds.
+			() =>
+				hasSession
+					? createSessionMemoryRuntimeContext(session, agentDir, sessionManager.getSessionHome())
+					: undefined,
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),

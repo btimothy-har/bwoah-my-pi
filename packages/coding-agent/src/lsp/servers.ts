@@ -86,7 +86,11 @@ export async function warmupLspServers(roots: LspConfigRoots, options?: LspWarmu
 	// Servers that don't respond quickly will be initialized lazily on first use
 	const results = await Promise.allSettled(
 		lspServers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, roots.cwd, serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS);
+			const client = await getOrCreateClient(
+				serverConfig,
+				roots.cwd,
+				serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS,
+			);
 			return { name, client, fileTypes: serverConfig.fileTypes };
 		}),
 	);

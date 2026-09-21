@@ -197,13 +197,16 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 	const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
 	const deduplicate = enableDiagnostics && session.settings.get("lsp.diagnosticsDeduplicate");
 	return enableLsp
-		? createLspWritethrough({ sessionHome: getToolSessionHome(session), cwd: session.cwd }, {
-				enableFormat,
-				enableDiagnostics,
-				transformDiagnostics: deduplicate
-					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
-					: undefined,
-			})
+		? createLspWritethrough(
+				{ sessionHome: getToolSessionHome(session), cwd: session.cwd },
+				{
+					enableFormat,
+					enableDiagnostics,
+					transformDiagnostics: deduplicate
+						? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
+						: undefined,
+				},
+			)
 		: writethroughNoop;
 }
 

@@ -2656,12 +2656,8 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		const manager = new MCPManager(
-			record.session.sessionManager.getCwd(),
-			null,
-			undefined,
-			undefined,
-			() => record.session.sessionManager.getSessionHome(),
+		const manager = new MCPManager(record.session.sessionManager.getCwd(), null, undefined, undefined, () =>
+			record.session.sessionManager.getSessionHome(),
 		);
 		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
 		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`

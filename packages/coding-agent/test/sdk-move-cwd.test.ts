@@ -115,8 +115,7 @@ describe("createAgentSession cwd after /move", () => {
 		// Config discovery keys on the home; workspace markers/commands key on the
 		// execution checkout. The fake server exists only for the H+E pair.
 		vi.spyOn(lspConfig, "loadConfig").mockImplementation((roots: lspConfig.LspConfigRoots) =>
-			path.resolve(roots.cwd) === path.resolve(execution) &&
-				path.resolve(roots.sessionHome) === path.resolve(home)
+			path.resolve(roots.cwd) === path.resolve(execution) && path.resolve(roots.sessionHome) === path.resolve(home)
 				? executionConfig
 				: homeConfig,
 		);

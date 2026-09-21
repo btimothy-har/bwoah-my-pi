@@ -9603,7 +9603,10 @@ export class AgentSession {
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
 			} else if (sessionFileDisposition === "context-change") {
-				if (!options?.onCwdChange && (path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd) || homeChanged)) {
+				if (
+					!options?.onCwdChange &&
+					(path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd) || homeChanged)
+				) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}
 				if (options?.onCwdChange) {

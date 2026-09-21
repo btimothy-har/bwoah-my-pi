@@ -464,7 +464,9 @@ describe("lsp regressions", () => {
 			expect(split.servers["fake-home"]?.sessionHome).toBe(home.path());
 
 			// E alone carries no definition; H alone cannot satisfy the marker.
-			expect(loadConfig({ sessionHome: execution.path(), cwd: execution.path() }).servers["fake-home"]).toBeUndefined();
+			expect(
+				loadConfig({ sessionHome: execution.path(), cwd: execution.path() }).servers["fake-home"],
+			).toBeUndefined();
 			expect(loadConfig({ sessionHome: home.path(), cwd: bare.path() }).servers["fake-home"]).toBeUndefined();
 		} finally {
 			home.removeSync();
@@ -604,7 +606,10 @@ describe("lsp regressions", () => {
 			await lspClient.shutdownAll();
 
 			// Pure config access should not mutate global timeout or spawn timers (#8389)
-			configCache.set(configCacheKey(roots(tempDir.path())), { servers: { "fake-lsp-rearm": config }, idleTimeoutMs: 60_000 });
+			configCache.set(configCacheKey(roots(tempDir.path())), {
+				servers: { "fake-lsp-rearm": config },
+				idleTimeoutMs: 60_000,
+			});
 			getConfig(roots(tempDir.path()));
 			expect(intervalSpy).toHaveBeenCalledTimes(initialCalls);
 
