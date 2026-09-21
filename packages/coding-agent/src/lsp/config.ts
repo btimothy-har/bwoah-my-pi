@@ -415,17 +415,17 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigSource {
  * Configuration sources in priority order.
  * Supports both visible and hidden variants at each config location.
  */
-function getConfigSources(cwd: string): ConfigSource[] {
+function getConfigSources(sessionHome: string): ConfigSource[] {
 	const filenames = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
 	const sources: ConfigSource[] = [];
 
 	// Project root files (highest priority)
 	for (const filename of filenames) {
-		sources.push(fileConfigSource(path.join(cwd, filename)));
+		sources.push(fileConfigSource(path.join(sessionHome, filename)));
 	}
 
 	// Project config directories (.omp/, .pi/, .claude/)
-	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd });
+	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd: sessionHome });
 	for (const dir of projectDirs) {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(dir, filename)));
@@ -440,8 +440,9 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		}
 	}
 
-	// Plugin LSP configs (from marketplace/--plugin-dir roots)
-	const pluginRoots = getPreloadedPluginRoots();
+	// Plugin LSP configs (from marketplace/--plugin-dir roots), keyed by the
+	// same discovery root as the rest of this source list.
+	const pluginRoots = getPreloadedPluginRoots(sessionHome);
 	for (const root of pluginRoots) {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(root.path, filename)));
@@ -455,6 +456,14 @@ function getConfigSources(cwd: string): ConfigSource[] {
 	}
 
 	return sources;
+}
+
+/** Two-root language-config seam: config discovery reads `sessionHome`, execution filtering reads `cwd`. */
+export interface LspConfigRoots {
+	/** Session home (H): owns configuration discovery. */
+	sessionHome: string;
+	/** Execution cwd (E): owns project markers and command resolution. */
+	cwd: string;
 }
 
 /**
@@ -489,10 +498,10 @@ function getConfigSources(cwd: string): ConfigSource[] {
  * }
  * ```
  */
-export function loadConfig(cwd: string): LspConfig {
+export function loadConfig(roots: LspConfigRoots): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
-	const configSources = getConfigSources(cwd).reverse();
+	const configSources = getConfigSources(roots.sessionHome).reverse();
 
 	let idleTimeoutMs: number | undefined;
 	for (const source of configSources) {
@@ -510,28 +519,32 @@ export function loadConfig(cwd: string): LspConfig {
 	for (const name in candidates) {
 		const config = candidates[name];
 		if (config.disabled) continue;
-		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-		const resolved = resolveCommand(config.command, cwd);
+		if (!hasRootMarkers(roots.cwd, config.rootMarkers)) continue;
+		const resolved = resolveCommand(config.command, roots.cwd);
 		if (!resolved) continue;
-		servers[name] = { ...config, resolvedCommand: resolved };
+		servers[name] = { ...config, resolvedCommand: resolved, sessionHome: roots.sessionHome, resolvedIdleTimeoutMs: idleTimeoutMs };
 	}
 	selectTypescriptServer(servers);
 
 	return { servers, idleTimeoutMs };
 }
 
-// Cache config per cwd to avoid repeated file I/O
+// Cache config per session-home/cwd pair to avoid repeated file I/O
 export const configCache = new Map<string, LspConfig>();
 
-export function getConfig(cwd: string): LspConfig {
-	let config = configCache.get(cwd);
+export function configCacheKey(roots: LspConfigRoots): string {
+	return `${path.resolve(roots.sessionHome)}\0${path.resolve(roots.cwd)}`;
+}
+
+export function getConfig(roots: LspConfigRoots): LspConfig {
+	const key = configCacheKey(roots);
+	let config = configCache.get(key);
 	if (!config) {
-		config = loadConfig(cwd);
-		configCache.set(cwd, config);
+		config = loadConfig(roots);
+		configCache.set(key, config);
 	}
 	return config;
 }
-
 // =============================================================================
 // Server Selection
 // =============================================================================

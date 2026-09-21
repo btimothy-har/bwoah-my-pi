@@ -497,15 +497,7 @@ export interface ToolSession {
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
 
-/**
- * The session's canonical home (H) for harness discovery — settings, agents,
- * skills, rules, context files, extension/plugin sources. `session.cwd` stays
- * the live execution directory (E); only discovery uses this. Manager-less
- * standalone tools retain H === cwd.
- */
-export function getToolSessionHome(session: ToolSession): string {
-	return session.sessionManager?.getSessionHome() ?? session.cwd;
-}
+export * from "./session-home";
 
 /**
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or

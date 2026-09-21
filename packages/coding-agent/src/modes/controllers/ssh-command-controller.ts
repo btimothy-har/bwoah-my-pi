@@ -259,7 +259,9 @@ export class SSHCommandController {
 			const configHostNames = new Set([...userHosts, ...projectHosts]);
 			let discoveredHosts: SSHHost[] = [];
 			try {
-				const result = await loadCapability<SSHHost>(sshCapability.id, { cwd });
+				const result = await loadCapability<SSHHost>(sshCapability.id, {
+					cwd: this.ctx.sessionManager.getSessionHome(),
+				});
 				discoveredHosts = result.items.filter(h => !configHostNames.has(h.name));
 			} catch {
 				// Ignore discovery errors

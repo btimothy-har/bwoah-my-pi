@@ -1869,7 +1869,9 @@ export async function runRootCommand(
 				lightTheme: settingsInstance.get("theme.light"),
 			},
 		});
-		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
+		// The composer renders before any session manager exists; launch cwd is
+		// both roots here. A resumed/bound session re-derives servers per-session.
+		setStartupComposerLspServers(discoverStartupLspServers({ sessionHome: cwd, cwd }, "connecting"));
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",

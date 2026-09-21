@@ -136,7 +136,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
 		const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: false,
 		});
@@ -160,7 +160,7 @@ describe("LSP diagnostics freshness", () => {
 			.mockRejectedValue(new Error("disabled write-time LSP features must not start a server"));
 		const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: false,
 		});
@@ -194,7 +194,7 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: true,
 			enableDiagnostics: false,
 		});
@@ -215,7 +215,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: true,
 			enableDiagnostics: false,
 		});
@@ -264,7 +264,7 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: true,
 			enableDiagnostics: false,
 		});
@@ -293,7 +293,7 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: true,
 			enableDiagnostics: false,
 		});
@@ -340,7 +340,7 @@ describe("LSP diagnostics freshness", () => {
 		});
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: true,
 			enableDiagnostics: true,
 		});
@@ -379,7 +379,7 @@ describe("LSP diagnostics freshness", () => {
 			publishDiagnostics(mockClient, tsUri, [], mockClient.openFiles.get(tsUri)?.version ?? null);
 		});
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
@@ -426,7 +426,7 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
@@ -470,7 +470,7 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
@@ -503,7 +503,7 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(tempDir.path(), {
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
@@ -560,7 +560,7 @@ describe("LSP diagnostics freshness", () => {
 			finalize: () => {},
 		};
 
-		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, { enableFormat: false, enableDiagnostics: true });
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
@@ -613,7 +613,7 @@ describe("LSP diagnostics freshness", () => {
 			finalize: () => {},
 		};
 
-		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
+		const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, { enableFormat: false, enableDiagnostics: true });
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
@@ -730,7 +730,7 @@ describe("LSP diagnostics freshness", () => {
 				mockClient.diagnosticsVersion += 1;
 			});
 
-			const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
+			const writethrough = createLspWritethrough({ sessionHome: tempDir.path(), cwd: tempDir.path() }, { enableFormat: false, enableDiagnostics: true });
 			const result = await writethrough(filePath, 'import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 
 			expect(result).toBeDefined();

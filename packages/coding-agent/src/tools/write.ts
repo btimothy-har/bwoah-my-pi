@@ -28,6 +28,7 @@ import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
 import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
+import { getToolSessionHome } from "./session-home";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getLspBatchRequest } from "../lsp/batch";
@@ -649,7 +650,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		this.#deferredDiagnostics =
 			enableDiagnostics && session.queueDeferredDiagnostics ? new DeferredDiagnostics(session, dedup) : undefined;
 		this.#writethrough = enableLsp
-			? createLspWritethrough(session.cwd, {
+			? createLspWritethrough({ sessionHome: getToolSessionHome(session), cwd: session.cwd }, {
 					enableFormat,
 					enableDiagnostics,
 					transformDiagnostics: dedup
@@ -1211,6 +1212,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (scheme !== "xd" && endsWithReadTruncationNotice(content)) {
 						const currentResource = await internalRouter.resolve(path, {
 							cwd: this.session.cwd,
+							sessionHome: getToolSessionHome(this.session),
 							settings: this.session.settings,
 							signal,
 						});
@@ -1225,6 +1227,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					let xdResult: AgentToolResult<WriteToolDetails> | undefined;
 					await internalRouter.write(path, cleanContent, {
 						cwd: this.session.cwd,
+						sessionHome: getToolSessionHome(this.session),
 						signal,
 						xd: {
 							write: async (name, deviceContent) => {

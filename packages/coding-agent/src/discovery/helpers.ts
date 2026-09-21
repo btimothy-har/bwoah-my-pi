@@ -1330,12 +1330,14 @@ export async function listClaudePluginRoots(
  * Clear the plugin roots cache (useful for testing or when plugins change).
  */
 export function clearClaudePluginRootsCache(): void {
+	pluginRootsGeneration++;
 	pluginRootsCache.clear();
 	for (const invalidate of pluginCacheInvalidators) invalidate();
-	preloadedPluginRoots = [...injectedPluginDirRoots];
-	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
-	if (lastPreloadHome) {
-		void preloadPluginRoots(lastPreloadHome, getProjectDir());
+	preloadedPluginRootsByCwd.clear();
+	// Re-warm each recorded discovery root asynchronously so sync LSP config
+	// reads stay valid; the root list, not the process cwd, decides which homes.
+	for (const entry of preloadedRootKeys) {
+		void preloadPluginRoots(entry.home, entry.cwd);
 	}
 }
 
@@ -1355,9 +1357,15 @@ export function clearPluginRootsAndCaches(extraPaths?: readonly string[]): void 
 // Populated at startup by preloadPluginRoots(). Read synchronously by
 // getPreloadedPluginRoots(). Safe degradation: empty array if not warmed.
 
-let preloadedPluginRoots: ClaudePluginRoot[] = [];
+// Snapshots are keyed by the normalized discovery root: `/wt` moves execution
+// only, so a worktree never swaps the plugin universe, and concurrent sessions
+// with different homes keep distinct snapshots.
+const preloadedPluginRootsByCwd = new Map<string, ClaudePluginRoot[]>();
 let injectedPluginDirRoots: ClaudePluginRoot[] = [];
-let lastPreloadHome: string | undefined;
+const preloadedRootKeys: Array<{ home: string; cwd: string | undefined }> = [];
+// Incremented on invalidation; an in-flight preload started before it must not
+// publish over the cleared state.
+let pluginRootsGeneration = 0;
 
 /**
  * Populate the module-level plugin roots cache for sync consumers.
@@ -1365,17 +1373,23 @@ let lastPreloadHome: string | undefined;
  * but before any LSP config is read.
  */
 export async function preloadPluginRoots(home: string, cwd?: string): Promise<void> {
-	lastPreloadHome = home;
+	const key = path.resolve(cwd ?? getProjectDir());
+	const generation = pluginRootsGeneration;
 	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = roots;
+	if (generation !== pluginRootsGeneration) return;
+	if (!preloadedRootKeys.some(entry => entry.home === home && entry.cwd === cwd)) {
+		preloadedRootKeys.push({ home, cwd });
+	}
+	preloadedPluginRootsByCwd.set(key, roots);
 }
 
 /**
- * Get pre-loaded plugin roots synchronously.
- * Returns empty array if preloadPluginRoots() hasn't been called.
+ * Get pre-loaded plugin roots synchronously for a discovery root.
+ * Defaults to the current project directory (standalone same-root callers).
+ * Returns the injected --plugin-dir roots when nothing was preloaded.
  */
-export function getPreloadedPluginRoots(): readonly ClaudePluginRoot[] {
-	return preloadedPluginRoots;
+export function getPreloadedPluginRoots(cwd?: string): readonly ClaudePluginRoot[] {
+	return preloadedPluginRootsByCwd.get(path.resolve(cwd ?? getProjectDir())) ?? [...injectedPluginDirRoots];
 }
 
 // ── --plugin-dir injection ──────────────────────────────────────────────────
@@ -1420,11 +1434,14 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 
 	// Set injected roots BEFORE populating cache so listClaudePluginRoots merges them.
 	injectedPluginDirRoots = injected;
-	lastPreloadHome = home; // ensure cache-clear re-warm fires even when injectPluginDirRoots was the startup path
 	// Clear any stale cache entries (populated before injected roots were set).
+	pluginRootsGeneration++;
 	pluginRootsCache.clear();
 	// Rebuild — cache miss triggers fresh load that includes both user+project registries
 	// and prepends injectedPluginDirRoots at highest precedence.
 	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = roots;
+	if (!preloadedRootKeys.some(entry => entry.home === home && entry.cwd === cwd)) {
+		preloadedRootKeys.push({ home, cwd });
+	}
+	preloadedPluginRootsByCwd.set(path.resolve(cwd ?? getProjectDir()), roots);
 }

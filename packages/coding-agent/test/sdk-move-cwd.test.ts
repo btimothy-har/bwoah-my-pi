@@ -106,10 +106,19 @@ describe("createAgentSession cwd after /move", () => {
 		};
 		const executionConfig: LspConfig = { servers: { "fake-native": serverConfig } };
 		const homeConfig: LspConfig = { servers: {} };
-		lspConfig.configCache.set(path.resolve(execution), executionConfig);
-		lspConfig.configCache.set(path.resolve(home), homeConfig);
-		vi.spyOn(lspConfig, "loadConfig").mockImplementation(cwd =>
-			path.resolve(cwd) === path.resolve(execution) ? executionConfig : homeConfig,
+		const sessionRoots = { sessionHome: path.resolve(home), cwd: path.resolve(execution) };
+		lspConfig.configCache.set(lspConfig.configCacheKey(sessionRoots), executionConfig);
+		lspConfig.configCache.set(
+			lspConfig.configCacheKey({ sessionHome: path.resolve(home), cwd: path.resolve(home) }),
+			homeConfig,
+		);
+		// Config discovery keys on the home; workspace markers/commands key on the
+		// execution checkout. The fake server exists only for the H+E pair.
+		vi.spyOn(lspConfig, "loadConfig").mockImplementation((roots: lspConfig.LspConfigRoots) =>
+			path.resolve(roots.cwd) === path.resolve(execution) &&
+				path.resolve(roots.sessionHome) === path.resolve(home)
+				? executionConfig
+				: homeConfig,
 		);
 		vi.spyOn(lspClient, "setSharedLspEnabled").mockImplementation(() => {});
 		vi.spyOn(lspMuxDaemon, "connectSharedLspTransport").mockResolvedValue(null);
@@ -132,12 +141,14 @@ describe("createAgentSession cwd after /move", () => {
 			} finally {
 				try {
 					await Promise.all([
-						lspClient.shutdownStaleClients(home, []),
-						lspClient.shutdownStaleClients(execution, []),
+						lspClient.shutdownStaleClients(execution, [], undefined, sessionRoots.sessionHome),
+						lspClient.shutdownStaleClients(home, [], undefined, path.resolve(home)),
 					]);
 				} finally {
-					lspConfig.configCache.delete(path.resolve(home));
-					lspConfig.configCache.delete(path.resolve(execution));
+					lspConfig.configCache.delete(lspConfig.configCacheKey(sessionRoots));
+					lspConfig.configCache.delete(
+						lspConfig.configCacheKey({ sessionHome: path.resolve(home), cwd: path.resolve(home) }),
+					);
 					authStorage.close();
 					vi.restoreAllMocks();
 				}

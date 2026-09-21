@@ -37,6 +37,7 @@ let root: string;
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const cleanup of cleanups.splice(0)) await cleanup();
 	if (root) await fs.rm(root, { recursive: true, force: true });
 	root = "";

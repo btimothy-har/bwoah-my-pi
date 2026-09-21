@@ -9571,6 +9571,10 @@ export class AgentSession {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// A `false` callback return is a clean rejection (the mode restored its own
+		// process/settings scope); a THROW can leave discovery state dirtied and
+		// requires the source re-application below.
+		let cwdChangeCallbackThrew = false;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -9605,8 +9609,13 @@ export class AgentSession {
 				if (options?.onCwdChange) {
 					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd) || homeChanged) {
 						cwdChangeTarget = newCwd;
-						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
-							throw SESSION_CWD_CHANGE_REJECTED;
+						try {
+							if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
+								throw SESSION_CWD_CHANGE_REJECTED;
+							}
+						} catch (callbackError) {
+							if (callbackError !== SESSION_CWD_CHANGE_REJECTED) cwdChangeCallbackThrew = true;
+							throw callbackError;
 						}
 					} else if (path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd)) {
 						throw SESSION_CWD_CHANGE_REJECTED;
@@ -9822,6 +9831,19 @@ export class AgentSession {
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
+			// A failed target rescope may have already rebuilt this session's
+			// skills/prompt against the target home. The manager snapshot above is
+			// restored, so re-root session-owned discovery at the source home.
+			if (cwdChangeTarget) {
+				try {
+					await this.refreshSkills();
+				} catch (refreshError) {
+					logger.warn("Failed to re-root discovery after session switch rollback", {
+						targetSessionFile: sessionPath,
+						error: String(refreshError),
+					});
+				}
+			}
 			try {
 				await this.#sessionSwitchReconciler?.();
 			} catch (reconcileError) {
@@ -9831,10 +9853,12 @@ export class AgentSession {
 				});
 			}
 			// cwdChangeTarget is set only once the target rescope callback has been
-			// attempted; a callback-less precheck rejection sets neither. A rejected
-			// target rescope still dirtied process/discovery state, so re-apply the
-			// source scope after the manager snapshot restore above.
-			if (cwdChangeTarget && options?.onCwdChange) {
+			// attempted; a callback-less precheck rejection sets neither. Re-apply
+			// the source scope only when the callback THREW (a mid-flight failure
+			// can leave discovery state dirtied); a clean false rejection already
+			// restored the mode's own process/settings scope, and re-invoking a
+			// rejecting callback would fail the session closed instead.
+			if (cwdChangeTarget && cwdChangeCallbackThrew && options?.onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
 					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {

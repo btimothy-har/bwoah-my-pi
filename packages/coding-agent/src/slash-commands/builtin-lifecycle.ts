@@ -658,14 +658,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				}
 				case "clear":
 				case "reset": {
-					await backend.clear(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await backend.clear(runtime.settings.getAgentDir(), runtime.sessionManager.getSessionHome(), runtime.session);
 					await runtime.session.refreshBaseSystemPrompt();
 					await runtime.output("Memory cleared.");
 					return commandConsumed();
 				}
 				case "enqueue":
 				case "rebuild": {
-					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await backend.enqueue(runtime.settings.getAgentDir(), runtime.sessionManager.getSessionHome(), runtime.session);
 					await runtime.output("Memory consolidation enqueued.");
 					return commandConsumed();
 				}
@@ -679,7 +679,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					return commandConsumed();
 				}
 				case "sync": {
-					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await backend.enqueue(runtime.settings.getAgentDir(), runtime.sessionManager.getSessionHome(), runtime.session);
 					await runtime.output("Memory consolidation ran.");
 					return commandConsumed();
 				}

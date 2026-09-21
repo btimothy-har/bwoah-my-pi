@@ -2086,7 +2086,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager = new MCPManager(
+					cwd,
+					cacheStorage ? new MCPToolCache(cacheStorage) : null,
+					undefined,
+					undefined,
+					() => sessionManager.getSessionHome(),
+				);
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -2125,6 +2131,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...mcpDiscoverOptions,
 					cacheStorage: settings.getStorage(),
 					authStorage,
+					getSessionHome: () => sessionManager.getSessionHome(),
 				});
 				mcpManager = mcpResult.manager;
 				toolSession.mcpManager = mcpManager;
@@ -2884,7 +2891,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cwd,
 			sessionManager,
 			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+		// Memory storage identity follows the session home (H): recall/retain
+		// target the owning project's banks across execution rebinds.
+		() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, sessionManager.getSessionHome()) : undefined),
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
@@ -4254,14 +4263,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// perceived latency.
 		let lspServers: CreateAgentSessionResult["lspServers"];
 		const lspStartupCwd = sessionManager.getCwd();
+		// Server definitions come from the session home (H); servers themselves
+		// launch and analyze in the execution checkout (E).
+		const lspRoots = { sessionHome: sessionManager.getSessionHome(), cwd: lspStartupCwd };
 		if (enableLsp && options.hasUI && settings.get("lsp.lazy")) {
-			lspServers = discoverStartupLspServers(lspStartupCwd, "available");
+			lspServers = discoverStartupLspServers(lspRoots, "available");
 		} else if (enableLsp && options.hasUI) {
-			lspServers = discoverStartupLspServers(lspStartupCwd);
+			lspServers = discoverStartupLspServers(lspRoots);
 			if (lspServers.length > 0) {
 				void (async () => {
 					try {
-						const result = await logger.time("warmupLspServers", warmupLspServers, lspStartupCwd);
+						const result = await logger.time("warmupLspServers", warmupLspServers, lspRoots);
 						const serversByName = new Map(result.servers.map(server => [server.name, server] as const));
 						for (const server of lspServers ?? []) {
 							const next = serversByName.get(server.name);

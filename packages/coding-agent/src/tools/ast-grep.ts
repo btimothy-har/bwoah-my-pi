@@ -15,7 +15,7 @@ import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import type { ToolSession } from ".";
+import { type ToolSession, getToolSessionHome } from "./session-home";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
@@ -189,6 +189,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			const scope = await resolveToolSearchScope({
 				rawPaths,
 				cwd: this.session.cwd,
+				sessionHome: getToolSessionHome(this.session),
 				internalUrlAction: "search",
 				settings: this.session.settings,
 				signal,

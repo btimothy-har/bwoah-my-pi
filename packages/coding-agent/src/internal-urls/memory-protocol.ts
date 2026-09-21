@@ -35,21 +35,21 @@ export function memoryRootsFromRegistry(): string[] {
 	for (const ref of AgentRegistry.global().list()) {
 		const sm = ref.session?.sessionManager;
 		if (!sm) continue;
-		const root = getMemoryRoot(agentDir, sm.getCwd());
+		const root = getMemoryRoot(agentDir, sm.getSessionHome());
 		if (root && !roots.includes(root)) roots.push(root);
 	}
 	return roots;
 }
 
 /**
- * File-backed memory roots visible to one caller. A context that names a cwd
- * pins the root to it; otherwise the bound caller's own cwd is used, so a
- * session-id-only caller never reads a peer project's summary. Contextless
- * legacy callers keep the registry-wide sweep.
+ * File-backed memory roots visible to one caller. A context that names a
+ * session home pins the root to it; otherwise the bound caller's own home is
+ * used, so a session-id-only caller never reads a peer project's summary.
+ * Contextless legacy callers keep the registry-wide sweep.
  */
 function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSession | undefined): string[] {
-	const cwd = context?.cwd ?? caller?.sessionManager.getCwd();
-	if (cwd) return [getMemoryRoot(getAgentDir(), cwd)];
+	const sessionHome = context?.sessionHome ?? caller?.sessionManager.getSessionHome();
+	if (sessionHome) return [getMemoryRoot(getAgentDir(), sessionHome)];
 	return memoryRootsFromRegistry();
 }
 

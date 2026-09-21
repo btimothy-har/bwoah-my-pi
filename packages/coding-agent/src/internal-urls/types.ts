@@ -93,6 +93,13 @@ export interface ResolveContext {
 	/** Working directory of the calling session. */
 	cwd?: string;
 	/**
+	 * Harness-discovery root (session home H) of the calling session. Handlers
+	 * that load configuration — e.g. configured SSH hosts or memory roots —
+	 * resolve it from here; execution paths keep using {@link cwd}. Absent
+	 * means the caller has no separate home and `cwd` semantics apply.
+	 */
+	sessionHome?: string;
+	/**
 	 * Calling session's session file. Handlers that resolve agent ids which may
 	 * be parked (`history://<id>`, `agent://<id>`) refresh the caller's
 	 * persisted roster against this root before registry lookup, so a
@@ -179,6 +186,11 @@ export interface ResolveContext {
 export interface WriteContext {
 	/** Working directory of the calling session. */
 	cwd?: string;
+	/**
+	 * Harness-discovery root (session home H) of the calling session; defaults
+	 * to `cwd` semantics when absent. See {@link ResolveContext.sessionHome}.
+	 */
+	sessionHome?: string;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
