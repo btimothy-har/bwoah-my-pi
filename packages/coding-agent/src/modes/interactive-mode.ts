@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -71,7 +72,7 @@ import {
 	Settings,
 	settings,
 } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { clearClaudePluginRootsCache, preloadPluginRoots } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -1964,6 +1965,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Re-warm plugin roots, task agents, capabilities, slash commands, and
 			// the ssh tool so the next prompt sees everything scoped to the home.
 			clearClaudePluginRootsCache();
+			// Sync consumers (LSP/DAP config) read preloaded plugin roots keyed by
+			// discovery root — a newly selected home has no snapshot yet.
+			await preloadPluginRoots(os.homedir(), discoveryHome);
 			await refreshAgentDiscovery(discoveryHome, this.session.effectiveExtensionRoots);
 			await this.refreshTitleSystemPrompt(discoveryHome);
 			resetCapabilities();

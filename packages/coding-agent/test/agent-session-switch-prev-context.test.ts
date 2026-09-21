@@ -237,11 +237,14 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(previousSessionFile).toBeString();
 		expect(targetSessionFile).toBeString();
 
-		const onCwdChange = vi.fn(async () => false);
+		// The mode rejects the target scope but accepts the source re-application
+		// that follows a failed switch.
+		const onCwdChange = vi.fn(async (newCwd: string) => newCwd === sourceDir.path());
 		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
 
 		expect(switched).toBe(false);
 		expect(onCwdChange).toHaveBeenCalledWith(targetDir.path(), sourceDir.path());
+		expect(onCwdChange).toHaveBeenCalledWith(sourceDir.path(), targetDir.path());
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 	});

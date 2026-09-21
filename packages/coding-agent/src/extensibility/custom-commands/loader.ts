@@ -142,10 +142,16 @@ export async function discoverCustomCommands(
 }
 
 export interface LoadCustomCommandsOptions {
-	/** Current working directory. Default: getProjectDir() */
+	/** Discovery root for command sources (session home). Default: getProjectDir() */
 	cwd?: string;
 	/** Agent config directory. Default: from getAgentDir() */
 	agentDir?: string;
+	/**
+	 * Execution root for the loaded commands' `CustomCommandAPI.cwd`/`exec`
+	 * default. A `/wt`-bound session discovers commands at its home (H) but they
+	 * execute in the bound checkout (E). Defaults to `cwd`.
+	 */
+	executionCwd?: string;
 }
 
 /**
@@ -184,11 +190,13 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 	const errors: Array<{ path: string; error: string }> = [];
 	const seenNames = new Set<string>();
 
-	// Shared API object - all commands get the same instance
+	// Commands are discovered from `cwd` (the session home) but execute against
+	// the live execution directory: api.cwd/api.exec bind E, not H.
+	const executionCwd = options.executionCwd ?? cwd;
 	const sharedApi: CustomCommandAPI = {
-		cwd,
+		cwd: executionCwd,
 		exec: (command: string, args: string[], execOptions) =>
-			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions),
+			execCommand(command, args, execOptions?.cwd ?? executionCwd, execOptions),
 		typebox,
 		arktype,
 		zod,

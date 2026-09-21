@@ -9571,10 +9571,6 @@ export class AgentSession {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
-		// A `false` callback return is a clean rejection (the mode restored its own
-		// process/settings scope); a THROW can leave discovery state dirtied and
-		// requires the source re-application below.
-		let cwdChangeCallbackThrew = false;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -9612,13 +9608,8 @@ export class AgentSession {
 				if (options?.onCwdChange) {
 					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd) || homeChanged) {
 						cwdChangeTarget = newCwd;
-						try {
-							if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
-								throw SESSION_CWD_CHANGE_REJECTED;
-							}
-						} catch (callbackError) {
-							if (callbackError !== SESSION_CWD_CHANGE_REJECTED) cwdChangeCallbackThrew = true;
-							throw callbackError;
+						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
+							throw SESSION_CWD_CHANGE_REJECTED;
 						}
 					} else if (path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd)) {
 						throw SESSION_CWD_CHANGE_REJECTED;
@@ -9856,12 +9847,13 @@ export class AgentSession {
 				});
 			}
 			// cwdChangeTarget is set only once the target rescope callback has been
-			// attempted; a callback-less precheck rejection sets neither. Re-apply
-			// the source scope only when the callback THREW (a mid-flight failure
-			// can leave discovery state dirtied); a clean false rejection already
-			// restored the mode's own process/settings scope, and re-invoking a
-			// rejecting callback would fail the session closed instead.
-			if (cwdChangeTarget && cwdChangeCallbackThrew && options?.onCwdChange) {
+			// attempted; a callback-less precheck rejection sets neither. Every
+			// attempted callback re-applies the source scope through the callback
+			// after the manager snapshot restore: a thrown callback can leave
+			// discovery dirtied, a post-callback failure leaves process/settings at
+			// the target, and a false-returning mode only partially restored its
+			// own state. A source re-application that itself fails fails closed.
+			if (cwdChangeTarget && options?.onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
 					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {

@@ -907,6 +907,10 @@ function clientKey(config: ServerConfig, cwd: string): string {
 		config.initOptions ?? null,
 		config.settings ?? null,
 		config.languageId ?? null,
+		// Stamped at config load; a reload that changes the idle policy must
+		// resolve to a fresh client instead of reaping the retained one with the
+		// stale stamp.
+		config.resolvedIdleTimeoutMs ?? null,
 	]);
 	// Config files live at the session home, so the same cwd with a different
 	// discovery home must not share a client (or its idle policy).

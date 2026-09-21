@@ -35,7 +35,9 @@ export function memoryRootsFromRegistry(): string[] {
 	for (const ref of AgentRegistry.global().list()) {
 		const sm = ref.session?.sessionManager;
 		if (!sm) continue;
-		const root = getMemoryRoot(agentDir, sm.getSessionHome());
+		// Registry entries can be partial stub sessions (tests, extension
+		// replicas); fall back to the execution cwd for those.
+		const root = getMemoryRoot(agentDir, sm.getSessionHome?.() ?? sm.getCwd());
 		if (root && !roots.includes(root)) roots.push(root);
 	}
 	return roots;
@@ -48,7 +50,13 @@ export function memoryRootsFromRegistry(): string[] {
  * Contextless legacy callers keep the registry-wide sweep.
  */
 function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSession | undefined): string[] {
-	const sessionHome = context?.sessionHome ?? caller?.sessionManager.getSessionHome();
+	// Explicit session home wins (bound sessions); standalone callers that only
+	// supply cwd keep their legacy same-root behavior.
+	const sessionHome =
+		context?.sessionHome ??
+		context?.cwd ??
+		caller?.sessionManager.getSessionHome?.() ??
+		caller?.sessionManager.getCwd();
 	if (sessionHome) return [getMemoryRoot(getAgentDir(), sessionHome)];
 	return memoryRootsFromRegistry();
 }

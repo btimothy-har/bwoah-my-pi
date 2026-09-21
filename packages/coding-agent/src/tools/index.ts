@@ -250,6 +250,12 @@ export interface ToolSession {
 	 * re-bind tools to their own session-scoped `CustomToolAPI`.
 	 */
 	customToolPaths?: ToolPathWithSource[];
+	/**
+	 * The native task-isolation root this session executes in, when any. Children
+	 * inherit it for execution only — no cleanup ownership, and their transcripts
+	 * stay cold-revival-refused like any isolated run.
+	 */
+	isolatedTaskRoot?: string;
 	/** Whether LSP integrations are enabled */
 	enableLsp?: boolean;
 	/** Whether LSP is limited to navigation and diagnostics. */

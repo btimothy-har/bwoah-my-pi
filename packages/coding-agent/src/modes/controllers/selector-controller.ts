@@ -379,7 +379,9 @@ export class SelectorController {
 	}
 
 	showAdvisorConfigure(): void {
-		const cwd = this.ctx.sessionManager.getCwd();
+		// Advisor configuration is session-home state: a bound execution worktree
+		// must not gain or lose advisor definitions on its own.
+		const cwd = this.ctx.sessionManager.getSessionHome();
 		const agentDir = getAgentDir() ?? getProjectDir();
 		const initialScope: AdvisorConfigScope = "project";
 		void (async () => {
@@ -2039,6 +2041,10 @@ export class SelectorController {
 				onCwdChange: async newCwd => this.ctx.applyCwdChange(newCwd),
 			})) === false
 		) {
+			// A rejected/rescope-failed switch may have partially refreshed the
+			// command list against the target home before restoring the session;
+			// re-root it at the source. No-op when nothing was attempted.
+			await this.ctx.refreshSlashCommandState();
 			return false;
 		}
 		this.ctx.clearTransientSessionUi();

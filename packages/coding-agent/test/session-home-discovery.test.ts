@@ -372,4 +372,43 @@ describe("native child H/E bootstrap", () => {
 			await reopened.close();
 		}
 	});
+
+	it("lets an ordinary child of an isolated parent run inside the inherited workspace", async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-child-nested-iso-"));
+		const home = path.join(root, "home");
+		const isolation = path.join(root, "isolated");
+		await initRepoAt(home);
+		await fs.mkdir(isolation, { recursive: true });
+
+		let capturedManager: SessionManager | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedManager = options?.sessionManager;
+			return {
+				session: mockChildSession(),
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+		const result = await runSubprocess({
+			cwd: isolation,
+			sessionHome: home,
+			parentIsolatedTaskRoot: isolation,
+			agent: childAgent,
+			task: "nested work",
+			index: 0,
+			id: "nested-in-isolation",
+			settings: Settings.isolated(),
+			modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			enableLsp: false,
+		});
+		expect(result.aborted).toBe(false);
+		// The nested child executes in the parent's ephemeral workspace (I) with
+		// discovery anchored at the owning home (H), and persists no binding.
+		if (!capturedManager) throw new Error("Expected the child session manager");
+		expect(capturedManager.getCwd()).toBe(isolation);
+		expect(capturedManager.getSessionHome()).toBe(path.resolve(home));
+		expect(capturedManager.getExecutionCwd()).toBeUndefined();
+		await capturedManager.close();
+	});
 });

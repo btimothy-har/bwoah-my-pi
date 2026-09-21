@@ -412,6 +412,13 @@ export interface ExecutorOptions {
 	cwd: string;
 	/** Owning session home (H) the child anchors discovery to; derived from the parent's existing session home. */
 	sessionHome: string;
+	/**
+	 * The parent's native isolation root when this child runs inside it. The
+	 * child inherits the ephemeral workspace for execution only — it gains no
+	 * cleanup ownership, and its transcript stays cold-revival-refused like any
+	 * isolated run.
+	 */
+	parentIsolatedTaskRoot?: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3278,6 +3285,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		id,
 		worktree,
 		modelOverride,
+		parentIsolatedTaskRoot,
 		modelRole,
 		thinkingLevel,
 		outputSchema,
@@ -3285,6 +3293,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	// This run's own isolation wins; an ordinary child spawned inside a parent's
+	// isolated workspace inherits that root for execution and identity only.
+	const inheritedIsolationRoot = worktree ?? parentIsolatedTaskRoot;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -3634,14 +3645,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? SessionManager.open(sessionFile, undefined, undefined, {
 						initialCwd: options.sessionHome,
 						initialExecutionCwd: bindsExecution ? effectiveCwd : undefined,
-						isolatedTaskRoot: worktree,
+						isolatedTaskRoot: inheritedIsolationRoot,
 						parentSession: options.sessionFile ?? undefined,
 						suppressBreadcrumb: true,
 					})
 				: (async () => {
 						const manager = SessionManager.inMemory(options.sessionHome);
 						if (bindsExecution) {
-							await manager.setExecutionCwd(effectiveCwd, worktree ? { isolatedTaskRoot: worktree } : undefined);
+							await manager.setExecutionCwd(
+								effectiveCwd,
+								inheritedIsolationRoot ? { isolatedTaskRoot: inheritedIsolationRoot } : undefined,
+							);
 						}
 						return manager;
 					})();
@@ -3742,7 +3756,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				forRevive = false,
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
-				isolatedTaskRoot: worktree,
+				isolatedTaskRoot: inheritedIsolationRoot,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,
@@ -3896,13 +3910,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						suppressBreadcrumb: true,
 						throwIfMissing: true,
 					});
-					if (worktree !== undefined) {
-						// Isolated children anchor at the owning home (H) with execution
-						// at I. I is ephemeral (never persisted), so reopening lands on H;
-						// re-apply the trusted root before building the session or the
-						// revived agent would execute against the parent's checkout.
+					if (inheritedIsolationRoot !== undefined) {
+						// Isolated children (including ordinary children running inside
+						// a parent's isolation) anchor at the owning home (H) with
+						// execution at I. I is ephemeral (never persisted), so reopening
+						// lands on H; re-apply the trusted root before building the
+						// session or the revived agent would execute against H.
 						try {
-							await reopened.setExecutionCwd(worktree, { isolatedTaskRoot: worktree });
+							await reopened.setExecutionCwd(inheritedIsolationRoot, {
+								isolatedTaskRoot: inheritedIsolationRoot,
+							});
 						} catch (error) {
 							await reopened.close();
 							throw error;
@@ -3998,8 +4015,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				restrictToolNames: restrictToolNames || undefined,
 				// Isolated runs are never revivable (worktree merged + cleaned):
 				// stamp the contract so cold revival leaves them transcript-only
-				// even when the workspace was retained for recovery.
-				isolated: worktree !== undefined || undefined,
+				// even when the workspace was retained for recovery. Ordinary
+				// children of an isolated parent inherit the same refusal: their
+				// execution root is equally ephemeral.
+				isolated: inheritedIsolationRoot !== undefined || undefined,
 			});
 
 			abortSignal.addEventListener(
@@ -4196,7 +4215,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					aborted,
 					abortKind: monitor.abortKind(),
 					keepAlive: options.keepAlive !== false,
-					isolated: worktree !== undefined,
+					isolated: inheritedIsolationRoot !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
 					cleanupDeadlineAt,

@@ -194,7 +194,7 @@ export class SSHCommandController {
 		}
 
 		try {
-			const cwd = getProjectDir();
+			const cwd = this.ctx.sessionManager.getSessionHome();
 			const filePath = getSSHConfigPath(scope, cwd);
 
 			const hostConfig: SSHHostConfig = { host };
@@ -241,7 +241,7 @@ export class SSHCommandController {
 	 */
 	async #handleList(): Promise<void> {
 		try {
-			const cwd = getProjectDir();
+			const cwd = this.ctx.sessionManager.getSessionHome();
 
 			// Load from both user and project configs
 			const userPath = getSSHConfigPath("user", cwd);
@@ -359,7 +359,7 @@ export class SSHCommandController {
 		}
 
 		try {
-			const cwd = getProjectDir();
+			const cwd = this.ctx.sessionManager.getSessionHome();
 			const filePath = getSSHConfigPath(scope, cwd);
 			const config = await readSSHConfigFile(filePath);
 			if (!config.hosts?.[name]) {

@@ -419,6 +419,7 @@ function buildExecutorOptions(
 	return {
 		cwd: session.cwd,
 		sessionHome: getToolSessionHome(session),
+		parentIsolatedTaskRoot: session.isolatedTaskRoot,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),

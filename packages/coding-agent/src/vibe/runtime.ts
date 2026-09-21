@@ -1276,6 +1276,7 @@ export class VibeSessionRegistry {
 		return {
 			cwd: session.cwd,
 			sessionHome: getToolSessionHome(session),
+			parentIsolatedTaskRoot: session.isolatedTaskRoot,
 			agent: record.agent,
 			task: message,
 			assignment: message,
