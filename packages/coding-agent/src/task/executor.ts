@@ -3716,6 +3716,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				forRevive = false,
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				isolatedTaskRoot: worktree,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,

@@ -157,7 +157,9 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
+import { DateReminderInjector } from "./session/date-reminder";
+import { renderWorkspacePolicyReminder, resolveWorkspacePolicyState } from "./session/workspace-policy";
+import { CwdWorkspaceReminderInjector } from "./session/cwd-workspace-reminder";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
@@ -251,7 +253,6 @@ import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
-import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -587,6 +588,14 @@ export interface CreateAgentSessionOptions {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/**
+	 * Trusted native task-isolation root for this session's execution cwd, when
+	 * the session runs inside one. `ensureIsolation` deliberately severs shared
+	 * Git metadata, so the sandbox looks like its own primary checkout; this
+	 * tells workspace classification the truth. Transient execution context —
+	 * never persisted, never a tool argument. Non-isolated sessions omit it.
+	 */
+	isolatedTaskRoot?: string;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -3546,7 +3555,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry.getApiKey(model, providerSessionId),
 		);
 		blobBroker?.prewarm();
-		const dateCwdReminder = new DateCwdReminderInjector();
 		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
 		const snapcompactInline =
 			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
@@ -3564,24 +3572,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						blobBroker?.frameSink,
 					)
 				: undefined;
-		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			transformed = clampProviderContextImages(transformed, transformModel);
-			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-			// After the model-specific normalizers: they carry better wording for the
-			// cases they own (STB WebP), so this stays the backstop for everything
-			// else, and it runs before the blob broker uploads any of these bytes.
-			transformed = await dropUnreadableContextImages(transformed, transformModel);
-			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
-			// Keep per-request volatility out of the system prompt: the date/cwd
-			// reminder rides on the first user turn so open-weight providers keep
-			// their tool-schema prefix cache (#7404).
-			return dateCwdReminder.transform(
-				transformed,
-				formatLocalCalendarDate(),
-				normalizePromptPath(sessionManager.getCwd()),
-			);
+		// Each agent gets its own injector: the reminder state machine is scoped
+		// to one conversation, and advisors sharing the main agent's instance would
+		// reset its history (or anchor controls into the wrong message stream).
+		const createProviderContextTransform = () => {
+			const dateReminder = new DateReminderInjector();
+			const workspaceReminder = new CwdWorkspaceReminderInjector();
+			return async (context: Context, transformModel: Model): Promise<Context> => {
+				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+				if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
+				transformed = clampProviderContextImages(transformed, transformModel);
+				transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
+				// After the model-specific normalizers: they carry better wording for the
+				// cases they own (STB WebP), so this stays the backstop for everything
+				// else, and it runs before the blob broker uploads any of these bytes.
+				transformed = await dropUnreadableContextImages(transformed, transformModel);
+				if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+				// Keep per-request volatility out of the system prompt: the date/cwd
+				// reminder rides on the first user turn and the workspace policy rides
+				// as a per-user-request control, so open-weight providers keep their
+				// tool-schema prefix cache (#7404).
+				const rawCwd = sessionManager.getCwd();
+				const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+				const withDate = dateReminder.transform(transformed, formatLocalCalendarDate());
+				// Workspace policy runs last so its control lands at the tail,
+				// immediately before the next model response.
+				return workspaceReminder.transform(withDate, {
+					ownerId: sessionManager.getSessionId(),
+					text: renderWorkspacePolicyReminder(rawCwd, workspaceState),
+				});
+			};
 		};
 		const onPayload = async (payload: unknown, model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model);
@@ -3679,7 +3699,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
 			transformContext,
-			transformProviderContext,
+			transformProviderContext: createProviderContextTransform(),
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -3917,7 +3937,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
-			transformProviderContext,
+			createProviderContextTransform,
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
@@ -4276,7 +4296,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
-				const captureDateCwdReminder = new DateCwdReminderInjector();
+				const captureDateReminder = new DateReminderInjector();
+				const captureWorkspaceReminder = new CwdWorkspaceReminderInjector();
 				return new Agent({
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
@@ -4289,11 +4310,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
-						return captureDateCwdReminder.transform(
-							transformed,
-							formatLocalCalendarDate(),
-							normalizePromptPath(sessionManager.getCwd()),
-						);
+						const rawCwd = sessionManager.getCwd();
+						const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+						const withDate = captureDateReminder.transform(transformed, formatLocalCalendarDate());
+						return captureWorkspaceReminder.transform(withDate, {
+							ownerId: captureSessionId,
+							text: renderWorkspacePolicyReminder(rawCwd, workspaceState),
+						});
 					},
 					thinkingBudgets: agent.thinkingBudgets,
 					temperature: agent.temperature,

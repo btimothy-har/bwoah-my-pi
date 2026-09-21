@@ -42,6 +42,9 @@ import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
 
+/** Provider request transform applied after message conversion. */
+export type ProviderContextTransform = (context: Context, model: Model) => Context | Promise<Context>;
+
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 
@@ -228,8 +231,13 @@ export interface AgentSessionConfig {
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
-	/** Provider request transform applied after message conversion. */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Provider request transform applied after message conversion. Stateful
+	 * transforms (reminder injectors, secret caches) MUST be constructed per
+	 * agent through this factory; a shared callback leaks one conversation's
+	 * state into advisors and side sessions.
+	 */
+	createProviderContextTransform?: () => ProviderContextTransform;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */

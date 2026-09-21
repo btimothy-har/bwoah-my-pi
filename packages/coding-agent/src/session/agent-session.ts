@@ -1889,7 +1889,7 @@ export class AgentSession {
 			configs: config.advisorConfigs,
 			configWarnings: config.advisorConfigWarnings,
 			streamFn: config.advisorStreamFn,
-			transformProviderContext: config.transformProviderContext,
+			createProviderContextTransform: config.createProviderContextTransform,
 		});
 
 		const maintenanceHost: SessionMaintenanceHost = {

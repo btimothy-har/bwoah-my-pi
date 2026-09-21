@@ -12,7 +12,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Context, FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -119,21 +119,43 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(advisor.promptCacheKey).toBe(advisor.sessionId);
 	});
 
-	it("captures the SDK-provided onPayload, onResponse, onSseEvent, and transformProviderContext on the advisor's stream call", async () => {
+	it("captures the SDK-provided hooks on the advisor's stream call and gives each agent its own transform state", async () => {
 		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
-		const captureStreamFn: StreamFn = (_m, _ctx, opts) => {
+		const capturedContexts: Context[] = [];
+		const captureStreamFn: StreamFn = (_m, ctx, opts) => {
 			capturedStreamOptions.push(opts);
+			capturedContexts.push(ctx);
 			// Return a stream that immediately fails — we only need to observe
-			// the options the advisor handed us before the call.
+			// the options and transformed context the advisor handed us.
 			throw new Error("capture-stop");
 		};
 		const onPayload = async (payload: unknown) => payload;
 		const onResponse = async (_response: unknown, _model: unknown) => undefined;
 		const onSseEvent = (_event: { data: string }, _model: unknown) => {};
-		const transformProviderContext = async <T>(context: T): Promise<T> => context;
+		// Stateful transform: each constructed instance tags requests with its own
+		// instance id and call count, so shared-state leaks are visible on the wire.
+		let nextInstance = 0;
+		const createProviderContextTransform = () => {
+			const instance = ++nextInstance;
+			let calls = 0;
+			return async (context: Context): Promise<Context> => ({
+				...context,
+				messages: [
+					...context.messages,
+					{
+						role: "developer" as const,
+						content: `transform-instance-${instance}-call-${++calls}`,
+						synthetic: true,
+						timestamp: Date.now(),
+					},
+				],
+			});
+		};
 
+		const mainTransform = createProviderContextTransform();
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			transformProviderContext: mainTransform,
 		});
 		session = new AgentSession({
 			agent: mainAgent,
@@ -145,7 +167,7 @@ describe("AgentSession advisor provider-options parity", () => {
 			onPayload,
 			onResponse,
 			onSseEvent,
-			transformProviderContext,
+			createProviderContextTransform,
 			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
@@ -179,6 +201,30 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
 		expect(opts.preferWebsockets).toBe(true);
+
+		// Transform state is per agent: the advisor ran on a fresh instance, so a
+		// replay of the main agent's unchanged context continues the main
+		// instance's own counter instead of being reset by advisor traffic.
+		const advisorContext = capturedContexts.at(-1);
+		if (!advisorContext) throw new Error("Expected captured advisor context");
+		const advisorMarkers = advisorContext.messages
+			.filter(message => message.role === "developer" && message.synthetic === true)
+			.map(message => String(message.content));
+		expect(advisorMarkers).toEqual(["transform-instance-2-call-1"]);
+		const mainReplay = await mainTransform({ systemPrompt: ["Test"], messages: [] });
+		expect(String(mainReplay.messages.at(-1)?.content)).toBe("transform-instance-1-call-1");
+
+		// Rebuilding the advisor constructs another fresh transform instance.
+		expect(session.setAdvisorEnabled(false)).toBe(false);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const rebuilt = session.getAdvisorAgent();
+		if (!rebuilt) throw new Error("Expected rebuilt advisor agent");
+		await rebuilt.prompt("ping").catch(() => {});
+		const rebuiltContext = capturedContexts.at(-1);
+		const rebuiltMarkers = rebuiltContext!.messages
+			.filter(message => message.role === "developer" && message.synthetic === true)
+			.map(message => String(message.content));
+		expect(rebuiltMarkers).toEqual(["transform-instance-3-call-1"]);
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {

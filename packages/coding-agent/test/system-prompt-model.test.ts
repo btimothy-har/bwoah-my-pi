@@ -34,16 +34,14 @@ async function expectPromptDateFromStartupTimezone(options: {
 	await Bun.write(
 		scenarioPath,
 		`import { setSystemTime } from "bun:test";
-import { renderDateCwdReminder } from ${JSON.stringify(
-			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
-		)};
+import { renderDateReminder } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/session/date-reminder.ts"))};
 import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../../tui/src/chrome/local-date.ts"))};
 
 setSystemTime(new Date(process.env.OMP_TEST_NOW!));
 try {
 	// The date/cwd reminder is built per request in the startup local timezone;
 	// the system prompt no longer embeds the date (#7404).
-	const reminder = renderDateCwdReminder(formatLocalCalendarDate(), "/cwd");
+	const reminder = renderDateReminder(formatLocalCalendarDate());
 	if (!reminder.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
 		throw new Error(\`Reminder did not contain expected local date:\\n\${reminder}\`);
 	}

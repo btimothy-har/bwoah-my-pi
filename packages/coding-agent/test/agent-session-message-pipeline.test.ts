@@ -1085,10 +1085,21 @@ describe("AgentSession message pipeline", () => {
 			await session.sendUserMessage("second");
 
 			expect(contexts).toHaveLength(2);
-			expect(contexts[0]!.messages).toHaveLength(1);
-			expect(contexts[1]!.messages).toHaveLength(3);
-			expect(contexts[1]!.messages[0]).toBe(contexts[0]!.messages[0]);
-			expect((contexts[1]!.messages[1] as { content: unknown }).content).toEqual([
+			// The workspace reminder rides as synthetic developer controls; it is
+			// orthogonal to the append-only prefix contract this test pins.
+			const sourceMessages = (context: Context) =>
+				context.messages.filter(
+					message =>
+						!(
+							message.role === "developer" &&
+							message.synthetic === true &&
+							String(message.content).includes("Current working directory:")
+						),
+				);
+			expect(sourceMessages(contexts[0]!)).toHaveLength(1);
+			expect(sourceMessages(contexts[1]!)).toHaveLength(3);
+			expect(sourceMessages(contexts[1]!)[0]).toBe(sourceMessages(contexts[0]!)[0]);
+			expect((sourceMessages(contexts[1]!)[1] as { content: unknown }).content).toEqual([
 				{ type: "text", text: "rewritten assistant" },
 			]);
 		} finally {
