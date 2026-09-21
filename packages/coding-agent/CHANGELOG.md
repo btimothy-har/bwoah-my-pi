@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-request workspace reminder that tells the agent its current working directory and checkout role: the primary checkout is read-only pending a user-selected implementation checkout, an execution worktree carries the work with the primary as read-only reference, and native task-isolation sandboxes stay confined to their assigned tree ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+
 ### Changed
 
+- Changed the per-request date/cwd reminder to date-only (`date-reminder`); the current working directory now rides in the workspace-policy reminder (`cwd-workspace-reminder`) ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed `/wt` to bind worktrees for execution only: the canonical session home, session id, transcript, and artifacts stay in place, and `/move` remains the session-relocation command. `worktree.cleanSource` now resets the canonical home after binding instead of a relocated source checkout ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
 

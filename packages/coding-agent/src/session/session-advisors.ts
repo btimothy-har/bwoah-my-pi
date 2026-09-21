@@ -29,7 +29,6 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
-	Context,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -90,6 +89,7 @@ import {
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { ProviderContextTransform } from "./agent-session-types";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
@@ -337,7 +337,8 @@ export interface SessionAdvisorsOptions {
 	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
 	configWarnings?: string[];
 	streamFn?: StreamFn;
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/** Constructs a fresh provider transform per advisor; stateful transforms must never be shared. */
+	createProviderContextTransform?: () => ProviderContextTransform;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -432,7 +433,7 @@ export class SessionAdvisors {
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
-	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	#createProviderContextTransform: (() => ProviderContextTransform) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -475,7 +476,7 @@ export class SessionAdvisors {
 		this.#advisorConfigs = options.configs;
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
-		this.#transformProviderContext = options.transformProviderContext;
+		this.#createProviderContextTransform = options.createProviderContextTransform;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -1135,7 +1136,7 @@ export class SessionAdvisors {
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
-				transformProviderContext: this.#transformProviderContext,
+				transformProviderContext: this.#createProviderContextTransform?.(),
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(

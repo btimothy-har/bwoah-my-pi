@@ -7,7 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { DateCwdReminderInjector, renderDateCwdReminder } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
+import { DateReminderInjector, renderDateReminder } from "@oh-my-pi/pi-coding-agent/session/date-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "@oh-my-pi/pi-coding-agent/utils/prompt-path";
@@ -19,33 +19,21 @@ describe("date-cwd-reminder", () => {
 		clearCustomApis();
 	});
 
-	describe("renderDateCwdReminder", () => {
-		it("renders a system-reminder block carrying the date and cwd with a do-not-repeat instruction", () => {
-			const reminder = renderDateCwdReminder("2026-08-14", "C:/work/omp");
-
-			expect(reminder.startsWith("<system-reminder>")).toBe(true);
-			expect(reminder.endsWith("</system-reminder>")).toBe(true);
-			expect(reminder).toContain("2026-08-14");
-			expect(reminder).toContain("C:/work/omp");
-			expect(reminder).toContain("Do not repeat");
-		});
-	});
-
-	describe("DateCwdReminderInjector", () => {
+	describe("DateReminderInjector", () => {
 		it("injects the first reminder without mutating the context", () => {
 			const systemPrompt = ["PROJECT\n<critical>\n- Must act.\n</critical>"];
 			const messages: Message[] = [{ role: "user", content: "hello", timestamp: 1 }, createAssistantMessage("hi")];
 			const context: Context = { systemPrompt, messages };
-			const injector = new DateCwdReminderInjector();
+			const injector = new DateReminderInjector();
 
-			const out = injector.transform(context, "2026-08-14", "/work/omp");
+			const out = injector.transform(context, "2026-08-14");
 
 			expect(out).not.toBe(context);
 			expect(out.systemPrompt).toBe(systemPrompt);
 			expect(out.messages).not.toBe(messages);
 			expect(out.messages[0]).toEqual({
 				role: "user",
-				content: `${renderDateCwdReminder("2026-08-14", "/work/omp")}\n\nhello`,
+				content: `${renderDateReminder("2026-08-14")}\n\nhello`,
 				timestamp: 1,
 			});
 			expect(out.messages[1]).toBe(messages[1]);
@@ -64,32 +52,32 @@ describe("date-cwd-reminder", () => {
 				],
 			};
 
-			const out = new DateCwdReminderInjector().transform(context, "2026-08-14", "/work/omp");
+			const out = new DateReminderInjector().transform(context, "2026-08-14");
 
 			expect(out.messages[0]?.content).toEqual([
-				{ type: "text", text: renderDateCwdReminder("2026-08-14", "/work/omp") },
+				{ type: "text", text: renderDateReminder("2026-08-14") },
 				{ type: "image", data: "img", mimeType: "image/png" },
 			]);
 		});
 
 		it("leaves contexts without a system prompt or user message untouched", () => {
-			const injector = new DateCwdReminderInjector();
+			const injector = new DateReminderInjector();
 			const noSystem: Context = {
 				systemPrompt: [],
 				messages: [{ role: "user", content: "hi", timestamp: 1 }],
 			};
 			const noUser: Context = { systemPrompt: ["system"], messages: [createAssistantMessage("hi")] };
 
-			expect(injector.transform(noSystem, "2026-08-14", "/cwd")).toBe(noSystem);
-			expect(injector.transform(noUser, "2026-08-14", "/cwd")).toBe(noUser);
+			expect(injector.transform(noSystem, "2026-08-14")).toBe(noSystem);
+			expect(injector.transform(noUser, "2026-08-14")).toBe(noUser);
 		});
 
 		it("keeps prior reminder bytes and moves a changed reminder to the next user turn", () => {
-			const injector = new DateCwdReminderInjector();
+			const injector = new DateReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
 			const firstContext: Context = { systemPrompt: ["system"], messages: [firstUser] };
 
-			const first = injector.transform(firstContext, "2026-08-14", "/old");
+			const first = injector.transform(firstContext, "2026-08-14");
 			const firstInjected = first.messages[0]!;
 			const secondUser: Message = { role: "user", content: "second", timestamp: 2 };
 			const second = injector.transform(
@@ -98,23 +86,22 @@ describe("date-cwd-reminder", () => {
 					messages: [firstUser, createAssistantMessage("done"), secondUser],
 				},
 				"2026-08-15",
-				"/new",
 			);
 
 			expect(second.messages[0]).toBe(firstInjected);
 			expect(second.messages[0]?.content).toBe(firstInjected.content);
-			expect(second.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/new")}\n\nsecond`);
+			expect(second.messages[2]?.content).toBe(`${renderDateReminder("2026-08-15")}\n\nsecond`);
 			expect(firstUser.content).toBe("first");
 			expect(secondUser.content).toBe("second");
 		});
 
 		it("reuses injected message objects on provider request replay", () => {
-			const injector = new DateCwdReminderInjector();
+			const injector = new DateReminderInjector();
 			const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
 			const context: Context = { systemPrompt: ["system"], messages: [firstUser] };
 
-			const first = injector.transform(context, "2026-08-14", "/work/omp");
-			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14", "/work/omp");
+			const first = injector.transform(context, "2026-08-14");
+			const replay = injector.transform({ ...context, messages: [...context.messages] }, "2026-08-14");
 
 			expect(replay.messages[0]).toBe(first.messages[0]);
 		});
@@ -199,7 +186,7 @@ describe("date-cwd reminder on the provider wire", () => {
 				typeof firstUser.content === "string" ? firstUser.content : JSON.stringify(firstUser.content);
 			expect(firstText).toContain("<system-reminder>");
 			expect(firstText).toContain(formatLocalCalendarDate());
-			expect(firstText).toContain(normalizePromptPath(tempDir.path()));
+			expect(firstText).not.toContain(normalizePromptPath(tempDir.path()));
 
 			// A second request must re-emit byte-identical reminder bytes so the
 			// conversation prefix (system + tools + first turn) stays cached.

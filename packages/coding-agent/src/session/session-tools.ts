@@ -1822,8 +1822,8 @@ export class SessionTools {
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
 	 *
-	 * The calendar date is deliberately NOT part of the signature: the date/cwd
-	 * reminder rides on the first user turn at request time (`date-cwd-reminder`),
+	 * The calendar date is deliberately NOT part of the signature: the date
+	 * reminder rides on the first user turn at request time (`date-reminder`),
 	 * so a session spanning midnight must NOT rebuild a prompt that no longer
 	 * embeds the date — the reminder picks up the new day on its own.
 	 */
