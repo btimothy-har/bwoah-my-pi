@@ -107,6 +107,7 @@ describe("structured output sidecar lifecycle", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do work",
 			index: 0,
@@ -160,6 +161,7 @@ describe("structured output sidecar lifecycle", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do work",
 			index: 0,
@@ -189,6 +191,7 @@ describe("structured output sidecar lifecycle", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do work",
 			index: 0,

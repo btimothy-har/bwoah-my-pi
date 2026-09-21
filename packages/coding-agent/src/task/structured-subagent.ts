@@ -20,7 +20,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
-import type { ToolSession } from "../tools";
+import { getToolSessionHome, type ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -270,7 +270,11 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
+	const discovery = await discoverAgents(
+		getToolSessionHome(request.session),
+		undefined,
+		request.session.effectiveExtensionRoots?.(),
+	);
 	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
@@ -413,6 +417,7 @@ function buildExecutorOptions(
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		sessionHome: getToolSessionHome(session),
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),

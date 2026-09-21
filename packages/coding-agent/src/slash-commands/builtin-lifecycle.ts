@@ -22,6 +22,7 @@ import {
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { refreshAgentDiscovery } from "../task";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
@@ -933,17 +934,21 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
-	await runtime.settings.reloadForCwd(cwd);
+	// The process moves to the execution directory (E); harness discovery stays
+	// anchored at the session home (H), which `/move` has already re-anchored.
+	const home = runtime.sessionManager.getSessionHome();
+	await runtime.settings.reloadForCwd(home);
 	await rebindMemoryBackendForCwd(runtime.session);
 	applyProviderGlobalsFromSettings(runtime.settings);
 	clearClaudePluginRootsCache();
-	const src = discoverTitleSystemPromptFile(cwd);
+	await refreshAgentDiscovery(home, runtime.session.effectiveExtensionRoots);
+	const src = discoverTitleSystemPromptFile(home);
 	const p = await resolvePromptInput(src, "title system prompt");
 	runtime.session.setTitleSystemPrompt(p);
 	resetCapabilities();
 	await runtime.session.refreshSkills();
 	const cmds = await loadSlashCommands({
-		cwd,
+		cwd: home,
 		extensionRoots: runtime.session.effectiveExtensionRoots,
 	});
 	runtime.session.setSlashCommands(cmds);

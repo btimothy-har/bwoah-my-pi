@@ -2148,14 +2148,14 @@ export class AcpAgent implements Agent {
 	 * sees newly installed/disabled plugins.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
-		const cwd = record.session.sessionManager.getCwd();
-		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		const home = record.session.sessionManager.getSessionHome();
+		const projectPath = await resolveActiveProjectRegistryPath(home);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
+		await refreshAgentDiscovery(home, record.session.effectiveExtensionRoots);
 		resetCapabilities();
 		await record.session.refreshSkills();
 		const fileCommands = await loadSlashCommands({
-			cwd,
+			cwd: home,
 			extensionRoots: record.session.effectiveExtensionRoots,
 		});
 		record.session.setSlashCommands(fileCommands);

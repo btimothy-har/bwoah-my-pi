@@ -126,6 +126,7 @@ describe("runSubprocess deferred cleanup outcome (issue #9670)", () => {
 		let deferredCleanup: Promise<void> | undefined;
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -168,6 +169,7 @@ describe("runSubprocess deferred cleanup outcome (issue #9670)", () => {
 		let deferredCleanup: Promise<void> | undefined;
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,

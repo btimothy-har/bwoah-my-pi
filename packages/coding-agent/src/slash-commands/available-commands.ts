@@ -27,7 +27,7 @@ export interface AvailableCommandsSession {
 	readonly skillsSettings?: SkillsSettings;
 	readonly effectiveExtensionRoots?: EffectiveExtensionRoots;
 	setSlashCommands(slashCommands: FileSlashCommand[]): void;
-	sessionManager: { getCwd(): string };
+	sessionManager: { getCwd(): string; getSessionHome(): string };
 }
 
 export async function buildAvailableSlashCommands(
@@ -95,7 +95,7 @@ export async function buildAvailableSlashCommands(
 		});
 	}
 
-	const fileCommands = await loadFileCommands(session.sessionManager.getCwd());
+	const fileCommands = await loadFileCommands(session.sessionManager.getSessionHome());
 	session.setSlashCommands(fileCommands);
 	for (const command of fileCommands) {
 		appendCommand({

@@ -9,7 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, normalizePathForComparison, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -401,7 +401,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Options for subagent execution */
 export interface ExecutorOptions {
+	/** Execution root for the subagent (parent's live E; `worktree` overrides for isolation). */
 	cwd: string;
+	/** Owning session home (H) the child anchors discovery to; derived from the parent's existing session home. */
+	sessionHome: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3612,13 +3615,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
+			// Fresh children join the parent's H/E model: the transcript anchors at
+			// the owning session home (discovery stays H-scoped) while execution
+			// binds to E — or, for native isolation, to the ephemeral detached
+			// workspace I through the executor-only trust handoff. An existing
+			// transcript keeps its recorded home/binding; a parent rebind or
+			// relocation never rewrites it.
+			const bindsExecution =
+				normalizePathForComparison(effectiveCwd) !== normalizePathForComparison(options.sessionHome);
 			const sessionManagerPromise = sessionFile
 				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
+						initialCwd: options.sessionHome,
+						initialExecutionCwd: bindsExecution ? effectiveCwd : undefined,
+						isolatedTaskRoot: worktree,
 						parentSession: options.sessionFile ?? undefined,
 						suppressBreadcrumb: true,
 					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+				: (async () => {
+						const manager = SessionManager.inMemory(options.sessionHome);
+						if (bindsExecution) {
+							await manager.setExecutionCwd(effectiveCwd, worktree ? { isolatedTaskRoot: worktree } : undefined);
+						}
+						return manager;
+					})();
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -3870,6 +3889,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						suppressBreadcrumb: true,
 						throwIfMissing: true,
 					});
+					if (worktree !== undefined) {
+						// Isolated children anchor at the owning home (H) with execution
+						// at I. I is ephemeral (never persisted), so reopening lands on H;
+						// re-apply the trusted root before building the session or the
+						// revived agent would execute against the parent's checkout.
+						try {
+							await reopened.setExecutionCwd(worktree, { isolatedTaskRoot: worktree });
+						} catch (error) {
+							await reopened.close();
+							throw error;
+						}
+					}
 					if (!hasConversationalHistory(reopened.getEntries())) {
 						await reopened.close();
 						throw new Error(

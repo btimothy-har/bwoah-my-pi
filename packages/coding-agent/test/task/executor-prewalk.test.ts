@@ -122,6 +122,7 @@ describe("runSubprocess per-agent prewalk", () => {
 	function baseOptions(id: string, settings: Settings) {
 		return {
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			task: "do work",
 			index: 0,
 			id,

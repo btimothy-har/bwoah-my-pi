@@ -40,7 +40,7 @@ import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
 import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
-import type { ToolSession } from "../tools";
+import { getToolSessionHome, type ToolSession } from "../tools";
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
@@ -1274,6 +1274,7 @@ export class VibeSessionRegistry {
 		};
 		return {
 			cwd: session.cwd,
+			sessionHome: getToolSessionHome(session),
 			agent: record.agent,
 			task: message,
 			assignment: message,

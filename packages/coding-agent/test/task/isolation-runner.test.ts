@@ -137,6 +137,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: repoRoot,
+				sessionHome: repoRoot,
 				agent: {
 					name: "task",
 					description: "Task agent",
@@ -223,6 +224,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: repoRoot,
+				sessionHome: repoRoot,
 				agent: {
 					name: "task",
 					description: "Task agent",
@@ -267,6 +269,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: {
 					name: "task",
 					description: "Task agent",
@@ -344,6 +347,7 @@ describe("runIsolatedSubprocess", () => {
 		const run = runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
 				task: "Do work",
 				index: 0,
@@ -437,6 +441,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
 				task: "Do work",
 				index: 0,
@@ -529,6 +534,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
 				task: "Do work",
 				index: 0,
@@ -584,6 +590,7 @@ describe("runIsolatedSubprocess", () => {
 			runIsolatedSubprocess({
 				baseOptions: {
 					cwd: "/repo",
+					sessionHome: "/repo",
 					agent: {
 						name: "task",
 						description: "Task agent",
@@ -677,6 +684,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
 				task: "Do nested work",
 				index: 0,
@@ -722,6 +730,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: "/repo",
+				sessionHome: "/repo",
 				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
 				task: "Do nested work",
 				index: 0,
