@@ -173,6 +173,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 	if (!settings.get("startup.checkUpdate")) {
 		return;
 	}
+	if (DISPLAY_VERSION.endsWith("+bwoah")) {
+		return;
+	}
 	try {
 		const channel = settings.get("update.channel");
 		const release = await getLatestRelease({ timeoutMs: 5_000, channel });

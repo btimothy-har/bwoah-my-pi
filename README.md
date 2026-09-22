@@ -4,37 +4,40 @@ This repository is a personal fork of [Oh My Pi](https://github.com/can1357/oh-m
 
 ## Install
 
-Requires Git, [Bun](https://bun.sh) 1.3.14 or newer, [rustup](https://rustup.rs), and native build tools (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu).
+macOS arm64 binary — no Bun, Rust, or build tools required:
 
 ```sh
-# Remove the published package first if it is installed.
-bun remove -g @oh-my-pi/pi-coding-agent
-
-git clone --branch main https://github.com/btimothy-har/bwoah-my-pi.git ~/.local/share/bwoah-my-pi
-cd ~/.local/share/bwoah-my-pi
-bun setup
-
-omp --version
+curl -fsSL https://raw.githubusercontent.com/btimothy-har/bwoah-my-pi/main/scripts/install-bwoah.sh | sh
 ```
 
-`bun setup` installs dependencies, builds the native addon, and links this checkout as the global `omp` command. `omp --version` reports the compatible upstream version with a `+bwoah` suffix.
+The installer resolves the latest `bwoah-v*` release from this repository only, verifies the SHA-256 checksum before executing anything, and installs `omp` to `~/.local/bin` (override with `PI_INSTALL_DIR`). `omp --version` reports the compatible upstream version with a `+bwoah` suffix.
 
-To stop notifications about official upstream npm releases, optionally disable the update check:
+Pin or roll back to a specific release:
 
 ```sh
-omp config set startup.checkUpdate false
+curl -fsSL https://raw.githubusercontent.com/btimothy-har/bwoah-my-pi/main/scripts/install-bwoah.sh -o install-bwoah.sh
+sh install-bwoah.sh --ref bwoah-v18.2.5-20260922-1430
 ```
 
-Omit this optional command to preserve the current update-check setting.
+### Source install
+
+Requires Git, [Bun](https://bun.sh) 1.3.14 or newer, [rustup](https://rustup.rs), and native build tools (Xcode Command Line Tools):
+
+```sh
+sh install-bwoah.sh --source
+```
+
+This clones this fork to `~/.local/share/bwoah-my-pi` and runs `bun setup`, which builds the native addon and links the checkout as the global `omp` command through Bun's global bin.
 
 ## Update
 
-```sh
-cd ~/.local/share/bwoah-my-pi
-git pull --ff-only origin main
-bun setup
-```
+- Binary install: re-run the installer command above.
+- Source install: re-run `sh install-bwoah.sh --source`, or `git pull --ff-only origin main && bun setup` inside `~/.local/share/bwoah-my-pi`.
 
-Do not use `omp update` for this source installation; it targets official upstream packages and release assets. See [deployment issue #1](https://github.com/btimothy-har/bwoah-my-pi/issues/1) for verification, platform prerequisites, and upstream-sync details.
+`omp update` refuses to update this fork: it targets upstream npm packages and release assets. Fork builds also skip the upstream release notification at startup.
+
+## Releasing
+
+Maintainers cut a binary release with the **Bwoah release** workflow (Actions tab, **Run workflow** on `main`). The run builds the macOS arm64 binary from the dispatched commit, attaches it to a GitHub Release on this repository tagged `bwoah-v<upstream-version>-<yyyymmdd>-<hhmm>` (UTC), and marks it latest. There are no version bumps: `VERSION` stays the upstream package version and the tag only labels the fork build.
 
 For general documentation and support, use the [upstream repository](https://github.com/can1357/oh-my-pi).
