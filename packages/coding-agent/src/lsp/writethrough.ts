@@ -542,7 +542,10 @@ async function flushWritethroughBatch(
 }
 
 /** Create a writethrough callback for LSP aware write operations */
-export function createLspWritethrough(cwd: string, options?: WritethroughOptions): WritethroughCallback {
+export function createLspWritethrough(
+	cwd: string | (() => string),
+	options?: WritethroughOptions,
+): WritethroughCallback {
 	const resolvedOptions: ResolvedWritethroughOptions = {
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
@@ -556,6 +559,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		batch?: LspWritethroughBatchRequest,
 		getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 	) => {
+		const effectiveCwd = typeof cwd === "function" ? cwd() : cwd;
 		const changeType = (await Bun.file(dst).exists()) ? FileChangeType.Changed : FileChangeType.Created;
 		if (!batch) {
 			const bundle = getDeferred?.(dst);
@@ -568,7 +572,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 			const diagnostics = await runLspWritethrough(
 				dst,
 				content,
-				cwd,
+				effectiveCwd,
 				resolvedOptions,
 				changeType,
 				signal,
@@ -592,7 +596,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 						await flushWritethroughBatch(
 							Array.from(pending.entries.values()),
 							"",
-							cwd,
+							effectiveCwd,
 							pending.options,
 							signal,
 							getDeferred,
@@ -615,7 +619,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		const result = await flushWritethroughBatch(
 			Array.from(state.entries.values()),
 			dst,
-			cwd,
+			effectiveCwd,
 			state.options,
 			signal,
 			getDeferred,

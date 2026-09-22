@@ -191,6 +191,43 @@ describe("createLspWritethrough batching", () => {
 		expect(await Bun.file(fileB).exists()).toBe(false);
 	});
 
+	it("uses the live cwd when a failed final write flushes earlier entries", async () => {
+		const cwdA = path.join(tempDir.path(), "a");
+		const cwdB = path.join(tempDir.path(), "b");
+		await Promise.all([fs.mkdir(cwdA, { recursive: true }), fs.mkdir(cwdB, { recursive: true })]);
+		const formatter = createFormatter(async (_filePath, content) => content.replace("=1", " = 1;"));
+		vi.spyOn(lspConfig, "loadConfig").mockImplementation(cwd => {
+			const servers: Record<string, ServerConfig> = path.resolve(cwd) === path.resolve(cwdB) ? { formatter } : {};
+			return { servers, idleTimeoutMs: undefined };
+		});
+
+		let currentCwd = cwdA;
+		const writethrough = createLspWritethrough(() => currentCwd, {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		currentCwd = cwdB;
+
+		const applied = path.join(cwdB, "applied.ts");
+		const failed = path.join(cwdB, "failed.ts");
+		const batchId = `live-cwd-final-write-failure-${Date.now()}`;
+		await writethrough(applied, "const applied=1\n", undefined, undefined, {
+			id: batchId,
+			flush: false,
+		});
+		vi.spyOn(Bun, "write").mockRejectedValueOnce(new Error("ENOSPC"));
+
+		await expect(
+			writethrough(failed, "const failed=1\n", undefined, undefined, {
+				id: batchId,
+				flush: true,
+			}),
+		).rejects.toThrow("ENOSPC");
+
+		expect(await Bun.file(applied).text()).toBe("const applied = 1;\n");
+		expect(await Bun.file(failed).exists()).toBe(false);
+	});
+
 	it("runs LSP immediately when no batch is provided", async () => {
 		const loadConfigSpy = vi
 			.spyOn(lspConfig, "loadConfig")

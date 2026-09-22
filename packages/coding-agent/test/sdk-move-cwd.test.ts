@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
@@ -59,6 +60,39 @@ interface NativeLspState {
 }
 
 const fakeLspFixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server.ts");
+
+async function gitCli(cwd: string, ...args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${stderr}`);
+	return stdout.trim();
+}
+
+async function initRepoAt(dir: string): Promise<void> {
+	await fs.promises.mkdir(dir, { recursive: true });
+	await gitCli(dir, "init", "-q", "-b", "main");
+	const repo = vcs.git(dir);
+	if (!repo) throw new Error(`Git repository not discovered at ${dir}`);
+	await repo.configSet("user.email", "test@example.com");
+	await repo.configSet("user.name", "test");
+	await Promise.all([
+		Bun.write(path.join(dir, "sentinel.native"), "HOME LSP\n"),
+		Bun.write(path.join(dir, "edit.native"), "home edit\n"),
+	]);
+	await repo.stageFiles(["sentinel.native", "edit.native"]);
+	await repo.commitCreate("init", {});
+}
+
+async function makeLinkedWorktree(home: string, target: string, branch: string): Promise<void> {
+	const repo = vcs.git(home);
+	if (!repo) throw new Error(`Git repository not discovered at ${home}`);
+	await repo.createBranch(branch, "HEAD", false);
+	await repo.worktreeAdd(target, branch, { detach: false, clone: false });
+}
 
 describe("createAgentSession cwd after /move", () => {
 	const tempDirs: string[] = [];
@@ -187,6 +221,137 @@ describe("createAgentSession cwd after /move", () => {
 				initialArtifactId,
 				initialArtifactPath,
 				serverConfig,
+				startup: startup.promise,
+				dispose,
+			};
+		} catch (error) {
+			await dispose();
+			throw error;
+		}
+	}
+
+	async function createLiveTransitionFixture() {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-live-cwd-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const home = path.join(tempDir, "home");
+		const executionOne = path.join(tempDir, "execution-one");
+		const executionTwo = path.join(tempDir, "execution-two");
+		const moved = path.join(tempDir, "moved");
+		const agentDir = path.join(tempDir, "agent");
+		const sessionStore = path.join(tempDir, "sessions");
+		await initRepoAt(home);
+		await makeLinkedWorktree(home, executionOne, "feature/one");
+		await makeLinkedWorktree(home, executionTwo, "feature/two");
+		await Promise.all([
+			Bun.write(path.join(executionOne, "sentinel.native"), "EXECUTION ONE LSP\n"),
+			Bun.write(path.join(executionOne, "edit.native"), "execution one edit\n"),
+			Bun.write(path.join(executionTwo, "sentinel.native"), "EXECUTION TWO LSP\n"),
+			Bun.write(path.join(executionTwo, "edit.native"), "execution two edit\n"),
+			Bun.write(path.join(moved, "sentinel.native"), "MOVED LSP\n"),
+			Bun.write(path.join(moved, "edit.native"), "moved edit\n"),
+		]);
+
+		const sessionManager = SessionManager.create(home, sessionStore);
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted home session");
+		const initialArtifactId = await sessionManager.saveArtifact("before execution transition", "read");
+		if (!initialArtifactId) throw new Error("Expected an initial artifact");
+		const initialArtifactPath = await sessionManager.getArtifactPath(initialArtifactId);
+		if (!initialArtifactPath) throw new Error("Expected an initial artifact path");
+		await sessionManager.setExecutionCwd(executionOne);
+
+		const serverConfig: ServerConfig = {
+			command: process.execPath,
+			resolvedCommand: process.execPath,
+			args: ["run", fakeLspFixturePath],
+			fileTypes: [".native"],
+			rootMarkers: [],
+			warmupTimeoutMs: 5_000,
+		};
+		const executionConfig: LspConfig = { servers: { "fake-native": serverConfig } };
+		const configuredRoots = [executionOne, executionTwo, moved].map(root => path.resolve(root));
+		for (const root of configuredRoots) lspConfig.configCache.set(root, executionConfig);
+		vi.spyOn(lspConfig, "loadConfig").mockImplementation(cwd =>
+			configuredRoots.includes(path.resolve(cwd)) ? executionConfig : { servers: {} },
+		);
+		vi.spyOn(lspClient, "setSharedLspEnabled").mockImplementation(() => {});
+		vi.spyOn(lspMuxDaemon, "connectSharedLspTransport").mockResolvedValue(null);
+
+		const eventBus = new EventBus();
+		const startup = Promise.withResolvers<LspStartupEvent>();
+		const unsubscribe = eventBus.on(LSP_STARTUP_EVENT_CHANNEL, event => {
+			startup.resolve(event as LspStartupEvent);
+		});
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		let disposed = false;
+		const dispose = async (): Promise<void> => {
+			if (disposed) return;
+			disposed = true;
+			unsubscribe();
+			try {
+				if (session) await session.dispose();
+				else await sessionManager.close();
+			} finally {
+				try {
+					await Promise.all(
+						[home, executionOne, executionTwo, moved].map(root => lspClient.shutdownStaleClients(root, [])),
+					);
+				} finally {
+					for (const root of configuredRoots) lspConfig.configCache.delete(root);
+					authStorage.close();
+					vi.restoreAllMocks();
+				}
+			}
+		};
+
+		try {
+			const created = await createAgentSession({
+				cwd: home,
+				agentDir,
+				sessionManager,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"bash.autoBackground.enabled": false,
+					"bashInterceptor.enabled": false,
+					"edit.mode": "hashline",
+					"eval.autoBackground.enabled": false,
+					"lsp.diagnosticsDeduplicate": false,
+					"lsp.diagnosticsOnEdit": true,
+					"lsp.diagnosticsOnWrite": true,
+					"lsp.formatOnWrite": false,
+					"lsp.lazy": false,
+					"startup.quiet": false,
+				}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				eventBus,
+				hasUI: true,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: true,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read", "write", "edit", "lsp"],
+			});
+			session = created.session;
+			return {
+				...created,
+				tempDir,
+				home,
+				executionOne,
+				executionTwo,
+				moved,
+				sessionFile,
+				sessionManager,
+				initialArtifactPath,
 				startup: startup.promise,
 				dispose,
 			};
@@ -568,6 +733,124 @@ describe("createAgentSession cwd after /move", () => {
 			expect(await Bun.file(secondArtifactPath).text()).toBe("after execution split");
 			expect(await Bun.file(path.join(fixture.home, "sentinel.txt")).text()).toBe("HOME\n");
 			expect(await Bun.file(path.join(fixture.home, "sentinel.native")).text()).toBe("HOME LSP\n");
+		} finally {
+			await fixture.dispose();
+		}
+	}, 30_000);
+
+	it("routes long-lived edit and write LSP processing through the live execution cwd", async () => {
+		const fixture = await createLiveTransitionFixture();
+		try {
+			const startupEvent = await withTimeout(fixture.startup, 10_000, "Timed out waiting for native LSP warmup");
+			if (startupEvent.type === "failed") throw new Error(startupEvent.error);
+
+			const readTool = fixture.session.getToolByName("read");
+			const writeTool = fixture.session.getToolByName("write");
+			const editTool = fixture.session.getToolByName("edit");
+			const lspTool = fixture.session.getToolByName("lsp");
+			if (!readTool || !writeTool || !editTool || !lspTool) {
+				throw new Error("Expected native read/write/edit/lsp tools");
+			}
+
+			const originalSessionId = fixture.session.sessionId;
+			await fixture.session.setExecutionCwd(fixture.executionTwo);
+			await fixture.session.refreshSkills();
+
+			const writtenContent = "written through execution two\n";
+			const writeResult = await writeTool.execute("live-cwd-write", {
+				path: "written.native",
+				content: writtenContent,
+			});
+			expect(writeResult.isError).not.toBe(true);
+			const editReadResult = await readTool.execute("live-cwd-edit-read", { path: "edit.native" });
+			const editHeader = textContent(editReadResult)
+				.split("\n")
+				.find(line => /^\[edit\.native#[0-9A-F]{4}\]$/.test(line));
+			if (!editHeader) throw new Error("Expected a hashline header for edit.native");
+			const editResult = await editTool.execute("live-cwd-edit", {
+				input: `${editHeader}\nPUT 1.=1:\n+edited through execution two\n`,
+			});
+			expect(editResult.isError).not.toBe(true);
+
+			expect(await Bun.file(path.join(fixture.executionTwo, "written.native")).text()).toBe(writtenContent);
+			expect(await Bun.file(path.join(fixture.executionTwo, "edit.native")).text()).toBe(
+				"edited through execution two\n",
+			);
+			expect(await Bun.file(path.join(fixture.home, "written.native")).exists()).toBe(false);
+			expect(await Bun.file(path.join(fixture.executionOne, "written.native")).exists()).toBe(false);
+			expect(await Bun.file(path.join(fixture.home, "edit.native")).text()).toBe("home edit\n");
+			expect(await Bun.file(path.join(fixture.executionOne, "edit.native")).text()).toBe("execution one edit\n");
+
+			const contextResult = await lspTool.execute("live-cwd-lsp-context", {
+				action: "request",
+				file: "sentinel.native",
+				query: "test/executionContext",
+			});
+			const executionContext = JSON.parse(lspResponseBody(contextResult)) as NativeLspExecutionContext;
+			expect(executionContext.cwd).toBe(fs.realpathSync(fixture.executionTwo));
+			for (const [fileName, expectedContent] of [
+				["written.native", writtenContent],
+				["edit.native", "edited through execution two\n"],
+			] as const) {
+				const documentResult = await lspTool.execute(`live-cwd-lsp-document-${fileName}`, {
+					action: "request",
+					file: "sentinel.native",
+					query: "test/documentText",
+					payload: JSON.stringify({ uri: fileToUri(path.join(fixture.executionTwo, fileName)) }),
+				});
+				expect(lspResponseBody(documentResult)).toBe(expectedContent);
+			}
+
+			const transitionArtifactId = await fixture.sessionManager.saveArtifact("after execution transition", "write");
+			if (!transitionArtifactId) throw new Error("Expected an execution-transition artifact");
+			const transitionArtifactPath = await fixture.sessionManager.getArtifactPath(transitionArtifactId);
+			if (!transitionArtifactPath) throw new Error("Expected an execution-transition artifact path");
+			expect(fixture.session.sessionId).toBe(originalSessionId);
+			expect(fixture.sessionManager.getSessionFile()).toBe(fixture.sessionFile);
+			expect(path.dirname(fixture.initialArtifactPath)).toBe(fixture.sessionFile.slice(0, -6));
+			expect(path.dirname(transitionArtifactPath)).toBe(fixture.sessionFile.slice(0, -6));
+
+			await fixture.session.moveSession(fixture.moved, path.join(fixture.tempDir, "moved-sessions"));
+			await fixture.session.refreshSkills();
+			const movedWrittenContent = "written after relocation\n";
+			await writeTool.execute("moved-cwd-write", {
+				path: "moved-written.native",
+				content: movedWrittenContent,
+			});
+			const movedEditRead = await readTool.execute("moved-cwd-edit-read", { path: "edit.native" });
+			const movedEditHeader = textContent(movedEditRead)
+				.split("\n")
+				.find(line => /^\[edit\.native#[0-9A-F]{4}\]$/.test(line));
+			if (!movedEditHeader) throw new Error("Expected a relocated hashline header for edit.native");
+			await editTool.execute("moved-cwd-edit", {
+				input: `${movedEditHeader}\nPUT 1.=1:\n+edited after relocation\n`,
+			});
+
+			const movedContextResult = await lspTool.execute("moved-cwd-lsp-context", {
+				action: "request",
+				file: "sentinel.native",
+				query: "test/executionContext",
+			});
+			const movedContext = JSON.parse(lspResponseBody(movedContextResult)) as NativeLspExecutionContext;
+			expect(movedContext.cwd).toBe(fs.realpathSync(fixture.moved));
+			for (const [fileName, expectedContent] of [
+				["moved-written.native", movedWrittenContent],
+				["edit.native", "edited after relocation\n"],
+			] as const) {
+				const documentResult = await lspTool.execute(`moved-cwd-lsp-document-${fileName}`, {
+					action: "request",
+					file: "sentinel.native",
+					query: "test/documentText",
+					payload: JSON.stringify({ uri: fileToUri(path.join(fixture.moved, fileName)) }),
+				});
+				expect(lspResponseBody(documentResult)).toBe(expectedContent);
+			}
+			expect(fixture.sessionManager.getSessionHome()).toBe(path.resolve(fixture.moved));
+			expect(fixture.sessionManager.getCwd()).toBe(path.resolve(fixture.moved));
+			expect(fixture.sessionManager.getExecutionCwd()).toBeUndefined();
+			expect(await Bun.file(path.join(fixture.executionTwo, "edit.native")).text()).toBe(
+				"edited through execution two\n",
+			);
 		} finally {
 			await fixture.dispose();
 		}
