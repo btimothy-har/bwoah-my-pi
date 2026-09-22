@@ -49,7 +49,10 @@ function createFakeCtx(discoveredNames: string[]) {
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
 	// Config reads resolve at the session home; this fixture's project dir is it.
-	const ctx = { mcpManager, sessionManager: { getSessionHome: () => getProjectDir() } } as never as InteractiveModeContext;
+	const ctx = {
+		mcpManager,
+		sessionManager: { getSessionHome: () => getProjectDir() },
+	} as never as InteractiveModeContext;
 	return { ctx, mcpManager };
 }
 
