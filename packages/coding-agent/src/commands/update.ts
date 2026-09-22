@@ -12,18 +12,30 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 export default class Update extends Command {
 	static description = commandHelp.description;
 	static flags = {
-		force: Flags.boolean({ char: "f", description: "Force update", default: false }),
-		check: Flags.boolean({ char: "c", description: "Check for updates without installing", default: false }),
+		force: Flags.boolean({
+			char: "f",
+			description: "Unsupported for fork app updates; re-run scripts/install-bwoah.sh",
+			default: false,
+		}),
+		check: Flags.boolean({
+			char: "c",
+			description: "Unsupported for fork app updates; re-run scripts/install-bwoah.sh",
+			default: false,
+		}),
 		plugins: Flags.boolean({ char: "l", description: "Update installed plugins", default: false }),
-		canary: Flags.boolean({ description: "Switch to the canary channel and update", default: false }),
-		stable: Flags.boolean({ description: "Switch back to the stable channel", default: false }),
+		canary: Flags.boolean({
+			description: "Unsupported for fork app updates; re-run scripts/install-bwoah.sh",
+			default: false,
+		}),
+		stable: Flags.boolean({
+			description: "Unsupported for fork app updates; re-run scripts/install-bwoah.sh",
+			default: false,
+		}),
 	};
 
 	static examples = [
-		"omp update",
-		"omp update --check",
-		"omp update --canary",
-		"# If GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN\n  GITHUB_TOKEN=... omp update",
+		"omp update --plugins",
+		"# Bwoah My Pi app updates: re-run scripts/install-bwoah.sh from btimothy-har/bwoah-my-pi\n  # (or update a source checkout and run bun setup); force/check/channel flags refuse to run",
 	];
 
 	async run(): Promise<void> {

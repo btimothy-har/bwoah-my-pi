@@ -4,26 +4,51 @@ import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
 
-describe("runUpdateCommand fetch cancellation", () => {
+describe("runUpdateCommand fork refusal", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	it("checks release metadata with a timeout signal", async () => {
-		let requestSignal: AbortSignal | undefined;
+	it("rejects before any network activity for a plain check", async () => {
+		let fetchCalls = 0;
 		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
 		const fetchStub = Object.assign(
 			async (_input: FetchInput, init?: FetchInit) => {
-				requestSignal = init?.signal ?? undefined;
-				return Response.json({ version: "999.0.0" });
+				fetchCalls += 1;
+				void init;
+				return new Response("{}", { status: 200 });
 			},
 			{ preconnect: globalThis.fetch.preconnect },
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
-		await runUpdateCommand({ force: false, check: true });
+		await expect(runUpdateCommand({ force: false, check: true })).rejects.toThrow(
+			"Bwoah My Pi does not use the upstream updater",
+		);
 
-		expect(requestSignal).toBeInstanceOf(AbortSignal);
+		expect(fetchCalls).toBe(0);
+	});
+
+	it("rejects before any network activity for a forced channel switch", async () => {
+		let fetchCalls = 0;
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const fetchStub = Object.assign(
+			async (_input: FetchInput, init?: FetchInit) => {
+				fetchCalls += 1;
+				void init;
+				return new Response("{}", { status: 200 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+
+		await expect(runUpdateCommand({ force: true, check: false, channel: "canary" })).rejects.toThrow(
+			"Bwoah My Pi does not use the upstream updater",
+		);
+
+		expect(fetchCalls).toBe(0);
 	});
 });
 

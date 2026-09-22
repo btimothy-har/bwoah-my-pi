@@ -1,0 +1,75 @@
+name: Bwoah release
+
+# Fork-only binary release: builds the self-contained macOS arm64 binary from
+# the dispatched main commit and attaches it to a GitHub Release on
+# btimothy-har/bwoah-my-pi. Independent of ci.yml's upstream release machinery;
+# no npm, Homebrew, or Apple-credential paths exist here.
+on:
+   workflow_dispatch:
+
+concurrency:
+   group: bwoah-release
+   cancel-in-progress: false
+
+permissions:
+   contents: read
+
+jobs:
+   build:
+      name: Build darwin-arm64 binary
+      if: github.repository == 'btimothy-har/bwoah-my-pi' && github.ref == 'refs/heads/main'
+      runs-on: macos-14
+      timeout-minutes: 45
+      outputs:
+         version: ${{ steps.build.outputs.version }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ github.sha }}
+              persist-credentials: false
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.3.14"
+         - run: bun install --frozen-lockfile
+         # The wrapper stages the exact published native addon before these
+         # tests run, so native-backed imports resolve like a real install.
+         - name: Build release assets
+           id: build
+           run: |
+              set -euo pipefail
+              sh scripts/build-bwoah-release.sh "$RUNNER_TEMP/bwoah-release"
+              echo "version=$(node -p "require('./packages/coding-agent/package.json').version")" >> "$GITHUB_OUTPUT"
+         - name: Run focused release tests
+           run: |
+              bun test scripts/bwoah-install.test.ts scripts/bwoah-release.test.ts scripts/ci-release-checksums.test.ts
+              bun test packages/coding-agent/test/cli/update-cli.test.ts packages/coding-agent/test/update-cli.test.ts
+         - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: bwoah-darwin-arm64
+              path: |
+                 ${{ runner.temp }}/bwoah-release/omp-darwin-arm64.tar.gz
+                 ${{ runner.temp }}/bwoah-release/omp-darwin-arm64.tar.gz.sha256
+              if-no-files-found: error
+              retention-days: 1
+
+   publish:
+      name: Publish fork release
+      needs: [build]
+      if: github.repository == 'btimothy-har/bwoah-my-pi' && github.ref == 'refs/heads/main'
+      runs-on: ubuntu-22.04
+      timeout-minutes: 15
+      permissions:
+         contents: write
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ github.sha }}
+              persist-credentials: false
+         - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: bwoah-darwin-arm64
+              path: ${{ runner.temp }}/bwoah-release
+         - name: Publish GitHub release
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: sh scripts/publish-bwoah-release.sh "${{ needs.build.outputs.version }}" "${{ github.sha }}" "$RUNNER_TEMP/bwoah-release"

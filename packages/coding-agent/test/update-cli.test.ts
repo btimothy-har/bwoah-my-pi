@@ -45,6 +45,9 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 
+type FetchInput = string | URL | Request;
+type FetchInit = RequestInit | BunFetchRequestInit;
+
 const tempDirs: string[] = [];
 
 async function makeTempDir(): Promise<string> {
@@ -91,15 +94,24 @@ describe("update command plugin dispatch", () => {
 		expect(updateSpy).not.toHaveBeenCalled();
 	});
 
-	it("keeps normal update flags on the app updater path", async () => {
+	it("refuses fork app updates without plugin or network activity", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		let fetchCalls = 0;
+		const fetchStub = Object.assign(
+			async (_input: FetchInput, init?: FetchInit) => {
+				fetchCalls += 1;
+				void init;
+				return new Response("{}", { status: 200 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
-		await command.run();
+		await expect(command.run()).rejects.toThrow("Bwoah My Pi does not use the upstream updater");
 
-		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true, channel: undefined });
 		expect(pluginSpy).not.toHaveBeenCalled();
+		expect(fetchCalls).toBe(0);
 	});
 });
 

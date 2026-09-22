@@ -11,6 +11,8 @@ import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { DISPLAY_VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
@@ -2065,6 +2067,11 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
+	if (DISPLAY_VERSION.endsWith("+bwoah")) {
+		throw new CliUsageError(
+			"Bwoah My Pi does not use the upstream updater. Re-run scripts/install-bwoah.sh from btimothy-har/bwoah-my-pi for binary installs; source installs update their checkout and run bun setup.",
+		);
+	}
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
@@ -2175,23 +2182,23 @@ export async function runUpdateCommand(opts: {
  * Print update command help.
  */
 export function printUpdateHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
+	console.log(`${chalk.bold(`${APP_NAME} update`)} - Update plugins; app releases use the Bwoah installer
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} update [options]
 
 ${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
+  -c, --check     Unsupported for fork app updates
+  -f, --force     Unsupported for fork app updates
   -l, --plugins   Update installed plugins
-  --canary        Switch to the canary channel and update
-  --stable        Switch back to the stable channel
+  --canary        Unsupported for fork app updates
+  --stable        Unsupported for fork app updates
 
 ${chalk.bold("Examples:")}
-  ${APP_NAME} update              Update to latest version
-  ${APP_NAME} update --check      Check if updates are available
-  ${APP_NAME} update --force      Force reinstall
   ${APP_NAME} update -l           Update installed plugins
-  ${APP_NAME} update --canary    Switch to the canary channel and update
+
+${chalk.bold("Bwoah My Pi app updates:")}
+  Re-run scripts/install-bwoah.sh from btimothy-har/bwoah-my-pi for binary
+  installs; source installs update their checkout and run bun setup.
 `);
 }
