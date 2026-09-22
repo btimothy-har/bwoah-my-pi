@@ -263,7 +263,7 @@ async function installPrimaryState(
 	if (!isHindsightConfigured(config)) return undefined;
 
 	const client = createHindsightClient(config);
-	const scope = computeBankScope(config, session.sessionManager.getSessionHome());
+	const scope = computeBankScope(config, session.sessionManager.getSessionHome?.() ?? session.sessionManager.getCwd());
 
 	// Cleanup any stale state for this session (defensive — prevents leaks
 	// when a session is reused without going through dispose). Flush the
@@ -351,7 +351,7 @@ async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<
 	}
 	if (!current) return false;
 
-	const next = computeBankScope(config, session.sessionManager.getSessionHome());
+	const next = computeBankScope(config, session.sessionManager.getSessionHome?.() ?? session.sessionManager.getCwd());
 	if (bankScopesEqual(next, current) && hindsightConfigsEqual(current.config, config)) return false;
 
 	// A confirmed bank includes its mission metadata, not just its server/id.

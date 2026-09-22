@@ -86,6 +86,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 			getSessionDir: () => sessionDir,
 			getSessionId: () => "current-thread",
 			getCwd: () => agentDir,
+			getSessionHome: () => agentDir,
 		},
 		settings,
 		model,

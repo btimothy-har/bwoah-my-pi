@@ -553,7 +553,7 @@ export class MnemopiSessionState {
 				...(options.retainedThroughUserTurn === undefined
 					? {}
 					: { retained_through_user_turn: options.retainedThroughUserTurn }),
-				cwd: this.session.sessionManager.getSessionHome(),
+				cwd: this.session.sessionManager.getSessionHome?.() ?? this.session.sessionManager.getCwd(),
 			},
 			scope: "bank",
 			extract: shouldExtract,

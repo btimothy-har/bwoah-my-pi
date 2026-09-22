@@ -95,7 +95,9 @@ export async function buildAvailableSlashCommands(
 		});
 	}
 
-	const fileCommands = await loadFileCommands(session.sessionManager.getSessionHome());
+	const fileCommands = await loadFileCommands(
+		session.sessionManager.getSessionHome?.() ?? session.sessionManager.getCwd(),
+	);
 	session.setSlashCommands(fileCommands);
 	for (const command of fileCommands) {
 		appendCommand({

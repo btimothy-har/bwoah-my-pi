@@ -14,5 +14,6 @@ export type { ToolSession } from "./index";
  * standalone tools retain H === cwd.
  */
 export function getToolSessionHome(session: ToolSession): string {
-	return session.sessionManager?.getSessionHome() ?? session.cwd;
+	// `?.()` too: partial/stub managers (tests, extension replicas) may lack it.
+	return session.sessionManager?.getSessionHome?.() ?? session.cwd;
 }
