@@ -142,7 +142,6 @@ describe("runSubprocess incremental yield loops", () => {
 	function baseOptions(id: string, softRequestBudget: number) {
 		return {
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "inventory the api surface",
 			index: 0,

@@ -11,7 +11,6 @@ import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
-import { getToolSessionHome } from "../tools/session-home";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -34,7 +33,7 @@ import {
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { configCache, configCacheKey, getConfig, getServersForFile } from "./config";
+import { configCache, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
@@ -214,8 +213,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		throwIfAborted(signal);
 
-		const roots = { sessionHome: getToolSessionHome(this.session), cwd: this.session.cwd };
-		const config = getConfig(roots);
+		const config = getConfig(this.session.cwd);
 
 		// Status action doesn't need a file
 		if (action === "status") {
@@ -1093,8 +1091,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// and plugin configs added after the first LSP call become visible —
 			// otherwise `getConfig` returns the first observation for the rest of
 			// the process lifetime (#3546).
-			configCache.delete(configCacheKey(roots));
-			const refreshedConfig = getConfig(roots);
+			configCache.delete(this.session.cwd);
+			const refreshedConfig = getConfig(this.session.cwd);
 			reconcileIdleChecker();
 			const servers = getLspServers(refreshedConfig);
 			// Identity-aware client keys make a changed server resolve to a fresh
@@ -1105,7 +1103,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				this.session.cwd,
 				servers.map(([, serverConfig]) => serverConfig),
 				signal,
-				roots.sessionHome,
 			);
 			if (servers.length === 0) {
 				return {

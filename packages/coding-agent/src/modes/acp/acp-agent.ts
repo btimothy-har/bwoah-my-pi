@@ -2148,14 +2148,14 @@ export class AcpAgent implements Agent {
 	 * sees newly installed/disabled plugins.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
-		const home = record.session.sessionManager.getSessionHome();
-		const projectPath = await resolveActiveProjectRegistryPath(home);
+		const cwd = record.session.sessionManager.getCwd();
+		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await refreshAgentDiscovery(home, record.session.effectiveExtensionRoots);
+		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
 		resetCapabilities();
 		await record.session.refreshSkills();
 		const fileCommands = await loadSlashCommands({
-			cwd: home,
+			cwd,
 			extensionRoots: record.session.effectiveExtensionRoots,
 		});
 		record.session.setSlashCommands(fileCommands);
@@ -2656,9 +2656,7 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		const manager = new MCPManager(record.session.sessionManager.getCwd(), null, undefined, undefined, () =>
-			record.session.sessionManager.getSessionHome(),
-		);
+		const manager = new MCPManager(record.session.sessionManager.getCwd());
 		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
 		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`
 		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the

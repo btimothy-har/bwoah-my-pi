@@ -3,7 +3,7 @@
  *
  * Handles /ssh subcommands for managing SSH host configurations.
  */
-import { getSSHConfigPath } from "@oh-my-pi/pi-utils";
+import { getProjectDir, getSSHConfigPath } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { type SSHHost, sshCapability } from "../../capability/ssh";
 import { loadCapability } from "../../discovery";
@@ -194,7 +194,7 @@ export class SSHCommandController {
 		}
 
 		try {
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 			const filePath = getSSHConfigPath(scope, cwd);
 
 			const hostConfig: SSHHostConfig = { host };
@@ -241,7 +241,7 @@ export class SSHCommandController {
 	 */
 	async #handleList(): Promise<void> {
 		try {
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 
 			// Load from both user and project configs
 			const userPath = getSSHConfigPath("user", cwd);
@@ -259,9 +259,7 @@ export class SSHCommandController {
 			const configHostNames = new Set([...userHosts, ...projectHosts]);
 			let discoveredHosts: SSHHost[] = [];
 			try {
-				const result = await loadCapability<SSHHost>(sshCapability.id, {
-					cwd: this.ctx.sessionManager.getSessionHome(),
-				});
+				const result = await loadCapability<SSHHost>(sshCapability.id, { cwd });
 				discoveredHosts = result.items.filter(h => !configHostNames.has(h.name));
 			} catch {
 				// Ignore discovery errors
@@ -359,7 +357,7 @@ export class SSHCommandController {
 		}
 
 		try {
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 			const filePath = getSSHConfigPath(scope, cwd);
 			const config = await readSSHConfigFile(filePath);
 			if (!config.hosts?.[name]) {

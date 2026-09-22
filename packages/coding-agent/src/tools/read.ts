@@ -36,7 +36,6 @@ import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getExperimentalContextSession } from "./context-notes";
-import { getToolSessionHome } from "./session-home";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
@@ -2768,7 +2767,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Resolve the internal URL
 		const resource = await internalRouter.resolve(url, {
 			cwd: this.session.cwd,
-			sessionHome: getToolSessionHome(this.session),
 			settings: this.session.settings,
 			signal,
 			sessionFile: this.session.getSessionFile() ?? undefined,

@@ -20,8 +20,7 @@ import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
-import type { ToolSession } from "../tools";
-import { getToolSessionHome } from "../tools/session-home";
+import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -597,9 +596,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
 			agents:
-				discoverySnapshots.get(
-					discoveryCacheKey(getToolSessionHome(this.session), this.session.effectiveExtensionRoots?.()),
-				) ?? this.#discoveredAgents,
+				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+				this.#discoveredAgents,
 			sessionAgents: this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
@@ -666,10 +664,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(
-			getToolSessionHome(session),
-			session.effectiveExtensionRoots?.(),
-		);
+		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
 		return new TaskTool(session, agents);
 	}
 

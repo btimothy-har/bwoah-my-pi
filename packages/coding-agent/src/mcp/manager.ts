@@ -230,11 +230,6 @@ export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) =
  * MCP Server Manager.
  *
  * Manages connections to MCP servers and provides tools to the agent.
- *
- * The discovery root (where MCP configuration is loaded from) is the session
- * home, supplied via the `getSessionHome` callback. The constructor `cwd` is
- * the execution root advertisement (roots/list, server cwd) and the default
- * discovery root when no session-home callback is provided.
  */
 export class MCPManager {
 	static #instance: MCPManager | undefined;
@@ -299,17 +294,12 @@ export class MCPManager {
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
 
-	#getSessionHome: () => string;
-
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
 		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
-		getSessionHome: () => string = () => cwd,
-	) {
-		this.#getSessionHome = getSessionHome;
-	}
+	) {}
 
 	/**
 	 * Register a listener for MCP connection lifecycle events
@@ -523,7 +513,7 @@ export class MCPManager {
 		this.#discoverOptions = options ? { ...options } : undefined;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
-			loadedConfigs = await this.loadConfigs(this.#getSessionHome(), {
+			loadedConfigs = await this.loadConfigs(this.cwd, {
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
@@ -554,7 +544,7 @@ export class MCPManager {
 
 	async #applyBrowserFilter(enabled: boolean): Promise<void> {
 		const options = this.#discoverOptions;
-		const loaded = await this.loadConfigs(this.#getSessionHome(), {
+		const loaded = await this.loadConfigs(this.cwd, {
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: false,

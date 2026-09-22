@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -365,7 +365,7 @@ export async function collectMcpServerNames(
 	if (preloaded) {
 		({ userConfig, projectConfig } = preloaded);
 	} else {
-		const cwd = ctx.sessionManager.getSessionHome();
+		const cwd = getProjectDir();
 		[userConfig, projectConfig] = await Promise.all([
 			readMCPConfigFile(getMCPConfigPath("user", cwd)),
 			readMCPConfigFile(getMCPConfigPath("project", cwd)),
@@ -1112,7 +1112,7 @@ export class MCPCommandController {
 		if (this.ctx.mcpManager) {
 			resolvedConfig = await this.ctx.mcpManager.prepareConfig(config, options);
 		} else {
-			const tempManager = new MCPManager(this.ctx.sessionManager.getSessionHome());
+			const tempManager = new MCPManager(getProjectDir());
 			tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 			resolvedConfig = await tempManager.prepareConfig(config, options);
 		}
@@ -1124,7 +1124,7 @@ export class MCPCommandController {
 	async #findConfiguredServer(
 		name: string,
 	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
-		const cwd = this.ctx.sessionManager.getSessionHome();
+		const cwd = getProjectDir();
 		const userPath = getMCPConfigPath("user", cwd);
 		const projectPath = getMCPConfigPath("project", cwd);
 
@@ -1194,7 +1194,7 @@ export class MCPCommandController {
 		if (!config || !source) return null;
 
 		return {
-			filePath: getMCPConfigPath("user", this.ctx.sessionManager.getSessionHome()),
+			filePath: getMCPConfigPath("user", getProjectDir()),
 			scope: "user",
 			config,
 			discovered: true,
@@ -1329,7 +1329,7 @@ export class MCPCommandController {
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
 		try {
 			// Determine file path
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 			const filePath = getMCPConfigPath(scope, cwd);
 
 			// Add server to config
@@ -1425,7 +1425,7 @@ export class MCPCommandController {
 	 */
 	async #handleList(): Promise<void> {
 		try {
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
@@ -1575,7 +1575,7 @@ export class MCPCommandController {
 		}
 
 		try {
-			const cwd = this.ctx.sessionManager.getSessionHome();
+			const cwd = getProjectDir();
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectPath = getMCPConfigPath("project", cwd);
 			const filePath = scope === "user" ? userPath : projectPath;
@@ -1695,7 +1695,7 @@ export class MCPCommandController {
 			if (this.ctx.mcpManager) {
 				resolvedConfig = await this.ctx.mcpManager.prepareConfig(config);
 			} else {
-				const tempManager = new MCPManager(this.ctx.sessionManager.getSessionHome());
+				const tempManager = new MCPManager(getProjectDir());
 				tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 				resolvedConfig = await tempManager.prepareConfig(config);
 			}
@@ -1790,7 +1790,7 @@ export class MCPCommandController {
 			const found = await this.#findConfiguredServer(name);
 			if (!found) {
 				// Check if this is a discovered server from a third-party config
-				const userConfigPath = getMCPConfigPath("user", this.ctx.sessionManager.getSessionHome());
+				const userConfigPath = getMCPConfigPath("user", getProjectDir());
 				const disabledServers = new Set(await readDisabledServers(userConfigPath));
 				const isDiscovered = this.ctx.mcpManager?.getSource(name);
 				const isCurrentlyDisabled = disabledServers.has(name);
@@ -2165,7 +2165,7 @@ export class MCPCommandController {
 			return;
 		}
 
-		const { configs, sources } = await loadAllMCPConfigs(this.ctx.sessionManager.getSessionHome(), {
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		const config = configs[name];
@@ -2548,7 +2548,7 @@ export class MCPCommandController {
 	}
 
 	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
-		const filePath = getMCPConfigPath(scope, this.ctx.sessionManager.getSessionHome());
+		const filePath = getMCPConfigPath(scope, getProjectDir());
 		const config = await readMCPConfigFile(filePath);
 		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
 		if (!existingNames.has(baseName)) return baseName;
@@ -2568,7 +2568,7 @@ export class MCPCommandController {
 				this.ctx.showError("Server name cannot be empty.");
 				continue;
 			}
-			const filePath = getMCPConfigPath(scope, this.ctx.sessionManager.getSessionHome());
+			const filePath = getMCPConfigPath(scope, getProjectDir());
 			const config = await readMCPConfigFile(filePath);
 			if (config.mcpServers?.[proposed]) {
 				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);

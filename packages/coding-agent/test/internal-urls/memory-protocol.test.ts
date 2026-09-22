@@ -158,7 +158,6 @@ describe("MemoryProtocolHandler", () => {
 				flush: manager.flush.bind(manager),
 				getBranch: manager.getBranch.bind(manager),
 				getEntries: manager.getEntries.bind(manager),
-				getSessionHome: manager.getSessionHome.bind(manager),
 			};
 			const agentRegistry = new AgentRegistry();
 			agentRegistry.register({

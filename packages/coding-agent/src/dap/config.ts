@@ -123,15 +123,15 @@ function fileConfigSource(filePath: string): ConfigSource {
 	};
 }
 
-function getConfigSources(sessionHome: string): ConfigSource[] {
+function getConfigSources(cwd: string): ConfigSource[] {
 	const filenames = ["dap.json", ".dap.json", "dap.yaml", ".dap.yaml", "dap.yml", ".dap.yml"];
 	const sources: ConfigSource[] = [];
 
 	for (const filename of filenames) {
-		sources.push(fileConfigSource(path.join(sessionHome, filename)));
+		sources.push(fileConfigSource(path.join(cwd, filename)));
 	}
 
-	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd: sessionHome });
+	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd });
 	for (const dir of projectDirs) {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(dir, filename)));
@@ -145,7 +145,7 @@ function getConfigSources(sessionHome: string): ConfigSource[] {
 		}
 	}
 
-	const pluginRoots = getPreloadedPluginRoots(sessionHome);
+	const pluginRoots = getPreloadedPluginRoots();
 	for (const root of pluginRoots) {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(root.path, filename)));
@@ -159,9 +159,9 @@ function getConfigSources(sessionHome: string): ConfigSource[] {
 	return sources;
 }
 
-function loadAdapterConfigs(cwd: string, sessionHome: string = cwd): Record<string, DapAdapterConfig> {
+function loadAdapterConfigs(cwd: string): Record<string, DapAdapterConfig> {
 	let adapters = { ...DEFAULT_ADAPTERS };
-	for (const source of getConfigSources(sessionHome).reverse()) {
+	for (const source of getConfigSources(cwd).reverse()) {
 		const parsed = source.read();
 		if (!parsed) continue;
 		adapters = mergeAdapters(adapters, parsed.adapters);
@@ -169,8 +169,8 @@ function loadAdapterConfigs(cwd: string, sessionHome: string = cwd): Record<stri
 	return adapters;
 }
 
-export function getAdapterConfigs(cwd?: string, sessionHome?: string): Record<string, DapAdapterConfig> {
-	return cwd ? loadAdapterConfigs(cwd, sessionHome) : { ...DEFAULT_ADAPTERS };
+export function getAdapterConfigs(cwd?: string): Record<string, DapAdapterConfig> {
+	return cwd ? loadAdapterConfigs(cwd) : { ...DEFAULT_ADAPTERS };
 }
 
 function normalizeCommandForCwd(command: string, cwd: string): string {
@@ -266,12 +266,12 @@ function resolveAdapterFromConfig(
 	};
 }
 
-export function resolveAdapter(adapterName: string, cwd: string, sessionHome?: string): DapResolvedAdapter | null {
-	return resolveAdapterFromConfig(adapterName, getAdapterConfigs(cwd, sessionHome), cwd);
+export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
+	return resolveAdapterFromConfig(adapterName, getAdapterConfigs(cwd), cwd);
 }
 
-export function getAvailableAdapters(cwd: string, sessionHome?: string): DapResolvedAdapter[] {
-	const configs = getAdapterConfigs(cwd, sessionHome);
+export function getAvailableAdapters(cwd: string): DapResolvedAdapter[] {
+	const configs = getAdapterConfigs(cwd);
 	return Object.keys(configs)
 		.map(name => resolveAdapterFromConfig(name, configs, cwd))
 		.filter((adapter): adapter is DapResolvedAdapter => adapter !== null);
@@ -421,9 +421,8 @@ export function selectLaunchAdapter(
 	cwd: string,
 	adapterName?: string,
 	programKind: LaunchProgramKind = "file",
-	sessionHome?: string,
 ): LaunchAdapterSelection {
-	const configs = getAdapterConfigs(cwd, sessionHome);
+	const configs = getAdapterConfigs(cwd);
 	if (adapterName) {
 		const config = configs[adapterName];
 		if (!config) return { kind: "none" };
@@ -434,16 +433,11 @@ export function selectLaunchAdapter(
 	return selectAutomaticLaunchAdapter(program, cwd, programKind, configs);
 }
 
-export function selectAttachAdapter(
-	cwd: string,
-	adapterName?: string,
-	port?: number,
-	sessionHome?: string,
-): DapResolvedAdapter | null {
+export function selectAttachAdapter(cwd: string, adapterName?: string, port?: number): DapResolvedAdapter | null {
 	if (adapterName) {
-		return resolveAdapter(adapterName, cwd, sessionHome);
+		return resolveAdapter(adapterName, cwd);
 	}
-	const available = getAvailableAdapters(cwd, sessionHome);
+	const available = getAvailableAdapters(cwd);
 	if (port !== undefined) {
 		const debugpy = available.find(adapter => adapter.name === "debugpy");
 		if (debugpy) return debugpy;

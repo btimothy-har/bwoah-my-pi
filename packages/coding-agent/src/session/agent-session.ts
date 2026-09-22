@@ -9506,10 +9506,6 @@ export class AgentSession {
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
 		const previousSessionState = this.sessionManager.captureState();
-		// Discovery home is a separate change axis from execution cwd: switching
-		// between sessions that share E but own different homes still needs a
-		// discovery rescope.
-		const previousSessionHome = this.sessionManager.getSessionHome();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
@@ -9594,19 +9590,14 @@ export class AgentSession {
 				loadedExecutionCwd !== undefined && path.resolve(loadedExecutionCwd) === path.resolve(newCwd)
 					? newCwd
 					: recordedCwd;
-			const newSessionHome = this.sessionManager.getSessionHome();
-			const homeChanged = path.resolve(newSessionHome) !== path.resolve(previousSessionHome);
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
 			} else if (sessionFileDisposition === "context-change") {
-				if (
-					!options?.onCwdChange &&
-					(path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd) || homeChanged)
-				) {
+				if (!options?.onCwdChange && path.resolve(decisionCwd) !== path.resolve(previousSessionState.cwd)) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}
 				if (options?.onCwdChange) {
-					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd) || homeChanged) {
+					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd)) {
 						cwdChangeTarget = newCwd;
 						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
@@ -9825,19 +9816,6 @@ export class AgentSession {
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
-			// A failed target rescope may have already rebuilt this session's
-			// skills/prompt against the target home. The manager snapshot above is
-			// restored, so re-root session-owned discovery at the source home.
-			if (cwdChangeTarget) {
-				try {
-					await this.refreshSkills();
-				} catch (refreshError) {
-					logger.warn("Failed to re-root discovery after session switch rollback", {
-						targetSessionFile: sessionPath,
-						error: String(refreshError),
-					});
-				}
-			}
 			try {
 				await this.#sessionSwitchReconciler?.();
 			} catch (reconcileError) {
@@ -9846,14 +9824,7 @@ export class AgentSession {
 					error: String(reconcileError),
 				});
 			}
-			// cwdChangeTarget is set only once the target rescope callback has been
-			// attempted; a callback-less precheck rejection sets neither. Every
-			// attempted callback re-applies the source scope through the callback
-			// after the manager snapshot restore: a thrown callback can leave
-			// discovery dirtied, a post-callback failure leaves process/settings at
-			// the target, and a false-returning mode only partially restored its
-			// own state. A source re-application that itself fails fails closed.
-			if (cwdChangeTarget && options?.onCwdChange) {
+			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
 					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {

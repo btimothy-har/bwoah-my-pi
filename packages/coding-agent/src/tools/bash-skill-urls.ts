@@ -53,8 +53,6 @@ export interface InternalUrlExpansionOptions {
 	internalRouter?: InternalUrlResolver;
 	localOptions?: LocalProtocolOptions;
 	cwd?: string;
-	/** Session home (H) — forwarded to the internal-URL router for config-discovery handlers. */
-	sessionHome?: string;
 	sessionFile?: string;
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
@@ -296,7 +294,6 @@ async function resolveInternalUrlToPath(
 	localOptions?: LocalProtocolOptions,
 	ensureLocalParentDirs?: boolean,
 	cwd?: string,
-	sessionHome?: string,
 	sessionFile?: string,
 	sessionId?: string,
 	agentRegistry?: ResolveContext["agentRegistry"],
@@ -345,7 +342,6 @@ async function resolveInternalUrlToPath(
 	try {
 		resource = await internalRouter.resolve(url, {
 			cwd,
-			sessionHome,
 			pathOnly: true,
 			sessionFile,
 			sessionId,
@@ -396,7 +392,6 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.localOptions,
 				options.ensureLocalParentDirs,
 				options.cwd,
-				options.sessionHome,
 				options.sessionFile,
 				options.sessionId,
 				options.agentRegistry,

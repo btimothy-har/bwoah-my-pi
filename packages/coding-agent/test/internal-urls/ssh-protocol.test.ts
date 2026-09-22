@@ -321,24 +321,6 @@ describe("SshProtocolHandler", () => {
 		expect(listSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("discovers host configuration from the session home, not the execution cwd", async () => {
-		mockHosts();
-		mockReadBytes("ok\n");
-		const spy = vi.spyOn(capability, "loadCapability");
-		// An E-bound session resolves hosts against its owning home (H); the
-		// execution checkout is not a configuration authority.
-		await handler.resolve(parseInternalUrl("ssh://h/etc/hostname"), {
-			cwd: "/execution-root",
-			sessionHome: "/session-home",
-		});
-		expect(spy.mock.calls.some(call => (call[1] as { cwd?: string } | undefined)?.cwd === "/session-home")).toBe(
-			true,
-		);
-		expect(spy.mock.calls.some(call => (call[1] as { cwd?: string } | undefined)?.cwd === "/execution-root")).toBe(
-			false,
-		);
-	});
-
 	it("rejects ssh:// URL queries and fragments instead of operating on the truncated path", async () => {
 		mockHosts();
 		// `?`/`#` are URL delimiters, so the query/fragment is stripped from the path;

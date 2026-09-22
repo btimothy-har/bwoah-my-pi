@@ -113,7 +113,6 @@ describe("runSubprocess yield reminders", () => {
 
 	const baseOptions = {
 		cwd: "/tmp",
-		sessionHome: "/tmp",
 		agent: baseAgent,
 		task: "do work",
 		index: 0,
@@ -1237,7 +1236,6 @@ describe("runSubprocess telemetry propagation", () => {
 
 	const baseOptions = {
 		cwd: "/tmp",
-		sessionHome: "/tmp",
 		agent: baseAgent,
 		task: "do work",
 		index: 0,

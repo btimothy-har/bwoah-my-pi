@@ -84,7 +84,6 @@ const baseAgent: AgentDefinition = {
 
 const baseOptions = {
 	cwd: "/tmp",
-	sessionHome: "/tmp",
 	agent: baseAgent,
 	task: "do work",
 	index: 0,

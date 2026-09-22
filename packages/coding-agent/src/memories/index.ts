@@ -357,7 +357,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
 	const workerId = `memory-${process.pid}`;
-	const memoryRoot = getMemoryRoot(agentDir, session.sessionManager.getSessionHome());
+	const memoryRoot = getMemoryRoot(agentDir, session.sessionManager.getCwd());
 	const currentThreadId = session.sessionManager.getSessionId();
 
 	try {
@@ -486,23 +486,23 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	const { session, modelRegistry, agentDir, config } = options;
-	const sessionHome = session.sessionManager.getSessionHome();
+	const cwd = session.sessionManager.getCwd();
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
 	const workerId = `memory-${process.pid}`;
-	const memoryRoot = getMemoryRoot(agentDir, sessionHome);
+	const memoryRoot = getMemoryRoot(agentDir, cwd);
 
 	try {
 		const claimResult = tryClaimGlobalPhase2Job(db, {
 			workerId,
 			leaseSeconds: config.phase2LeaseSeconds,
 			nowSec,
-			cwd: sessionHome,
+			cwd,
 		});
 		if (claimResult.kind !== "claimed") return;
 
 		const claim = claimResult.claim;
-		const outputs = listStage1OutputsForGlobal(db, config.maxRawMemoriesForGlobal, sessionHome);
+		const outputs = listStage1OutputsForGlobal(db, config.maxRawMemoriesForGlobal, cwd);
 		const newWatermark = computeCompletionWatermark(claim.inputWatermark, outputs);
 
 		await syncPhase2Artifacts(memoryRoot, outputs);
@@ -514,7 +514,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				ownershipToken: claim.ownershipToken,
 				newWatermark,
 				nowSec: unixNow(),
-				cwd: sessionHome,
+				cwd,
 			});
 			if (!marked) {
 				logger.warn("Phase2 empty-input completion lost ownership", { memoryRoot });
@@ -534,7 +534,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				retryDelaySeconds: config.phase2RetryDelaySeconds,
 				reason: "No model available for phase2",
 				memoryRoot,
-				cwd: sessionHome,
+				cwd,
 			});
 			return;
 		}
@@ -545,7 +545,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				retryDelaySeconds: config.phase2RetryDelaySeconds,
 				reason: "No API key available for phase2",
 				memoryRoot,
-				cwd: sessionHome,
+				cwd,
 			});
 			return;
 		}
@@ -561,7 +561,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				ownershipToken: claim.ownershipToken,
 				leaseSeconds: config.phase2LeaseSeconds,
 				nowSec: unixNow(),
-				cwd: sessionHome,
+				cwd,
 			});
 			if (!ok) {
 				heartbeatLostOwnership = true;
@@ -588,7 +588,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				ownershipToken: claim.ownershipToken,
 				newWatermark,
 				nowSec: unixNow(),
-				cwd: sessionHome,
+				cwd,
 			});
 			if (!marked) {
 				throw new Error("Phase2 could not mark success: ownership lost");
@@ -600,7 +600,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				retryDelaySeconds: config.phase2RetryDelaySeconds,
 				reason: String(error),
 				memoryRoot,
-				cwd: sessionHome,
+				cwd,
 				error,
 			});
 		} finally {

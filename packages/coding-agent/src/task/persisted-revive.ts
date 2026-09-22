@@ -75,10 +75,8 @@ export function createPersistedSubagentReviverFactory(
 		// restart + Hub message revives the agent outside isolation, in the
 		// parent cwd, contradicting the delivery notice.
 		if (peek.init.isolated) return undefined;
-		// Probe the saved execution binding when present: a child anchored at its
-		// parent home with a durable worktree binding must still see its E exist.
 		try {
-			await fs.stat(peek.executionCwd ?? peek.cwd);
+			await fs.stat(peek.cwd);
 		} catch {
 			return undefined;
 		}

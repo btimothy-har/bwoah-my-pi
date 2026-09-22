@@ -13,11 +13,9 @@ import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import {
 	configCache,
-	configCacheKey,
 	getConfig,
 	getServersForFile,
 	type LspConfig,
-	type LspConfigRoots,
 	loadConfig,
 } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
@@ -64,11 +62,6 @@ import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { renderResult as renderLocalResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { getLanguageFromPath } from "@oh-my-pi/pi-tui/lang-from-path";
-
-/** Same-root discovery: session home and execution cwd point at the same directory. */
-function roots(dir: string): LspConfigRoots {
-	return { sessionHome: dir, cwd: dir };
-}
 
 const lspTestSettings = Settings.isolated();
 
@@ -438,43 +431,6 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("reads server definitions from the session home and filters them against the execution root", () => {
-		const home = TempDir.createSync("@omp-lsp-two-root-home-");
-		const execution = TempDir.createSync("@omp-lsp-two-root-exec-");
-		const bare = TempDir.createSync("@omp-lsp-two-root-bare-");
-		try {
-			// Definition lives only at H; the root marker exists only at E.
-			fs.mkdirSync(path.join(home.path(), ".omp"), { recursive: true });
-			fs.writeFileSync(
-				path.join(home.path(), ".omp", "lsp.json"),
-				JSON.stringify({
-					servers: {
-						"fake-home": {
-							command: process.execPath,
-							fileTypes: [".hm"],
-							rootMarkers: [".exec-marker"],
-						},
-					},
-				}),
-			);
-			fs.writeFileSync(path.join(execution.path(), ".exec-marker"), "");
-
-			const split = loadConfig({ sessionHome: home.path(), cwd: execution.path() });
-			expect(Object.keys(split.servers)).toContain("fake-home");
-			expect(split.servers["fake-home"]?.sessionHome).toBe(home.path());
-
-			// E alone carries no definition; H alone cannot satisfy the marker.
-			expect(
-				loadConfig({ sessionHome: execution.path(), cwd: execution.path() }).servers["fake-home"],
-			).toBeUndefined();
-			expect(loadConfig({ sessionHome: home.path(), cwd: bare.path() }).servers["fake-home"]).toBeUndefined();
-		} finally {
-			home.removeSync();
-			execution.removeSync();
-			bare.removeSync();
-		}
-	});
-
 	it("uses a custom server languageId for disk and in-memory document opens", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-language-id-");
 		const filePath = path.join(tempDir.path(), "foo.gd");
@@ -504,7 +460,7 @@ describe("lsp regressions", () => {
 					srv.exit(0);
 				}
 			});
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			const serverConfig = getServersForFile(config, filePath)[0]?.[1];
 			if (!serverConfig) throw new Error("Custom GDScript server was not loaded");
 
@@ -606,11 +562,8 @@ describe("lsp regressions", () => {
 			await lspClient.shutdownAll();
 
 			// Pure config access should not mutate global timeout or spawn timers (#8389)
-			configCache.set(configCacheKey(roots(tempDir.path())), {
-				servers: { "fake-lsp-rearm": config },
-				idleTimeoutMs: 60_000,
-			});
-			getConfig(roots(tempDir.path()));
+			configCache.set(tempDir.path(), { servers: { "fake-lsp-rearm": config }, idleTimeoutMs: 60_000 });
+			getConfig(tempDir.path());
 			expect(intervalSpy).toHaveBeenCalledTimes(initialCalls);
 
 			// Starting an active client rearms the checker
@@ -618,7 +571,7 @@ describe("lsp regressions", () => {
 			expect(intervalSpy).toHaveBeenCalledTimes(initialCalls + 1);
 		} finally {
 			lspClient.setIdleTimeout(null);
-			configCache.delete(configCacheKey(roots(tempDir.path())));
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -631,16 +584,17 @@ describe("lsp regressions", () => {
 			command: "fake-lsp-iso-a",
 			fileTypes: ["ts"],
 			rootMarkers: [],
-			resolvedIdleTimeoutMs: 600_000, // 10 min
 		};
 		const configB: ServerConfig = {
 			command: "fake-lsp-iso-b",
 			fileTypes: ["ts"],
 			rootMarkers: [],
-			resolvedIdleTimeoutMs: 1_000, // 1 sec
 		};
 
 		try {
+			configCache.set(tempDirA.path(), { servers: { [configA.command]: configA }, idleTimeoutMs: 600_000 }); // 10 min
+			configCache.set(tempDirB.path(), { servers: { [configB.command]: configB }, idleTimeoutMs: 1_000 }); // 1 sec
+
 			installHandshakeLsp();
 			const clientA = await lspClient.getOrCreateClient(configA, tempDirA.path(), 1_000);
 
@@ -652,7 +606,7 @@ describe("lsp regressions", () => {
 			clientB.lastActivity = Date.now() - 2_000;
 
 			// Accessing Workspace B's config should not affect client A
-			getConfig(roots(tempDirB.path()));
+			getConfig(tempDirB.path());
 
 			// Drive the production idle sweep path end-to-end
 			await lspClient.checkIdleClients();
@@ -661,6 +615,8 @@ describe("lsp regressions", () => {
 			expect(activeNames).toContain("fake-lsp-iso-a");
 			expect(activeNames).not.toContain("fake-lsp-iso-b");
 		} finally {
+			configCache.delete(tempDirA.path());
+			configCache.delete(tempDirB.path());
 			await lspClient.shutdownAll();
 			tempDirA.removeSync();
 			tempDirB.removeSync();
@@ -677,17 +633,18 @@ describe("lsp regressions", () => {
 
 		try {
 			// Initially no timeout configured: checker interval should remain stopped
+			configCache.set(tempDir.path(), { servers: { [config.command]: config } });
 			installHandshakeLsp();
 			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
 
 			expect(lspClient.isIdleCheckerRunning()).toBe(false);
 
-			// Config-only change: a reload re-stamps the live client's resolved
-			// idle timeout (identity is unchanged, so no new client spawns).
-			client.config.resolvedIdleTimeoutMs = 5_000;
+			// Config-only change: user adds idleTimeoutMs to config
+			configCache.delete(tempDir.path());
+			configCache.set(tempDir.path(), { servers: { [config.command]: config }, idleTimeoutMs: 5_000 });
 
 			// Simulate config reload (as done in `lsp reload *`)
-			getConfig(roots(tempDir.path()));
+			getConfig(tempDir.path());
 			lspClient.reconcileIdleChecker();
 
 			// Checker must now be re-armed even though client identity is unchanged
@@ -698,14 +655,15 @@ describe("lsp regressions", () => {
 			await lspClient.checkIdleClients();
 			expect(lspClient.getActiveClients().map(c => c.name)).not.toContain("fake-lsp-rearm-config");
 
-			// Removing the timeout and reloading stops the checker again
-			client.config.resolvedIdleTimeoutMs = undefined;
-			getConfig(roots(tempDir.path()));
+			// Removing timeout and reloading stops the checker again
+			configCache.delete(tempDir.path());
+			configCache.set(tempDir.path(), { servers: { [config.command]: config } });
+			getConfig(tempDir.path());
 			lspClient.reconcileIdleChecker();
 			expect(lspClient.isIdleCheckerRunning()).toBe(false);
 		} finally {
 			lspClient.setIdleTimeout(null);
-			configCache.delete(configCacheKey(roots(tempDir.path())));
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -2261,7 +2219,7 @@ describe("lsp regressions", () => {
 			const localTsServer = path.join(binDir, "typescript-language-server.exe");
 			await Bun.write(localTsServer, "");
 
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(localTsServer);
 			expect(whichSpy).not.toHaveBeenCalledWith("typescript-language-server");
 		} finally {
@@ -2296,7 +2254,7 @@ describe("lsp regressions", () => {
 			vi.spyOn(Bun, "which").mockReturnValue(null);
 			try {
 				await writeTypescriptWorkspace(tempDir.path(), { tsserver: false, symlinkTsc: true });
-				const config = loadConfig(roots(tempDir.path()));
+				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-native"]);
 				expect(config.servers["typescript-native"]?.resolvedCommand).toBe(
 					path.join(tempDir.path(), "node_modules", ".bin", "tsc"),
@@ -2313,7 +2271,7 @@ describe("lsp regressions", () => {
 			vi.spyOn(Bun, "which").mockReturnValue(null);
 			try {
 				await writeTypescriptWorkspace(tempDir.path(), { tsserver: true, symlinkTsc: false });
-				const config = loadConfig(roots(tempDir.path()));
+				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
 			} finally {
 				vi.restoreAllMocks();
@@ -2330,7 +2288,7 @@ describe("lsp regressions", () => {
 				await fs.promises.mkdir(binDir, { recursive: true });
 				await Bun.write(path.join(binDir, "tsc"), "");
 				await Bun.write(path.join(binDir, "typescript-language-server"), "");
-				const config = loadConfig(roots(tempDir.path()));
+				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
 			} finally {
 				vi.restoreAllMocks();
@@ -2353,7 +2311,7 @@ describe("lsp regressions", () => {
 			const localRuff = path.join(scriptsDir, "ruff.exe");
 			await Bun.write(localRuff, "");
 
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
 			expect(whichSpy).not.toHaveBeenCalledWith("ruff");
 		} finally {
@@ -2378,7 +2336,7 @@ describe("lsp regressions", () => {
 					const localRuff = path.join(scriptsDir, "ruff.exe");
 					await Bun.write(localRuff, "");
 
-					const config = loadConfig(roots(tempDir.path()));
+					const config = loadConfig(tempDir.path());
 					expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
 				} finally {
 					tempDir.removeSync();
@@ -2410,7 +2368,7 @@ describe("lsp regressions", () => {
 					const localBin = path.join(scriptsDir, binary);
 					await Bun.write(localBin, "");
 
-					const config = loadConfig(roots(tempDir.path()));
+					const config = loadConfig(tempDir.path());
 					expect(config.servers[server]?.resolvedCommand).toBe(localBin);
 				} finally {
 					tempDir.removeSync();
@@ -2440,7 +2398,7 @@ describe("lsp regressions", () => {
 			.mockImplementation(candidate => typeof candidate === "string" && candidate === specPath);
 
 		try {
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(getServersForFile(config, specPath).map(([name]) => name)).toEqual(["tlaplus"]);
 			expect(whichSpy).toHaveBeenCalledWith("tlapm_lsp");
 			expect(existsSpy).toHaveBeenCalled();
@@ -2534,7 +2492,7 @@ describe("lsp regressions", () => {
 		try {
 			await preloadPluginRoots(home, cwd);
 
-			const config = loadConfig(roots(cwd));
+			const config = loadConfig(cwd);
 
 			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe(resolvedCsharpLs);
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
@@ -3303,7 +3261,7 @@ describe("lsp regressions", () => {
 			const symbols = await tool.execute("symbols-after-rename", { action: "symbols", file: filePath });
 			expect(textResult(symbols)).toContain("NewName");
 		} finally {
-			configCache.delete(configCacheKey(roots(tempDir.path())));
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -3422,7 +3380,7 @@ describe("lsp regressions", () => {
 			expect(overlay).toBe(`\n\n${original}`);
 			expect(referencedSymbol).toBe("target");
 		} finally {
-			configCache.delete(configCacheKey(roots(tempDir.path())));
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -3616,7 +3574,7 @@ describe("lsp regressions", () => {
 			expect(overlay).toBe(`${original}value = target()\n`);
 			expect(contextDiagnosticsCount).toBe(1);
 		} finally {
-			configCache.delete(configCacheKey(roots(tempDir.path())));
+			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -5550,7 +5508,7 @@ describe("ty python lsp", () => {
 			.mockImplementation(command => (command === "ty" ? resolvedTy : null));
 		try {
 			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
 			expect(config.servers.ty?.command).toBe("ty");
 			expect(config.servers.ty?.args).toEqual(["server"]);
@@ -5569,7 +5527,7 @@ describe("ty python lsp", () => {
 		);
 		try {
 			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
 			expect(config.servers.ruff?.resolvedCommand).toBe(resolvedRuff);
 			expect(config.servers.ruff?.isLinter).toBe(true);
@@ -5593,7 +5551,7 @@ describe("ty python lsp", () => {
 		try {
 			await Bun.write(path.join(tempDir.path(), "ty.toml"), "[configuration]\n");
 			await Bun.write(resolvedTy, '#!/bin/sh\nexec ty "$@"\n');
-			const config = loadConfig(roots(tempDir.path()));
+			const config = loadConfig(tempDir.path());
 			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
 			expect(config.servers.ty?.command).toBe("ty");
 			expect(config.servers.ty?.args).toEqual(["server"]);

@@ -354,10 +354,6 @@ export interface ServerConfig {
 	isLinter?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
-	/** Session home (H) this config was loaded from — load-time provenance stamped by `loadConfig`. */
-	sessionHome?: string;
-	/** Idle timeout resolved at config load; client idle checks read this instead of re-reading config. */
-	resolvedIdleTimeoutMs?: number;
 	/**
 	 * Custom linter client factory. If provided, creates a custom client instead of using LSP.
 	 * The client handles format/lint operations. Useful for tools with buggy LSP implementations.

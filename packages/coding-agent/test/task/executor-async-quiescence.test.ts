@@ -201,7 +201,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -231,7 +230,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -258,7 +256,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -289,7 +286,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const run = runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -348,7 +344,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const run = runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
