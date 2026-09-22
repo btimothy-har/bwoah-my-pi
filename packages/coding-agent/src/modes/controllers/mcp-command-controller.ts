@@ -6,7 +6,6 @@
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
-import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
@@ -2194,42 +2193,31 @@ export class MCPCommandController {
 	}
 
 	/**
-	 * Reconnect every configured MCP server and rebind the session's MCP tools.
+	 * Reload MCP servers and rebind the session's MCP tools.
 	 *
-	 * Disconnects all live connections, rediscovers `.mcp.json` configs, and
-	 * calls `session.refreshMCPTools(...)` so config edits take effect without a
-	 * restart. Public because `/reload-plugins` reuses it alongside `/mcp reload`
-	 * and the config-mutation flows in this controller.
+	 * Delegates to `session.reloadMCP()` — the SDK-owned lifecycle queue tears
+	 * down live connections, clears the discovery fs cache, rediscovers
+	 * `.mcp.json` configs, and republishes tools so config edits take effect
+	 * without a restart. Public because `/reload-plugins` reuses it alongside
+	 * `/mcp reload` and the config-mutation flows in this controller.
 	 *
-	 * Discovery options are derived from settings so the reload honors the same
-	 * opt-outs as startup — notably `mcp.enableProjectConfig: false`, which must
-	 * keep project `.mcp.json` servers from being started on reload.
+	 * Discovery options are derived from settings inside the session's reload
+	 * so the reload honors the same opt-outs as startup — notably
+	 * `mcp.enableProjectConfig: false`, which keeps project `.mcp.json`
+	 * servers from being started on reload.
 	 */
 	async reloadServers(): Promise<void> {
 		if (!this.ctx.mcpManager) {
 			return;
 		}
-
-		// Disconnect all existing servers
-		await this.ctx.mcpManager.disconnectAll();
-		// Prompt enrichment is asynchronous. Clear commands before rediscovery so
-		// removed/disabled servers cannot leave stale `/server:prompt` entries;
-		// newly loaded prompts repopulate them through the manager callback.
-		this.ctx.session.setMCPPromptCommands([]);
-		// External edits to mcp.json (not via writeMCPConfigFile) otherwise
-		// keep stale env/command after reload.
-		clearFsCache();
-
-		// Rediscover and connect, mirroring startup's discovery filters.
-		const result = await this.ctx.mcpManager.discoverAndConnect({
-			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
-			filterExa: true,
-			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
-			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
-
-		this.#showMCPConnectionErrors(result.errors);
+		// The SDK owns the manager's lifecycle; the controller only triggers the
+		// reload (teardown, fs-cache clear, rediscovery, and tool republish all
+		// happen in the session's queued reload operation) and reports the
+		// per-server connection errors it returns.
+		const result = await this.ctx.session.reloadMCP();
+		if (result) {
+			this.#showMCPConnectionErrors(result.errors);
+		}
 	}
 
 	/**

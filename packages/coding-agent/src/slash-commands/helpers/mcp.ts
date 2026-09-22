@@ -516,8 +516,9 @@ export async function handleMcpAcp(
 		case "smithery-search":
 			return await handleSmitherySearchCommand(rest, runtime);
 		case "reload":
+			await runtime.reloadMCP();
 			await runtime.refreshCommands();
-			await runtime.output("MCP runtime reload requested.");
+			await runtime.output("MCP runtime reload complete.");
 			return commandConsumed();
 		case "list":
 			return await handleListCommand(runtime);

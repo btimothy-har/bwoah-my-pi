@@ -35,6 +35,7 @@ import type { ExtensionRunner, PreparedExtension } from "../extensibility/extens
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { MCPLoadResult } from "../mcp/manager";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -217,6 +218,13 @@ export interface AgentSessionConfig {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
+	/**
+	 * Reload the session's SDK-owned MCP manager for the current workspace
+	 * (teardown, fs-cache clear, rediscovery, republish). Undefined when the
+	 * session holds no owned manager — `AgentSession.reloadMCP()` then returns
+	 * `undefined` without touching the tool registry.
+	 */
+	reloadMCP?: () => Promise<MCPLoadResult>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */

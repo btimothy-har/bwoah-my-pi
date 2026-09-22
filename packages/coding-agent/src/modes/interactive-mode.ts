@@ -132,6 +132,7 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { refreshAgentDiscovery } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1960,10 +1961,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
 			// the next prompt sees everything scoped to the new project directory.
 			clearClaudePluginRootsCache();
+			await refreshAgentDiscovery(newCwd, this.session.effectiveExtensionRoots);
 			await this.refreshTitleSystemPrompt(newCwd);
 			resetCapabilities();
 			await this.refreshSkillState();
 			await this.refreshSlashCommandState(newCwd);
+			// MCP follows the resolved execution workspace through the session's
+			// SDK-owned reload (teardown at the old cwd, rediscovery at the new).
+			// Per-server connection failures stay nonfatal; a thrown config or
+			// publication error enters the rollback below.
+			await this.session.reloadMCP();
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived caches (provider globals, plugin roots, capabilities,
@@ -1982,6 +1989,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				resetCapabilities();
 				await this.refreshSkillState();
 				await this.refreshSlashCommandState(previousCwd);
+				await this.session.reloadMCP();
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
@@ -1996,6 +2004,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					resetCapabilities();
 					await this.refreshSkillState();
 					await this.refreshSlashCommandState(actual);
+					await this.session.reloadMCP();
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,

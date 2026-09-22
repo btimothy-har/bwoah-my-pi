@@ -1,5 +1,6 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { MCPCommandController } from "../modes/controllers/mcp-command-controller";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -162,6 +163,9 @@ export async function executeBuiltinSlashCommand(
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
+			reloadMCP: async () => {
+				await new MCPCommandController(ctx).reloadServers();
+			},
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");

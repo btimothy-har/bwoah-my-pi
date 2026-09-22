@@ -949,4 +949,7 @@ async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): 
 	runtime.session.setSlashCommands(cmds);
 	await runtime.refreshCommands?.();
 	await runtime.reloadPlugins();
+	// Shared by the forward and rollback paths: both must converge the MCP
+	// surface on the cwd this rescope lands on.
+	await runtime.reloadMCP();
 }

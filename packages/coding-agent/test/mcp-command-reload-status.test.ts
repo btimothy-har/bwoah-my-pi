@@ -5,6 +5,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 import { TOOL_NAME, TOOL_RESULT } from "./fixtures/delayed-tool-mcp";
 
@@ -26,7 +27,25 @@ describe("/mcp reload status", () => {
 			sources: {},
 			exaApiKeys: [],
 		}));
-		const ctx = createInteractiveModeContext({ mcpManager: manager });
+		// The controller triggers the reload through the session; the adapter
+		// mirrors the SDK-owned sequence so the test exercises a real
+		// manager.reloadForCwd rather than echoing the callback.
+		const ctx = createInteractiveModeContext({
+			mcpManager: manager,
+			session: {
+				reloadMCP: async () => {
+					ctx.session.setMCPPromptCommands([]);
+					await ctx.session.refreshMCPTools([]);
+					const result = await manager.reloadForCwd(getProjectDir(), {
+						enableProjectConfig: true,
+						filterExa: true,
+						filterBrowser: false,
+					});
+					await ctx.session.refreshMCPTools(manager.getTools());
+					return result;
+				},
+			},
+		});
 		const controller = new MCPCommandController(ctx);
 
 		try {

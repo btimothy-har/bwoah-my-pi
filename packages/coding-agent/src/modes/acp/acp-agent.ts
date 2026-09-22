@@ -169,6 +169,8 @@ type ManagedSessionRecord = {
 	session: AgentSession;
 	setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined;
 	mcpManager: MCPManager | undefined;
+	/** The ACP client's supplied server list; reconfiguration reloads exactly this list. */
+	mcpServers: McpServer[];
 	// Ordered queue of MCP tool refreshes for this record. Rebuilt per
 	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
 	// refresh can never land after a newer configuration's tools.
@@ -975,8 +977,9 @@ export class AcpAgent implements Agent {
 			cwd: record.session.sessionManager.getCwd(),
 			signal: promptTurn?.abortController.signal,
 			output: output => this.#emitCommandOutput(record, output),
-			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
+			reloadMCP: () => this.#reloadMcpServers(record),
+			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			keepTurnOpenUntilIdle: async () => {
 				await record.session.waitForIdle();
 				// `AgentSession.#emit()` does not await listeners, so the retried
@@ -1348,6 +1351,7 @@ export class AcpAgent implements Agent {
 			session,
 			setToolUIContext,
 			mcpManager: undefined,
+			mcpServers: [],
 			mcpRefreshChain: undefined,
 			promptTurn: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
@@ -2642,6 +2646,15 @@ export class AcpAgent implements Agent {
 	}
 
 	async #configureMcpServers(record: ManagedSessionRecord, servers: McpServer[]): Promise<void> {
+		// A close/dispose that won the race owns this record's MCP lifecycle:
+		// never tear down or reconnect servers on a stale record's behalf.
+		if (record.closedError !== undefined) {
+			throw new Error("ACP session closed before MCP reconfiguration started");
+		}
+		// Retain a copy: the client's list is the ACP session's only MCP source
+		// (no on-disk discovery), so `/mcp reload` and workspace rollback
+		// reconfigure from exactly this list.
+		record.mcpServers = [...servers];
 		if (record.mcpManager) {
 			await record.mcpManager.disconnectAll();
 		}
@@ -2650,9 +2663,13 @@ export class AcpAgent implements Agent {
 		// stale tool set after this reconfiguration installs the new one.
 		await record.mcpRefreshChain;
 		record.mcpRefreshChain = undefined;
+		// Detach the old manager before installing a replacement so nothing
+		// publishes through it after this point, and clear manager-owned tools
+		// and prompt commands: removed servers must not leave stale entries.
+		record.mcpManager = undefined;
+		record.session.setMCPPromptCommands([]);
+		await record.session.refreshMCPTools([]);
 		if (servers.length === 0) {
-			record.mcpManager = undefined;
-			await record.session.refreshMCPTools([]);
 			return;
 		}
 
@@ -2693,17 +2710,51 @@ export class AcpAgent implements Agent {
 			};
 		}
 
-		const result = await manager.connectServers(configs, sources);
-		if (result.errors.size > 0) {
-			throw new Error(
-				Array.from(result.errors.entries())
-					.map(([name, message]) => `${name}: ${message}`)
-					.join("; "),
-			);
+		try {
+			const result = await manager.connectServers(configs, sources);
+			if (result.errors.size > 0) {
+				throw new Error(
+					Array.from(result.errors.entries())
+						.map(([name, message]) => `${name}: ${message}`)
+						.join("; "),
+				);
+			}
+		} catch (error) {
+			// Never leak a partially connected replacement: tear the failed
+			// manager down before the setup error propagates.
+			await manager.disconnectAll().catch(() => {});
+			throw error;
+		}
+
+		if (record.closedError !== undefined) {
+			// Close/dispose won the race while the replacement was connecting:
+			// never install it onto the stale record, and never leak it.
+			await manager.disconnectAll().catch(() => {});
+			throw new Error("ACP session closed while reconnecting MCP servers");
 		}
 
 		record.mcpManager = manager;
 		await enqueueMcpToolsRefresh();
+	}
+
+	/**
+	 * Reconnect the client-supplied MCP server list at the session's current cwd
+	 * without failing the surrounding slash command. `rescopeHeadlessToCwd` shares
+	 * this callback between the forward `/move`/`/wt` path and its rollback: a
+	 * client-supplied server failing to reconnect is an MCP outage to report, not
+	 * a workspace-restoration failure — letting it reject would reach
+	 * `fatalMoveFailure` and dispose an otherwise-restored session. Initial
+	 * session setup keeps the strict `#configureMcpServers` path.
+	 */
+	async #reloadMcpServers(record: ManagedSessionRecord): Promise<void> {
+		try {
+			await this.#configureMcpServers(record, record.mcpServers);
+		} catch (error) {
+			const message = `MCP reload failed: ${error instanceof Error ? error.message : String(error)}`;
+			logger.warn("ACP MCP reload failed", { error: message });
+			// Best-effort client-visible report; a closing session has nowhere to show it.
+			await this.#emitCommandOutput(record, message).catch(() => {});
+		}
 	}
 
 	#toMcpConfig(server: McpServer): MCPServerConfig {

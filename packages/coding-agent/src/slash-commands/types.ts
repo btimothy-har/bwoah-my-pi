@@ -76,6 +76,13 @@ export interface SlashCommandRuntime {
 	 */
 	reloadPlugins: () => Promise<void>;
 	/**
+	 * Reload MCP servers for the current workspace and republish tools
+	 * (`/move` rescope, `/mcp reload`). TUI routes through the MCP controller,
+	 * RPC/ACP through the session's owned manager; the session is a no-op
+	 * without one.
+	 */
+	reloadMCP: () => Promise<void>;
+	/**
 	 * Keep the host's prompt turn open until the session goes idle.
 	 *
 	 * Provided only by the ACP dispatcher, whose prompt turn owns the event

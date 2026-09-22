@@ -577,6 +577,9 @@ describe("createAgentSession cwd after /move", () => {
 				},
 				refreshCommands: () => {},
 				reloadPlugins: async () => {},
+				reloadMCP: async () => {
+					await session.reloadMCP();
+				},
 			});
 			expect(output.join("\n")).toContain("Moved to ");
 			expect(sessionManager.getCwd()).toBe(cwdB);

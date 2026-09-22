@@ -121,6 +121,7 @@ import { releaseCompletionHandles } from "../eval/completion-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
+import type { MCPLoadResult } from "../mcp/manager";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -744,6 +745,7 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	#reloadMCP: AgentSessionConfig["reloadMCP"];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1429,6 +1431,7 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
+		this.#reloadMCP = config.reloadMCP;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -5588,6 +5591,17 @@ export class AgentSession {
 	/** Replaces connected MCP tools and enables them immediately. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
+	}
+
+	/**
+	 * Reload the SDK-owned MCP manager for the current workspace: tear down
+	 * old-workspace servers, clear the discovery cache, rediscover at the live
+	 * cwd, and republish tools. Resolves `undefined` when this session holds no
+	 * owned MCP manager (borrowed, disabled, or extension-provided).
+	 */
+	reloadMCP(): Promise<MCPLoadResult | undefined> {
+		if (!this.#reloadMCP) return Promise.resolve(undefined);
+		return this.#reloadMCP();
 	}
 
 	/** Replaces host-owned RPC tools before the next model call. */
