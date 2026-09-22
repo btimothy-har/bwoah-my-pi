@@ -196,7 +196,7 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 	const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
 	const deduplicate = enableDiagnostics && session.settings.get("lsp.diagnosticsDeduplicate");
 	return enableLsp
-		? createLspWritethrough(session.cwd, {
+		? createLspWritethrough(() => session.cwd, {
 				enableFormat,
 				enableDiagnostics,
 				transformDiagnostics: deduplicate
