@@ -48,6 +48,7 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
+import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
@@ -144,6 +145,10 @@ class FakeAgentSession {
 	refreshSkillsCalls = 0;
 	async refreshSkills(): Promise<void> {
 		this.refreshSkillsCalls++;
+	}
+	setTitleSystemPrompt(_prompt: string | undefined): void {}
+	async moveSession(newCwd: string): Promise<void> {
+		await this.sessionManager.moveTo(newCwd);
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -297,6 +302,8 @@ class FakeAgentSession {
 	}
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
+
+	setMCPPromptCommands(_commands: unknown[]): void {}
 
 	getContextUsage(): undefined {
 		return undefined;
@@ -3474,19 +3481,113 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			});
 			expectAcpStructure(zNewSessionResponse, created);
 
-			// The fixture delays its `initialize` response past the 250ms startup
-			// race, so the first (synchronous) refresh inside `#configureMcpServers`
-			// must see no tools yet.
-			expect(refreshSpy.mock.calls).toHaveLength(1);
-			expect(namesOf(refreshSpy.mock.calls[0]?.[0] ?? [])).toEqual([]);
-
-			// Once the delayed `initialize` response lands, the background
-			// `onToolsChanged` -> queued `refreshMCPTools` call must deliver the
-			// server's tool. Before the fix, this late arrival was dropped.
-			await pollUntil(() => refreshSpy.mock.calls.length > 1);
+			// The pre-connect clear and the startup-race refresh both see no tools
+			// yet; the contract under test is the consumer outcome — the late
+			// connection still lands in the session.
+			await pollUntil(() => refreshSpy.mock.calls.some(call => namesOf(call?.[0] ?? []).length > 0));
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+
+	const GATED_FIXTURE = path.join(import.meta.dir, "fixtures", "gated-mcp.ts");
+
+	it("survives an MCP reconnect outage during /move instead of dying fatally", async () => {
+		const harness = await createHarness();
+		const gatePath = path.join(harness.cwdA, "reconnect-gate");
+		const logPath = path.join(harness.cwdA, "reconnect-lifecycle.log");
+		const originalProjectDir = getProjectDir();
+
+		// Strict initial setup: the server connects while the gate file is absent.
+		const created = await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "flaky", command: BUN_EXEC, args: [GATED_FIXTURE, logPath, gatePath], env: [] }],
+		});
+		const session = harness.findSession(created.sessionId)!;
+
+		// Make every future spawn of the server fail, so the /move rescope's
+		// reconnect hits an MCP outage.
+		await Bun.write(gatePath, "");
+
+		try {
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: `/move ${harness.cwdB}` }],
+			});
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+
+		// Consumer outcome: the session survived the outage and the move completed.
+		expect(session.disposed).toBe(false);
+		expect(path.resolve(session.sessionManager.getCwd())).toBe(path.resolve(harness.cwdB));
+		// The outage was reported to the client, not swallowed silently.
+		expect(
+			harness.updates.some(
+				update =>
+					update.sessionId === created.sessionId &&
+					update.update.sessionUpdate === "agent_message_chunk" &&
+					update.update.content.type === "text" &&
+					update.update.content.text.includes("MCP reload failed"),
+			),
+		).toBe(true);
+
+		// The moved session still answers prompts.
+		const followUp = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "still there?" }],
+		});
+		expect(followUp.stopReason).toBe("end_turn");
+	}, 30_000);
+
+	it("disconnects a replacement manager when session/close wins the reconfiguration race", async () => {
+		const harness = await createHarness();
+		const logPath = path.join(harness.cwdA, "close-race-lifecycle.log");
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// Hold the reconfiguration inside `#configureMcpServers` (at the
+		// pre-connect tool clear) so closeSession can win while the replacement
+		// manager's setup is mid-flight; the replacement then connects entirely
+		// after the session is already closed.
+		const { promise: releaseClear, resolve: unblockClear } = Promise.withResolvers<void>();
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools").mockImplementation(() => releaseClear);
+
+		let configured: Promise<unknown>;
+		try {
+			configured = harness.agent.loadSession({
+				sessionId: created.sessionId,
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "late", command: BUN_EXEC, args: [GATED_FIXTURE, logPath], env: [] }],
+			});
+			await pollUntil(() => refreshSpy.mock.calls.length >= 1);
+
+			// Close wins while the replacement is being configured.
+			await harness.agent.closeSession({ sessionId: created.sessionId });
+			expect(session.disposed).toBe(true);
+
+			unblockClear();
+			await expect(configured).rejects.toThrow(/closed/);
+		} finally {
+			unblockClear();
+			refreshSpy.mockRestore();
+		}
+
+		// Consumer outcome: the replacement's server process did not leak — the
+		// post-connect liveness check disconnected the stale manager.
+		const log = await Bun.file(logPath).text();
+		const spawnLine = log.split("\n").find(line => line.startsWith("spawn "));
+		if (!spawnLine) throw new Error("replacement server never spawned");
+		const pid = Number(spawnLine.split(" ")[1]);
+		await pollUntil(() => {
+			try {
+				process.kill(pid, 0);
+				return false;
+			} catch {
+				return true;
+			}
+		}, 10_000);
+	}, 30_000);
 });

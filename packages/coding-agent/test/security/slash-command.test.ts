@@ -47,6 +47,7 @@ function runtime(): SlashCommandRuntime {
 		},
 		refreshCommands: () => undefined,
 		reloadPlugins: async () => undefined,
+		reloadMCP: async () => undefined,
 	};
 }
 

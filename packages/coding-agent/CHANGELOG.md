@@ -11,6 +11,7 @@
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
 
 ### Fixed
+- Fixed `/wt`, `/move`, and `/mcp reload` leaving MCP servers, task-agent choices, and cold-revived subagent discovery bound to the previous checkout; workspace discovery now follows the active execution directory while session history stays at its canonical home ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed edit and write LSP processing staying bound to the previous checkout after `/wt` or `/move` ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed rejected `/wt` execution bindings being revived when their old path later became valid; restore now clears the saved binding and keeps the conversation at its canonical home ([Bwoah My Pi #10](https://github.com/btimothy-har/bwoah-my-pi/pull/10) by [@btimothy-har](https://github.com/btimothy-har)).
 - Fixed `/wt` execution bindings silently adopting a directory that now belongs to a different Git repository; binding and restore now verify the candidate shares the session home's repository and fall back to the home with the existing unavailable-worktree notice ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).

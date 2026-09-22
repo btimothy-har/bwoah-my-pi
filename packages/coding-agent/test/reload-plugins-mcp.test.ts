@@ -45,18 +45,40 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async (_options?: unknown) => ({ errors: new Map<string, string>() })),
 		getTools: vi.fn(() => mcpTools),
+		// Same contract as MCPManager.reloadForCwd: teardown, rediscovery at the
+		// destination cwd, and the destination catalog as the result.
+		reloadForCwd: vi.fn(async (destinationCwd: string, options?: unknown) => {
+			await mcpManager.disconnectAll();
+			await mcpManager.discoverAndConnect(options);
+			return { errors: new Map<string, string>(), connectedServers: [], tools: mcpTools, exaApiKeys: [] };
+		}),
 	};
+	const settings = { get: (key: string): unknown => settingsValues[key] };
 	const session = {
 		effectiveExtensionRoots: TEST_EXTENSION_ROOTS,
 		getEvalPreludes: () => [],
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
+		// Mirrors the SDK-owned reload sequence so the controller drives the
+		// manager's real rebind contract rather than a mock echo.
+		reloadMCP: vi.fn(async () => {
+			session.setMCPPromptCommands([]);
+			await session.refreshMCPTools([]);
+			const result = await mcpManager.reloadForCwd(getProjectDir(), {
+				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+				filterExa: true,
+				filterBrowser: false,
+				extensionRoots: TEST_EXTENSION_ROOTS,
+			});
+			await session.refreshMCPTools(mcpManager.getTools());
+			return result;
+		}),
 	};
 	const ctx = {
 		mcpManager,
 		session,
 		sessionManager: { getCwd: () => cwd },
-		settings: { get: (key: string): unknown => settingsValues[key] },
+		settings,
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),
 		showStatus: vi.fn(() => {}),
@@ -87,10 +109,10 @@ describe("/reload-plugins runtime refresh", () => {
 		expect(result).toBe(true);
 		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
 		expect(mcpManager.discoverAndConnect).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledWith(mcpTools);
-		expect(session.setMCPPromptCommands).toHaveBeenCalledTimes(1);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledWith([]);
+		// The republished catalog is the reload's result (the manager's tools),
+		// not the pre-clear empty snapshot.
+		expect(session.refreshMCPTools).toHaveBeenLastCalledWith(mcpTools);
 	});
 
 	test("honors mcp.enableProjectConfig=false so opted-out project servers are not started on reload", async () => {

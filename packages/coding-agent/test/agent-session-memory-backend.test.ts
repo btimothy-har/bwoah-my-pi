@@ -232,6 +232,9 @@ describe("AgentSession memory backend lifecycle", () => {
 					destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
 					if (rollback) throw new Error("destination plugin rescope failed");
 				},
+				reloadMCP: async () => {
+					await current.reloadMCP();
+				},
 			});
 		} finally {
 			setProjectDir(originalProjectDir);
@@ -313,6 +316,9 @@ describe("AgentSession memory backend lifecycle", () => {
 				},
 				refreshCommands: () => {},
 				reloadPlugins: async () => {},
+				reloadMCP: async () => {
+					await current.reloadMCP();
+				},
 			};
 			const originalProjectDir = getProjectDir();
 			try {

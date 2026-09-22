@@ -2040,6 +2040,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
+		// SDK-owned MCP lifecycle: one queue orders deferred startup discovery,
+		// explicit reloads (`/wt`, `/move`, `/mcp reload`), tools-changed
+		// publication, and browser-filter reconciliation; one abort controller
+		// cancels a queued reload when the session disposes. Borrowed managers
+		// (subagents) keep the parent's ownership and get none of this.
+		const ownsMcpManager = enableMCP && !options.mcpManager;
+		const mcpLifecycleAbort = ownsMcpManager ? new AbortController() : undefined;
+		let mcpLifecycleTail: Promise<void> = Promise.resolve();
+		const enqueueMcpLifecycle = ownsMcpManager
+			? <T>(operation: () => Promise<T>): Promise<T> => {
+					const run = mcpLifecycleTail.then(operation);
+					mcpLifecycleTail = run.then(
+						() => undefined,
+						() => undefined,
+					);
+					return run;
+				}
+			: undefined;
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
@@ -2082,7 +2100,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 				const deferredMCPManager = mcpManager;
 				startDeferredMCPDiscovery = liveSession => {
-					void (async () => {
+					// First paint stays nonblocking: the discovery op is queued and
+					// awaited here without blocking construction; pending-tool
+					// placeholders cover the model surface until it lands.
+					void enqueueMcpLifecycle!(async () => {
+						if (liveSession.isDisposed) return;
 						try {
 							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
 								deferredMCPManager.discoverAndConnect(mcpDiscoverOptions),
@@ -2097,14 +2119,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							applyMCPEnvironment(mcpResult);
 							logMCPLoadErrors(mcpResult.errors);
 							// Connected MCP tools are enabled and mounted under xd:// devices.
-							await liveSession.refreshMCPTools(mcpResult.tools);
+							// Read the manager's live catalog at execution, not a snapshot
+							// retained from a superseded run.
+							await liveSession.refreshMCPTools(deferredMCPManager.getTools());
 						} catch (error) {
 							logger.error("MCP tool load failed", {
 								path: ".mcp.json",
 								error: error instanceof Error ? error.message : String(error),
 							});
 						}
-					})();
+					});
 				};
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
@@ -3912,12 +3936,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
-			reconcileBrowserMcpFilter: mcpManager
-				? async enabled => {
-						await mcpManager.reconcileBrowserFilter(enabled);
-						return mcpManager.getTools();
-					}
-				: undefined,
 			memoryEnabled: !restrictToolNames,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
@@ -3972,12 +3990,73 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return out;
 					}
 				: undefined,
-			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			reconcileBrowserMcpFilter: mcpManager
+				? async enabled => {
+						if (enqueueMcpLifecycle) {
+							// Queue behind startup/reload so a setting change during a
+							// reload runs in order instead of racing it as an old-epoch
+							// filter inside the manager.
+							await enqueueMcpLifecycle(async () => {
+								if (session.isDisposed) return;
+								await mcpManager.reconcileBrowserFilter(enabled);
+							});
+						} else {
+							await mcpManager.reconcileBrowserFilter(enabled);
+						}
+						return mcpManager.getTools();
+					}
+				: undefined,
+			reloadMCP: ownedMcpManager
+				? () =>
+						enqueueMcpLifecycle!(async () => {
+							// A reload queued behind startup/filter work must not run on a
+							// disposed session: abort the owned controller so
+							// `reloadForCwd`'s signal checks reject instead of reopening
+							// servers.
+							if (session.isDisposed) mcpLifecycleAbort?.abort();
+							// Clear prompt commands and old manager tools before
+							// rediscovery; refreshMCPTools([]) retains extension-owned
+							// MCP entries while dropping the manager's old-E tools.
+							session.setMCPPromptCommands([]);
+							await session.refreshMCPTools([]);
+							if (session.isDisposed) mcpLifecycleAbort?.abort();
+							ownedMcpManager.setNotificationsEnabled(settings.get("mcp.notifications") === true);
+							const result = await ownedMcpManager.reloadForCwd(
+								sessionManager.getCwd(),
+								{
+									onStatus: onMCPStatus,
+									enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+									// Always filter Exa - we have native integration
+									filterExa: true,
+									// Filter browser MCP only when Eval can expose the built-in browser prelude.
+									filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+									extensionRoots: session.effectiveExtensionRoots,
+								},
+								mcpLifecycleAbort?.signal,
+							);
+							applyMCPEnvironment(result);
+							logMCPLoadErrors(result.errors);
+							await session.refreshMCPTools(ownedMcpManager.getTools());
+							// A prompt refresh from the old generation can race the pre-clear
+							// above; publish the final catalog after rediscovery so stale
+							// `/server:prompt` commands cannot survive an empty destination.
+							session.setMCPPromptCommands(buildMCPPromptCommands(ownedMcpManager));
+							return result;
+						})
+				: undefined,
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			disconnectOwnedMcpManager: ownedMcpManager
+				? () => {
+						// Cancel a queued or in-flight owned reload before teardown so it
+						// cannot reopen servers after dispose.
+						mcpLifecycleAbort?.abort();
+						return ownedMcpManager.disconnectAll();
+					}
+				: undefined,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
@@ -4392,14 +4471,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//     `extensionRunner` so extensions loaded in that session receive frames.
 		//     Guarded only by `mcpManager` (see the second `if` below).
 		if (mcpManager && !options.mcpManager) {
-			mcpManager.setOnToolsChanged(async tools => {
-				try {
-					await session.refreshMCPTools(tools);
-				} catch (error) {
+			mcpManager.setOnToolsChanged(() => {
+				// Queued on the owner tail so publication cannot overtake a reload
+				// that is still tearing down or rediscovering. The callback reads
+				// the manager's live catalog at execution time instead of trusting
+				// a snapshot captured before a queued reload. Return the queued
+				// promise: refreshServerTools awaits this callback before fanout.
+				return enqueueMcpLifecycle!(async () => {
+					if (session.isDisposed) return;
+					await session.refreshMCPTools(mcpManager.getTools());
+				}).catch(error => {
 					logger.warn("MCP tool refresh failed", {
 						error: error instanceof Error ? error.message : String(error),
 					});
-				}
+				});
 			});
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { reset as resetDiscoveryCache } from "@oh-my-pi/pi-coding-agent/discovery";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -17,7 +19,9 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
@@ -213,6 +217,84 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
+const E1_SENTINEL = "E1 sentinel";
+const E2_SENTINEL = "E2 sentinel";
+const HOME_SENTINEL = "child-home sentinel";
+
+/**
+ * Distinct per-root discovery fixtures for the cold-revival reproduction: every
+ * root carries its own sentinel.txt and a same-named `root-probe` skill with a
+ * root-specific description/body, so one assertion tells which root workspace
+ * discovery actually read from.
+ */
+async function writeRootFixtures(
+	root: string,
+	sentinel: string,
+	skillDescription: string,
+	skillBody: string,
+): Promise<void> {
+	await Bun.write(path.join(root, "sentinel.txt"), `${sentinel}\n`);
+	await Bun.write(
+		path.join(root, ".omp", "skills", "root-probe", "SKILL.md"),
+		["---", "name: root-probe", `description: ${skillDescription}`, "---", skillBody].join("\n"),
+	);
+}
+
+/** Only native project `.omp/skills` discovery stays on: no user-config or foreign-provider scans. */
+function createRevivalSettings(): Settings {
+	return Settings.isolated({
+		"skills.enablePiUser": false,
+		"skills.enablePiProject": true,
+		"skills.enableAgentsUser": false,
+		"skills.enableAgentsProject": false,
+		"skills.enableCodexUser": false,
+		"skills.enableClaudeUser": false,
+		"skills.enableClaudeProject": false,
+		"mcp.enableProjectConfig": false,
+	});
+}
+
+/** Same fixture pattern as test/worktree-execution-binding.test.ts: real git repos and linked worktrees. */
+async function gitCli(cwd: string, ...args: string[]): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${stderr}`);
+}
+
+async function initRepoAt(dir: string): Promise<void> {
+	fs.mkdirSync(dir, { recursive: true });
+	await gitCli(dir, "init", "-q", "-b", "main");
+	const repo = vcs.git(dir);
+	if (!repo) throw new Error(`git repository not discovered at ${dir}`);
+	await repo.configSet("user.email", "test@example.com");
+	await repo.configSet("user.name", "test");
+	await Bun.write(path.join(dir, "README.md"), "seed\n");
+	await repo.stageFiles(["README.md"]);
+	await repo.commitCreate("init", {});
+}
+
+async function makeLinkedWorktree(homeDir: string, worktreePath: string, branch: string): Promise<void> {
+	const repo = vcs.git(homeDir);
+	if (!repo) throw new Error(`git repository not discovered at ${homeDir}`);
+	await repo.createBranch(branch, "HEAD", false);
+	await repo.worktreeAdd(worktreePath, branch, { detach: false, clone: false });
+}
+
+async function removeWorktree(homeDir: string, worktreePath: string): Promise<void> {
+	const repo = vcs.git(homeDir);
+	if (!repo) throw new Error(`git repository not discovered at ${homeDir}`);
+	await repo.worktreeRemove(worktreePath, true);
+	fs.rmSync(worktreePath, { recursive: true, force: true });
+}
+
+/** Shared real-SDK revival owner wiring (same recipe as the owner-policy test). */
+async function createRevivalOwner(root: string) {
+	const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+	return { authStorage, modelRegistry };
+}
+
 describe("persisted subagent revival", () => {
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
@@ -291,6 +373,172 @@ describe("persisted subagent revival", () => {
 		} finally {
 			await revived?.dispose();
 			authStorage.close();
+		}
+	});
+
+	it("keeps cold-revival discovery on the reopened child's root instead of the parent's live cwd (issue #9)", async () => {
+		// Non-isolated, non-restricted child persisted at E1 with conversational
+		// history and no executionCwd binding; the owning parent later sits at
+		// E2. Revival must resolve workspace discovery from the reopened child
+		// manager's own root, the same root its read tool already uses.
+		const root = makeTempDir("@pi-revive-split-roots-");
+		const e1 = path.join(root, "e1");
+		const e2 = path.join(root, "e2");
+		await initRepoAt(e1);
+		await initRepoAt(e2);
+		await writeRootFixtures(e1, E1_SENTINEL, "E1 root probe skill", "E1 root-probe body");
+		await writeRootFixtures(e2, E2_SENTINEL, "E2 root probe skill", "E2 root-probe body");
+
+		const sessionFile = await createPersistedSession(e1, false, "default");
+		const { authStorage, modelRegistry } = await createRevivalOwner(root);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		AgentRegistry.resetGlobalForTests();
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const extensionRoots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const reviver = await createFactory(e2, undefined, {
+			extensionRoots: () => extensionRoots,
+			authStorage,
+			modelRegistry,
+			settings: createRevivalSettings(),
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		resetDiscoveryCache();
+		let revived: AgentSession | undefined;
+		try {
+			revived = await reviver(ref);
+
+			// Native read resolves against the reopened child manager's live root
+			// (its home E1) — the half that already holds on the baseline.
+			const read = revived.getToolByName("read");
+			if (!read) throw new Error("Missing revived read tool");
+			const readResult = await read.execute("probe", { path: "sentinel.txt" });
+			const readText = readResult.content.find(block => block.type === "text")?.text ?? "";
+			expect(readText).toContain(E1_SENTINEL);
+
+			// Workspace discovery must follow the same resolved root. On the
+			// pre-fix baseline the reviver hands the parent's live cwd (E2) to
+			// SDK discovery, so the model-visible skill comes from E2 while the
+			// read tool operates on E1.
+			const skill = revived.skills.find(entry => entry.name === "root-probe");
+			expect(skill?.description).toBe("E1 root probe skill");
+			expect(skill?.filePath).toBe(path.join(e1, ".omp", "skills", "root-probe", "SKILL.md"));
+			expect(await Bun.file(skill?.filePath ?? "").text()).toContain("E1 root-probe body");
+
+			// Revival adopted the original child session file; the parent stays
+			// bound to E2 by the factory's live getCwd.
+			expect(revived.sessionFile).toBe(sessionFile);
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
+	it("resolves cold revival to the child's own home when its saved execution binding is discarded (issue #9)", async () => {
+		// Child home is a git repo whose linked worktree E1 carried the saved
+		// execution binding; E1 is removed before revival and the parent sits
+		// at E2. The manager's invalid-binding discard resolves the child to its
+		// own home; both native read and workspace discovery must use that
+		// resolved home, and the discard must persist so a later reopen cannot
+		// select the parent's E2.
+		const root = makeTempDir("@pi-revive-invalid-binding-");
+		const childHome = path.join(root, "child-home");
+		const parentDir = path.join(root, "parent-e2");
+		await initRepoAt(childHome);
+		await initRepoAt(parentDir);
+		await writeRootFixtures(childHome, HOME_SENTINEL, "Child-home root probe skill", "child-home root-probe body");
+		await writeRootFixtures(parentDir, E2_SENTINEL, "E2 root probe skill", "E2 root-probe body");
+
+		const e1 = path.join(root, "e1-wt");
+		await makeLinkedWorktree(childHome, e1, "feature/child");
+
+		const childManager = SessionManager.create(childHome, path.join(childHome, "sessions"));
+		const sessionFile = childManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		await childManager.setExecutionCwd(e1);
+		childManager.appendSessionInit({
+			systemPrompt: "persisted prompt",
+			task: "persisted task",
+			tools: ["read", "yield"],
+			restrictToolNames: false,
+			modelRole: "default",
+			resolvedModel: "anthropic/claude-sonnet-4-5",
+		});
+		childManager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await childManager.close();
+
+		// The bound execution path disappears before revival.
+		await removeWorktree(childHome, e1);
+
+		const { authStorage, modelRegistry } = await createRevivalOwner(root);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		AgentRegistry.resetGlobalForTests();
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const extensionRoots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const reviver = await createFactory(parentDir, undefined, {
+			extensionRoots: () => extensionRoots,
+			authStorage,
+			modelRegistry,
+			settings: createRevivalSettings(),
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		resetDiscoveryCache();
+		let revived: AgentSession | undefined;
+		try {
+			revived = await reviver(ref);
+
+			// Native read resolves to the discarded binding's fallback home.
+			const read = revived.getToolByName("read");
+			if (!read) throw new Error("Missing revived read tool");
+			const readResult = await read.execute("probe", { path: "sentinel.txt" });
+			const readText = readResult.content.find(block => block.type === "text")?.text ?? "";
+			expect(readText).toContain(HOME_SENTINEL);
+
+			// Workspace discovery must use the same resolved child home — on the
+			// pre-fix baseline it still receives the parent's live cwd (E2).
+			const skill = revived.skills.find(entry => entry.name === "root-probe");
+			expect(skill?.description).toBe("Child-home root probe skill");
+			expect(skill?.filePath).toBe(path.join(childHome, ".omp", "skills", "root-probe", "SKILL.md"));
+
+			// The discard was persisted, so a later reopen cannot resurrect the
+			// removed binding, and the child transcript is still the original file.
+			const header = (await loadEntriesFromFile(sessionFile)).find(entry => entry.type === "session") as
+				| SessionHeader
+				| undefined;
+			expect(header?.executionCwd).toBeUndefined();
+			expect(revived.sessionFile).toBe(sessionFile);
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+			AgentRegistry.resetGlobalForTests();
 		}
 	});
 

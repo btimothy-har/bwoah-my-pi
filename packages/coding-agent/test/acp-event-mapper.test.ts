@@ -103,6 +103,7 @@ class ReplayTestSession {
 	}
 
 	async refreshMCPTools(_tools: unknown): Promise<void> {}
+	setMCPPromptCommands(_commands: unknown[]): void {}
 }
 
 describe("ACP event mapper", () => {

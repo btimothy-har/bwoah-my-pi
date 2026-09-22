@@ -113,6 +113,7 @@ class LazyFakeSession {
 	async abort(): Promise<void> {}
 	async promptCustomMessage(): Promise<void> {}
 	async refreshMCPTools(): Promise<void> {}
+	setMCPPromptCommands(_commands: unknown[]): void {}
 	getContextUsage(): undefined {
 		return undefined;
 	}

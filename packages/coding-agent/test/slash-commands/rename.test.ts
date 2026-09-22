@@ -48,6 +48,9 @@ function createRuntime(
 		output: () => {},
 		refreshCommands: () => {},
 		reloadPlugins: async () => {},
+		reloadMCP: async () => {
+			await session?.reloadMCP();
+		},
 	};
 	const ctx = createInteractiveModeContext({
 		session,

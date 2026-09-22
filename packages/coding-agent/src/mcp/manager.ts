@@ -9,6 +9,7 @@ import * as url from "node:url";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import { clearCache as clearFsCache } from "../capability/fs";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
@@ -43,7 +44,7 @@ import type { MCPStoredOAuthCredential } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { type MCPReconnect, DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
@@ -276,7 +277,7 @@ export class MCPManager {
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
 	#discoverOptions: MCPDiscoverOptions | undefined;
-	#browserFilterMutationTail: Promise<void> = Promise.resolve();
+	#lifecycleMutationTail: Promise<void> = Promise.resolve();
 	/**
 	 * Timestamps of recent reconnectServer invocations per server, used by the
 	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
@@ -510,7 +511,72 @@ export class MCPManager {
 	 * Returns tools and any connection errors.
 	 */
 	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
-		this.#discoverOptions = options ? { ...options } : undefined;
+		return this.#discover(options);
+	}
+
+	/**
+	 * Reconcile browser-automation MCP servers with the built-in browser prelude.
+	 * Queued on the same tail as {@link reloadForCwd} so rapid setting toggles
+	 * cannot reconnect a server after a rebind. The operation captures the
+	 * manager epoch before enqueue and re-checks on entry and after the config
+	 * load: a filter superseded by a reload is dropped instead of reconnecting
+	 * servers under stale options.
+	 */
+	reconcileBrowserFilter(enabled: boolean): Promise<void> {
+		const filterEpoch = this.#epoch;
+		const reconcile = this.#lifecycleMutationTail.then(() => this.#applyBrowserFilter(enabled, filterEpoch));
+		this.#lifecycleMutationTail = reconcile.catch(() => undefined);
+		return reconcile;
+	}
+
+	/**
+	 * Rebind the manager to a new workspace: tear down every owned server while
+	 * the manager cwd still denotes the old workspace, then move the cwd, clear
+	 * the filesystem discovery cache, and rediscover from the destination.
+	 *
+	 * Serialized with {@link reconcileBrowserFilter} so a reload and a filter
+	 * toggle cannot interleave; a rejected operation does not poison the queue.
+	 * The caller's signal is checked before teardown and again before
+	 * destination discovery — a cancelled rebind never reopens servers.
+	 */
+	async reloadForCwd(cwd: string, options?: MCPDiscoverOptions, signal?: AbortSignal): Promise<MCPLoadResult> {
+		const queued = this.#lifecycleMutationTail.then(() => this.#reloadForCwd(cwd, options, signal));
+		this.#lifecycleMutationTail = queued.then(
+			() => undefined,
+			() => undefined,
+		);
+		return queued;
+	}
+
+	async #reloadForCwd(
+		cwd: string,
+		options: MCPDiscoverOptions | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<MCPLoadResult> {
+		signal?.throwIfAborted();
+		// Teardown happens against the old workspace: disconnectAll bumps the
+		// epoch, invalidating every old-generation reconnect/tool callback.
+		await this.disconnectAll();
+		signal?.throwIfAborted();
+		this.cwd = path.resolve(cwd);
+		clearFsCache();
+		return this.#discover(options, signal);
+	}
+
+	/**
+	 * Shared discovery body for startup and reload. Captures the manager epoch
+	 * before reading config; if a concurrent disconnect invalidated it, no
+	 * config is installed and no server is started — the caller gets the
+	 * manager's current catalog instead of stale tools.
+	 */
+	async #discover(options: MCPDiscoverOptions | undefined, signal?: AbortSignal): Promise<MCPLoadResult> {
+		const discoveryEpoch = this.#epoch;
+		const supersededResult = (): MCPLoadResult => ({
+			tools: this.#tools,
+			errors: new Map<string, string>(),
+			connectedServers: [],
+			exaApiKeys: [],
+		});
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
 			loadedConfigs = await this.loadConfigs(this.cwd, {
@@ -520,29 +586,36 @@ export class MCPManager {
 				extensionRoots: options?.extensionRoots,
 			});
 		} catch (error) {
+			signal?.throwIfAborted();
+			if (this.#epoch !== discoveryEpoch) return supersededResult();
+			// Preserve existing behavior for a genuine discovery failure: the latest
+			// options become the baseline for later browser-filter reconciliation.
+			this.#discoverOptions = options ? { ...options } : undefined;
 			const message = error instanceof Error ? error.message : String(error);
 			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
 			this.#emitConnectionStatus({ type: "failed", serverName: ".mcp.json", error: message });
 			throw error;
 		}
+		signal?.throwIfAborted();
+		if (this.#epoch !== discoveryEpoch) return supersededResult();
+		this.#discoverOptions = options ? { ...options } : undefined;
 		const { configs, exaApiKeys, sources } = loadedConfigs;
 		const result = await this.connectServers(configs, sources, options?.onStatus);
+		// A rebind that raced the connect window must not apply obsolete Exa keys
+		// from the old generation's config: return the current catalog untouched.
+		signal?.throwIfAborted();
+		if (this.#epoch !== discoveryEpoch) return supersededResult();
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
 
 	/**
-	 * Reconcile browser-automation MCP servers with the built-in browser prelude.
-	 * Calls are serialized so rapid setting toggles cannot reconnect a server
-	 * after a newer enable has filtered it again.
+	 * Apply the browser filter. Guards on the epoch captured at enqueue so a
+	 * filter superseded by a rebind never connects or rewrites discovery
+	 * options.
 	 */
-	reconcileBrowserFilter(enabled: boolean): Promise<void> {
-		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyBrowserFilter(enabled));
-		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
-		return reconcile;
-	}
-
-	async #applyBrowserFilter(enabled: boolean): Promise<void> {
+	async #applyBrowserFilter(enabled: boolean, filterEpoch: number): Promise<void> {
+		if (this.#epoch !== filterEpoch) return;
 		const options = this.#discoverOptions;
 		const loaded = await this.loadConfigs(this.cwd, {
 			enableProjectConfig: options?.enableProjectConfig,
@@ -550,6 +623,7 @@ export class MCPManager {
 			filterBrowser: false,
 			extensionRoots: options?.extensionRoots,
 		});
+		if (this.#epoch !== filterEpoch) return;
 		const browserConfigs: Record<string, MCPServerConfig> = {};
 		const browserSources: Record<string, SourceMeta> = {};
 		for (const name in loaded.configs) {
@@ -562,6 +636,7 @@ export class MCPManager {
 
 		if (!enabled) {
 			await this.connectServers(browserConfigs, browserSources, options?.onStatus);
+			if (this.#epoch !== filterEpoch) return;
 			this.#discoverOptions = { ...options, filterBrowser: false };
 			return;
 		}
@@ -572,6 +647,7 @@ export class MCPManager {
 			if (isBrowserMCPServer(name, config)) names.add(name);
 		}
 		await Promise.all([...names].map(name => this.disconnectServer(name)));
+		if (this.#epoch !== filterEpoch) return;
 		this.#discoverOptions = { ...options, filterBrowser: true };
 	}
 
@@ -589,6 +665,7 @@ export class MCPManager {
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 	): Promise<MCPLoadResult> {
+		const connectEpoch = this.#epoch;
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
 			this.#emitConnectionStatus(event);
@@ -655,11 +732,22 @@ export class MCPManager {
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
+				// A rebind that landed during auth resolution must not start the old
+				// workspace's server at all: the post-connect guard below only closes
+				// it after a handshake that would already have answered destination
+				// roots from the rebound cwd.
+				if (this.#epoch !== connectionEpoch) {
+					throw new Error(`Server "${name}" was disconnected during initial connection`);
+				}
 				return connectToServer(name, resolvedConfig, {
 					onNotification: (method, params) => {
+						if (this.#epoch !== connectionEpoch) return;
 						this.#handleServerNotification(name, method, params);
 					},
-					onRequest: (method, params) => {
+					onRequest: async (method, params) => {
+						if (this.#epoch !== connectionEpoch) {
+							throw new Error(`Server "${name}" was disconnected during initial connection`);
+						}
 						return this.#handleServerRequest(method, params);
 					},
 				});
@@ -740,10 +828,14 @@ export class MCPManager {
 
 			void toolsPromise
 				.then(async ({ connection, serverTools }) => {
+					// Epoch first: disconnectAll clears the pending maps only after
+					// the closes settle, so during a slow teardown a tool load that
+					// raced the disconnect can still pass the identity check. A
+					// superseded result must neither publish old tools nor wrap
+					// them in a reconnect callback valid for the new generation.
+					if (this.#epoch !== connectEpoch) return;
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
-					this.#pendingToolLoads.delete(name);
-					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
-						this.reconnectServer(name, options);
+					const reconnect = this.#generationReconnect(name);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
@@ -753,6 +845,9 @@ export class MCPManager {
 					await this.#loadServerResourcesAndPrompts(name, connection);
 				})
 				.catch(error => {
+					// Same epoch guard: a teardown-induced failure is stale and
+					// must stay quiet (no failure event, no retry arming).
+					if (this.#epoch !== connectEpoch) return;
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
@@ -811,6 +906,18 @@ export class MCPManager {
 			// `void toolsPromise.then(...)` chain above registers their tools and
 			// fires `#onToolsChanged` once the connect finishes, or logs the failure
 			// after `allowBackgroundLogging` flips below.
+			// A disconnect that raced the startup window (e.g. a queued rebind
+			// tore the manager down) must not publish tools, cached or fulfilled:
+			// the whole generation was invalidated, so report the current catalog.
+			if (this.#epoch !== connectEpoch) {
+				allowBackgroundLogging = true;
+				return {
+					tools: this.#tools,
+					errors: new Map<string, string>(),
+					connectedServers: [],
+					exaApiKeys: [],
+				};
+			}
 
 			for (const task of connectionTasks) {
 				const { name } = task;
@@ -819,7 +926,7 @@ export class MCPManager {
 					if (!value) continue;
 					const { connection, serverTools } = value;
 					connectedServers.add(name);
-					const reconnect = () => this.reconnectServer(name);
+					const reconnect = this.#generationReconnect(name);
 					this.#replaceServerTools(name, MCPTool.fromTools(connection, serverTools, reconnect));
 				} else if (task.tracked.status === "rejected") {
 					const message =
@@ -830,10 +937,10 @@ export class MCPManager {
 					const cached = cachedTools.get(name);
 					if (cached) {
 						const source = this.#sources.get(name);
-						const reconnect = () => this.reconnectServer(name);
+						const reconnect = this.#generationReconnect(name);
 						this.#replaceServerTools(
 							name,
-							DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
+							DeferredMCPTool.fromTools(name, cached, this.#generationConnectionGetter(name), source, reconnect),
 						);
 					}
 				}
@@ -862,6 +969,43 @@ export class MCPManager {
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
+	}
+
+	/**
+	 * Reconnect callback bound to the manager generation the wrapped tool was
+	 * created in. After a rebind ({@link reloadForCwd} → `disconnectAll` bumps
+	 * the epoch) an old tool object must not reconnect a same-named server from
+	 * the new workspace: the callback returns `null`, which the tool-bridge
+	 * retry paths treat as "no reconnect possible", so an in-flight old-E call
+	 * fails with its own transport error instead of replaying against E2.
+	 */
+	#generationReconnect(name: string): MCPReconnect {
+		const generation = this.#epoch;
+		return async (options?: { authChallenge?: MCPAuthChallenge }) => {
+			if (this.#epoch !== generation) return null;
+			const connection = await this.reconnectServer(name, options);
+			return this.#epoch !== generation ? null : connection;
+		};
+	}
+
+	/**
+	 * Deferred connection getter bound to the manager generation at tool
+	 * creation. Checks before and after `waitForConnection()` so a getter held
+	 * across a rebind throws the initial-connection error instead of resolving
+	 * a same-named connection from the new workspace.
+	 */
+	#generationConnectionGetter(name: string): () => Promise<MCPServerConnection> {
+		const generation = this.#epoch;
+		return async () => {
+			if (this.#epoch !== generation) {
+				throw new Error(`Server "${name}" was disconnected during initial connection`);
+			}
+			const connection = await this.waitForConnection(name);
+			if (this.#epoch !== generation) {
+				throw new Error(`Server "${name}" was disconnected during initial connection`);
+			}
+			return connection;
+		};
 	}
 
 	#triggerNotificationRefresh(serverName: string, kind: "tools" | "resources" | "prompts"): Promise<void> {
@@ -1305,10 +1449,16 @@ export class MCPManager {
 		options: { authChallenge?: MCPAuthChallenge; scheduled?: boolean },
 	): Promise<MCPServerConnection | null> {
 		const { authChallenge, scheduled = false } = options;
+		// Captured at entry, before any await: an auth flow that resumes after a
+		// rebind must not reinstall the old generation's config into the manager
+		// (the loop below re-checks this epoch at every step).
+		const reconnectEpoch = this.#epoch;
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
 		if (!config) return null;
+
+		if (this.#epoch !== reconnectEpoch) return null;
 
 		if (authChallenge) {
 			if (!this.#authHandler) {
@@ -1320,6 +1470,7 @@ export class MCPManager {
 			try {
 				const refreshedConfig = await this.#authHandler(name, authChallenge);
 				if (!refreshedConfig) return null;
+				if (this.#epoch !== reconnectEpoch) return null;
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
 			} catch (error) {
@@ -1335,7 +1486,6 @@ export class MCPManager {
 		// Fire-and-forget: don't await the close — HttpTransport.close() sends a
 		// DELETE with config.timeout (30s default), and blocking here delays the
 		// reconnect loop by that amount on every server restart.
-		const reconnectEpoch = this.#epoch;
 		if (oldConnection) {
 			// From here the live remote connection is gone: the server is lost
 			// until a reconnect succeeds, and the schedule outlives this attempt.
@@ -1409,11 +1559,20 @@ export class MCPManager {
 		reconnectEpoch: number,
 	): Promise<MCPServerConnection> {
 		const resolvedConfig = await this.#resolveAuthConfig(config);
+		// Same pre-connect generation gate as the initial path: a rebind during
+		// auth resolution must not reopen the old generation's server.
+		if (this.#epoch !== reconnectEpoch) {
+			throw new Error(`Server "${name}" was disconnected during reconnection`);
+		}
 		const connection = await connectToServer(name, resolvedConfig, {
 			onNotification: (method, params) => {
+				if (this.#epoch !== reconnectEpoch) return;
 				this.#handleServerNotification(name, method, params);
 			},
-			onRequest: (method, params) => {
+			onRequest: async (method, params) => {
+				if (this.#epoch !== reconnectEpoch) {
+					throw new Error(`Server "${name}" was disconnected during reconnection`);
+				}
 				return this.#handleServerRequest(method, params);
 			},
 		});
@@ -1449,7 +1608,14 @@ export class MCPManager {
 		};
 		try {
 			const serverTools = await listTools(connection);
-			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
+			// A tool load that outlived its generation (rebind disconnected the
+			// manager mid-`listTools`) must not publish stale tools over a newer
+			// connection. Throw into the catch below: the identity-guarded detach
+			// leaves any replacement connection intact and closes this one once.
+			if (this.#connections.get(name) !== connection) {
+				throw new Error(`Server "${name}" was disconnected during reconnection`);
+			}
+			const reconnect = this.#generationReconnect(name);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
@@ -1499,7 +1665,10 @@ export class MCPManager {
 
 		// Reload tools
 		const serverTools = await listTools(connection);
-		const reconnect = () => this.reconnectServer(name);
+		// A refresh that raced a rebind must not publish over a newer
+		// connection's tools: return without publishing.
+		if (this.#connections.get(name) !== connection) return;
+		const reconnect = this.#generationReconnect(name);
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 		void this.toolCache?.set(name, connection.config, serverTools);
 
@@ -1545,6 +1714,9 @@ export class MCPManager {
 			}
 			if (resourcesResult.status === "rejected") throw resourcesResult.reason;
 			const resources = resourcesResult.value;
+			// A refresh that raced a rebind must not publish old-E resources or
+			// subscriptions over a newer connection.
+			if (this.#connections.get(name) !== connection) return;
 			if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
 				const newUris = new Set(resources.map(r => r.uri));
 				const oldUris = this.#subscribedResources.get(name);
@@ -1580,6 +1752,9 @@ export class MCPManager {
 					if (action === "ignore") {
 						return;
 					}
+					// Re-check after the subscription await: a rebind that raced the
+					// subscribe must not attach old-E subscriptions.
+					if (this.#connections.get(name) !== connection) return;
 					this.#subscribedResources.set(name, newUris);
 				} catch (error) {
 					logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
@@ -1589,6 +1764,9 @@ export class MCPManager {
 
 		const promise = doRefresh()
 			.then(() => {
+				// Catalog callbacks re-check identity: a superseded refresh is
+				// silent, not a stale announcement.
+				if (this.#connections.get(name) !== connection) return;
 				this.#emitCatalogChange({ serverName: name, kind: "resources" });
 			})
 			.finally(() => {
@@ -1622,6 +1800,8 @@ export class MCPManager {
 		connection.prompts = undefined;
 		await listPrompts(connection);
 
+		// A refresh that raced a rebind must not announce old-E prompts.
+		if (this.#connections.get(name) !== connection) return;
 		this.#onPromptsChanged?.(name);
 		this.#emitCatalogChange({ serverName: name, kind: "prompts" });
 	}

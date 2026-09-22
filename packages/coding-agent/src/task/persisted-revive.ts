@@ -19,8 +19,9 @@ import type { AgentDefinition } from "./types";
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
- * kept LIVE (cwd / artifact manager read on demand) so a later `/new` or cwd
- * move is followed rather than snapshotted; auth/models/settings are
+ * kept LIVE for owner policy and artifact-manager access so later `/new` or
+ * cwd moves are followed rather than snapshotted. The reopened child's own
+ * resolved cwd remains the discovery root; auth/models/settings are
  * process-stable and captured by reference.
  */
 export interface PersistedSubagentReviveContext {
@@ -146,7 +147,7 @@ export function createPersistedSubagentReviverFactory(
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
+				cwd: reopened.getCwd(),
 				authStorage: ctx.authStorage,
 				// Revived agents join the root session tree, so their observability
 				// frames ride the same bus the RPC/collab surfaces subscribed to.

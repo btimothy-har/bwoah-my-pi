@@ -74,6 +74,7 @@ describe("sharpshooter memory backend", () => {
 			},
 			refreshCommands: () => {},
 			reloadPlugins: async () => {},
+			reloadMCP: async () => {},
 		} satisfies SlashCommandRuntime;
 
 		await executeAcpBuiltinSlashCommand("/memory queue", runtime);
