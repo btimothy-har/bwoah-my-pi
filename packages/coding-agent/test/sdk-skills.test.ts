@@ -112,7 +112,7 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
@@ -153,7 +153,7 @@ Loaded via symbolic link.
 		try {
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
-				sessionManager: SessionManager.inMemory(),
+				sessionManager: SessionManager.inMemory(tempDir),
 				settings: createIsolatedSkillsSettings([settingsPackage]),
 				disableExtensionDiscovery: true,
 			}));
@@ -166,7 +166,7 @@ Loaded via symbolic link.
 			session = undefined;
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
-				sessionManager: SessionManager.inMemory(),
+				sessionManager: SessionManager.inMemory(tempDir),
 				settings: createIsolatedSkillsSettings([settingsPackage]),
 			}));
 
@@ -182,7 +182,7 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
@@ -198,7 +198,7 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
@@ -304,7 +304,7 @@ This skill is added after session creation.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			skills: [], // Explicitly empty - like --no-skills
 			settings: createIsolatedSkillsSettings(),
@@ -328,7 +328,7 @@ This skill is added after session creation.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			skills: [customSkill],
 			settings: createIsolatedSkillsSettings(),

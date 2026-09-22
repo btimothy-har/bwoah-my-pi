@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
-import type { ToolSession } from ".";
+import { type ToolSession, getToolSessionHome } from "./session-home";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
@@ -901,6 +901,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			attachments: this.session.getImageAttachments?.() ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
+			sessionHome: getToolSessionHome(this.session),
 			sessionFile: this.session.getSessionFile() ?? undefined,
 			sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 			agentRegistry: this.session.agentRegistry,

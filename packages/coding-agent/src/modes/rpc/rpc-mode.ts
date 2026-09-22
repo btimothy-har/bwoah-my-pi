@@ -30,6 +30,7 @@ import {
 	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { refreshAgentDiscovery } from "../../task";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -1158,14 +1159,17 @@ export async function runRpcMode(
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {
-		const cwd = session.sessionManager.getCwd();
-		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		// Discovery anchors at the session home; an execution worktree must not
+		// swap the plugin/agent/command universe.
+		const home = session.sessionManager.getSessionHome();
+		const projectPath = await resolveActiveProjectRegistryPath(home);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await refreshAgentDiscovery(home, session.effectiveExtensionRoots);
 		resetCapabilities();
 		await session.refreshSkills();
 		session.setSlashCommands(
 			await loadSlashCommands({
-				cwd,
+				cwd: home,
 				extensionRoots: session.effectiveExtensionRoots,
 			}),
 		);

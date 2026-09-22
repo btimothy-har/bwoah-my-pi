@@ -221,6 +221,7 @@ describe("memories/storage", () => {
 				getSessionDir: () => sessionDir,
 				getSessionId: () => "current-thread",
 				getCwd: () => PROJECT_CWD,
+				getSessionHome: () => PROJECT_CWD,
 			},
 			settings,
 			model,

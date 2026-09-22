@@ -1481,7 +1481,7 @@ export class SessionTools {
 			const skillsSettings = this.#host.settings.getGroup("skills");
 			const discovered = await loadSkills({
 				...skillsSettings,
-				cwd: this.#host.sessionManager.getCwd(),
+				cwd: this.#host.sessionManager.getSessionHome(),
 				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
 				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});

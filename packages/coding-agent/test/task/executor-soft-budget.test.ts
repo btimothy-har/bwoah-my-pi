@@ -199,6 +199,7 @@ describe("runSubprocess soft request budget", () => {
 	function baseOptions(id: string, eventBus?: EventBus, subagentEventBus?: EventBus) {
 		return {
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "inventory the api surface",
 			index: 0,

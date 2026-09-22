@@ -250,6 +250,12 @@ export interface ToolSession {
 	 * re-bind tools to their own session-scoped `CustomToolAPI`.
 	 */
 	customToolPaths?: ToolPathWithSource[];
+	/**
+	 * The native task-isolation root this session executes in, when any. Children
+	 * inherit it for execution only — no cleanup ownership, and their transcripts
+	 * stay cold-revival-refused like any isolated run.
+	 */
+	isolatedTaskRoot?: string;
 	/** Whether LSP integrations are enabled */
 	enableLsp?: boolean;
 	/** Whether LSP is limited to navigation and diagnostics. */
@@ -295,7 +301,7 @@ export interface ToolSession {
 	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
 	sessionManager?: Pick<
 		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries" | "getSessionHome"
 	> & { getSessionId?: SessionManager["getSessionId"] };
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
@@ -496,6 +502,8 @@ export interface ToolSession {
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
+
+export * from "./session-home";
 
 /**
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or

@@ -245,6 +245,7 @@ async function runScenario(ops: Op[], options?: { abortAfterOps?: boolean }): Pr
 
 	const result = await runSubprocess({
 		cwd: "/tmp",
+		sessionHome: "/tmp",
 		agent,
 		task: "equivalence scenario",
 		description: "recent-output equivalence",

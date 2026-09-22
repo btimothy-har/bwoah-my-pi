@@ -139,6 +139,7 @@ describe("subagent runtime model resolution", () => {
 			settings.setModelRole("default", "custom/coding-router:max");
 			const result = await runSubprocess({
 				cwd: "/tmp",
+				sessionHome: "/tmp",
 				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
 				task: "work",
 				index: 0,
@@ -183,6 +184,7 @@ describe("subagent runtime model resolution", () => {
 		settings.setModelRole("default", "primary/bad-runtime-model");
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -241,6 +243,7 @@ describe("subagent runtime model resolution", () => {
 		settings.setModelRole("default", "primary/bad-runtime-model");
 		const result = await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -276,6 +279,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -325,6 +329,7 @@ describe("subagent runtime model resolution", () => {
 		};
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -372,6 +377,7 @@ describe("subagent runtime model resolution", () => {
 		};
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -415,6 +421,7 @@ describe("subagent runtime model resolution", () => {
 		};
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -455,6 +462,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -488,6 +496,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -520,6 +529,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -552,6 +562,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -582,6 +593,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,
@@ -619,6 +631,7 @@ describe("subagent runtime model resolution", () => {
 		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 		await runSubprocess({
 			cwd: "/tmp",
+			sessionHome: "/tmp",
 			agent,
 			task: "work",
 			index: 0,

@@ -24,6 +24,7 @@ import {
 	logger,
 	normalizePathForComparison,
 	pathIsWithin,
+	resolveEquivalentPath,
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
@@ -2528,6 +2529,9 @@ export class SessionManager {
 	/**
 	 * Saved intentional execution directory from the header, if any. `undefined`
 	 * for unbound sessions, including a binding discarded during restore.
+	 * Durable only: runtime-scoped native task isolation (see
+	 * {@link setExecutionCwd}) is intentionally absent here — read live execution
+	 * through {@link getCwd}.
 	 */
 	getExecutionCwd(): string | undefined {
 		const saved = this.#header?.executionCwd;
@@ -2542,12 +2546,41 @@ export class SessionManager {
 	 * clears the binding. Recovery-only fallback state is cleared — an
 	 * intentional binding is not a fallback. Transactional: a failed header
 	 * rewrite restores the prior in-memory header, E, and recovery state.
+	 *
+	 * With `options.isolatedTaskRoot` (native task executor only) the target is
+	 * bound for the live process WITHOUT touching the header: isolated
+	 * workspaces are detached repositories and must remain ephemeral. The
+	 * session must be fresh — a durable binding or a recovery fallback rejects.
 	 */
-	async setExecutionCwd(executionCwd: string): Promise<void> {
+	async setExecutionCwd(executionCwd: string, options?: { isolatedTaskRoot?: string }): Promise<void> {
 		const home = this.getSessionHome();
 		const resolved = path.resolve(home, executionCwd);
 		if (!(await directoryIsEnterable(resolved))) {
 			throw new Error(`Execution directory is not enterable: ${resolved}`);
+		}
+		if (options?.isolatedTaskRoot !== undefined) {
+			// Native task isolation: the task executor proves root identity through
+			// its in-memory worktree handle. The isolated checkout is an
+			// intentionally detached repository, so the durable same-repository
+			// guard cannot apply; this branch binds execution for the live process
+			// only and persists nothing. Only the executor may pass the option —
+			// generic `/wt` and saved-binding adoption keep the repository guard.
+			if (this.#header?.executionCwd !== undefined) {
+				throw new Error("Cannot enter native task isolation while a durable execution binding is active.");
+			}
+			if (this.#fallbackRuntimeOnly) {
+				throw new Error("Cannot enter native task isolation during execution-directory recovery.");
+			}
+			if (
+				normalizePathForComparison(resolveEquivalentPath(resolved)) !==
+				normalizePathForComparison(resolveEquivalentPath(options.isolatedTaskRoot))
+			) {
+				throw new Error(
+					`Execution directory could not be verified as belonging to the session repository: ${resolved}`,
+				);
+			}
+			this.#executionCwd = resolved;
+			return;
 		}
 		if (!(await executionCwdMatchesSessionRepository(home, resolved))) {
 			throw new Error(
@@ -3721,7 +3754,16 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
+		options?: {
+			initialCwd?: string;
+			/** Execution binding applied only when the file mints a FRESH session; never overrides an existing header. */
+			initialExecutionCwd?: string;
+			/** Native executor trust handoff for ephemeral isolated roots; forwarded to {@link setExecutionCwd}. */
+			isolatedTaskRoot?: string;
+			parentSession?: string;
+			suppressBreadcrumb?: boolean;
+			throwIfMissing?: boolean;
+		},
 	): Promise<SessionManager> {
 		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -3753,6 +3795,19 @@ export class SessionManager {
 			throwIfMissing: options?.throwIfMissing,
 			newSession: { parentSession: options?.parentSession },
 		});
+		// An empty/missing file minted a fresh session above; only then may the
+		// caller seed its initial execution binding. Existing headers stay
+		// authoritative — a parent that rebound since never rewrites the child.
+		if (loaded.entries.length === 0 && options?.initialExecutionCwd !== undefined) {
+			try {
+				await manager.setExecutionCwd(options.initialExecutionCwd, {
+					isolatedTaskRoot: options.isolatedTaskRoot,
+				});
+			} catch (error) {
+				await manager.close();
+				throw error;
+			}
+		}
 		return manager;
 	}
 
@@ -3769,6 +3824,8 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<{
 		cwd: string;
+		/** Saved execution binding (H/E child models); the availability probe must target it, not the home. */
+		executionCwd?: string;
 		init: PersistedSessionInit | null;
 	} | null> {
 		let header: SessionHeader | undefined;
@@ -3788,7 +3845,11 @@ export class SessionManager {
 		}
 		// A missing, empty, or invalid file has no usable session.
 		if (!header) return null;
-		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
+		return {
+			cwd: header.cwd ?? getProjectDir(),
+			executionCwd: header.executionCwd,
+			init: extractSessionInit(initEntries),
+		};
 	}
 
 	/** Continue the most recent session, or create a new one if none exists. */

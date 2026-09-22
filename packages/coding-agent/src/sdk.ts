@@ -801,9 +801,15 @@ export async function discoverSessionExtensionPaths(
 	>,
 	cwd: string,
 	settings: Settings,
+	executionCwd: string = cwd,
 ): Promise<string[]> {
 	const roots = options.extensionRoots?.();
-	const explicit = roots?.explicit ?? options.additionalExtensionPaths ?? [];
+	// CLI-supplied explicit paths resolve where the user typed them (the launch/
+	// execution cwd), never against the session home. Settings-configured and
+	// ambient paths belong to the discovery root.
+	const explicit = (roots?.explicit ?? options.additionalExtensionPaths ?? []).map(p =>
+		path.isAbsolute(p) ? p : path.resolve(executionCwd, p),
+	);
 	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
 	const configuredPaths = explicitOnly
 		? [...explicit]
@@ -825,12 +831,15 @@ export async function discoverSessionExtensionPaths(
  */
 export async function loadSessionExtensions(
 	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths">,
-	cwd: string,
+	sessionHome: string,
 	settings: Settings,
 	eventBus: EventBus,
+	executionCwd = sessionHome,
 ): Promise<LoadExtensionsResult> {
-	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
-	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
+	// Sources are discovered from the session home (H); factories bind to the
+	// execution directory (E) so extension tools/executors act on the worktree.
+	const paths = await discoverSessionExtensionPaths(options, sessionHome, settings, executionCwd);
+	const result = await logger.time("loadExtensions", loadExtensions, paths, executionCwd, eventBus);
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1345,15 +1354,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	// A supplied manager may carry an intentional execution binding (`/wt`): its
-	// live cwd is the authoritative execution directory, so every cwd-scoped
-	// discovery below (settings, skills, extensions, tools) scopes to it — or to
-	// the session home when a saved worktree fell back. Unbound callers keep the
-	// legacy `options.cwd` behavior untouched.
-	const cwd =
-		options.sessionManager && options.sessionManager.getExecutionCwd()
-			? options.sessionManager.getCwd()
-			: (options.cwd ?? getProjectDir());
+	// A supplied manager is authoritative for BOTH roots: its live cwd is the
+	// execution directory (E — native tools, LSP, eval, policy reminders), and
+	// its session home is the discovery root (H — settings, skills, agents,
+	// rules, context files, extension/plugin sources). `/wt` changes only E;
+	// `/move` re-anchors H. Live execution is read through getCwd(), not the
+	// durable-only getExecutionCwd() probe, so runtime-scoped native isolation
+	// roots are covered. Unbound callers keep `options.cwd` for both roots.
+	const cwd = options.sessionManager?.getCwd() ?? options.cwd ?? getProjectDir();
+	const sessionHome = options.sessionManager?.getSessionHome() ?? cwd;
 	const eventBus = options.eventBus ?? new EventBus();
 	const subagentEventBus = options.subagentEventBus ?? new EventBus();
 
@@ -1362,7 +1371,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const settings = await (options.settings ??
 		options.settingsManager ??
-		logger.time("settings", Settings.init, { cwd, agentDir }));
+		logger.time("settings", Settings.init, { cwd: sessionHome, agentDir }));
+	// Caller-supplied settings must scope to H too: a settings instance created
+	// before the binding (or at launch cwd) otherwise keeps launch/E-scoped
+	// project layers under a bound session. Explicit/runtime overrides survive
+	// the re-scope.
+	if (path.resolve(settings.getCwd()) !== path.resolve(sessionHome)) {
+		await settings.reloadForCwd(sessionHome);
+	}
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
@@ -1422,16 +1438,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const workspaceTreePromise: Promise<WorkspaceTree> = options.workspaceTree
 		? Promise.resolve(options.workspaceTree)
 		: includeWorkspaceTree
-			? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
+			? logger.time("buildWorkspaceTree", () =>
+					buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS, sessionHome }),
+				)
 			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
 	workspaceTreePromise.catch(() => {});
+	// The tree renders the execution checkout and refreshes when either root
+	// changes (E rebind, or a /move / session switch re-anchoring H); instruction
+	// indexing inside it stays anchored at H.
+	let liveWorkspaceTree = workspaceTreePromise;
+	let liveWorkspaceTreeRoots = { home: path.resolve(sessionHome), cwd: path.resolve(cwd) };
 
-	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
-	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
-	// session-context build, tool creation, MCP discovery, and extension discovery.
+	// Independent H-owned discoveries (session home) kicked off in parallel and
+	// awaited at their consumer sites. Repository state stays E-rooted; everything
+	// else here is harness configuration and must not follow `/wt` rebinds.
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: logger.time("discoverContextFiles", discoverContextFiles, sessionHome, agentDir);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
@@ -1443,28 +1466,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	};
 	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
 	activeRepoContextPromise.catch(() => {});
-	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
+	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () =>
+		discoverWatchdogFiles(sessionHome, agentDir),
+	);
 	watchdogFilesPromise.catch(() => {});
-	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
+	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () =>
+		discoverAdvisorConfigs(sessionHome, agentDir),
+	);
 	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
-		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
+		: logger.time("discoverPromptTemplates", discoverPromptTemplates, sessionHome, agentDir);
 	promptTemplatesPromise.catch(() => {});
 	const slashCommandsPromise = options.slashCommands
 		? Promise.resolve(options.slashCommands)
-		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
+		: logger.time("discoverSlashCommands", discoverSlashCommands, sessionHome);
 	slashCommandsPromise.catch(() => {});
 	const customCommandsPromise =
 		options.disableExtensionDiscovery || options.restrictToolNames === true
 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
-			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
+			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, {
+					cwd: sessionHome,
+					agentDir,
+					executionCwd: cwd,
+				});
 	customCommandsPromise.catch(() => {});
 	const skillsSettings = settings.getGroup("skills");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
 		options.skills === undefined
-			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
+			? logger.time("discoverSkills", discoverSkills, sessionHome, agentDir, {
 					...skillsSettings,
 					disabledExtensions: disabledExtensionIds,
 				})
@@ -1712,7 +1743,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const rulesResult =
 			options.rules !== undefined
 				? { items: options.rules, warnings: undefined }
-				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+				: await loadCapability<Rule>(ruleCapability.id, { cwd: sessionHome });
 		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
 			builtinRules: ttsrSettings.builtinRules,
 			disabledRules: ttsrSettings.disabledRules,
@@ -1854,6 +1885,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
+			isolatedTaskRoot: options.isolatedTaskRoot,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
@@ -2072,7 +2104,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager = new MCPManager(
+					cwd,
+					cacheStorage ? new MCPToolCache(cacheStorage) : null,
+					undefined,
+					undefined,
+					() => sessionManager.getSessionHome(),
+				);
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -2111,6 +2149,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...mcpDiscoverOptions,
 					cacheStorage: settings.getStorage(),
 					authStorage,
+					getSessionHome: () => sessionManager.getSessionHome(),
 				});
 				mcpManager = mcpResult.manager;
 				toolSession.mcpManager = mcpManager;
@@ -2168,7 +2207,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// pending-action queueing.
 			customToolPaths =
 				options.preloadedCustomToolPaths ??
-				(await logger.time("discoverCustomToolPaths", () => discoverCustomToolPaths([], cwd)));
+				(await logger.time("discoverCustomToolPaths", () => discoverCustomToolPaths([], sessionHome)));
 			const customToolsLoadResult = await logger.time("loadCustomTools", () =>
 				loadCustomTools(customToolPaths, cwd, builtInToolNames, action => queueResolveHandler(toolSession, action)),
 			);
@@ -2243,7 +2282,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		} else {
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
-				discoverSessionExtensionPaths(options, cwd, settings),
+				discoverSessionExtensionPaths(options, sessionHome, settings, cwd),
 			);
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
 			for (const { path, error } of extensionsResult.errors) {
@@ -2870,7 +2909,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cwd,
 			sessionManager,
 			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+			// Memory storage identity follows the session home (H): recall/retain
+			// target the owning project's banks across execution rebinds.
+			() =>
+				hasSession
+					? createSessionMemoryRuntimeContext(session, agentDir, sessionManager.getSessionHome())
+					: undefined,
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
@@ -3182,11 +3226,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			// Repository context tracks the execution checkout; instructions and
+			// rules stay anchored at the session home across `/wt`.
+			const promptHome = sessionManager.getSessionHome();
+			// The workspace tree renders the execution checkout; a `/wt` rebind or
+			// a home re-anchor (`/move`, session switch) makes the startup tree
+			// stale — its instruction paths would resolve against the wrong root —
+			// so rebuild it on either root change.
+			if (hasSession && options.workspaceTree === undefined) {
+				const nextRoots = { home: path.resolve(promptHome), cwd: path.resolve(promptCwd) };
+				if (nextRoots.home !== liveWorkspaceTreeRoots.home || nextRoots.cwd !== liveWorkspaceTreeRoots.cwd) {
+					liveWorkspaceTreeRoots = nextRoots;
+					liveWorkspaceTree = includeWorkspaceTree
+						? logger.time("buildWorkspaceTree", () =>
+								buildWorkspaceTree(promptCwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS, sessionHome: promptHome }),
+							)
+						: Promise.resolve({
+								rootPath: promptCwd,
+								rendered: "",
+								truncated: false,
+								totalLines: 0,
+								agentsMdFiles: [],
+							});
+					liveWorkspaceTree.catch(() => {});
+					toolSession.workspaceTree = await liveWorkspaceTree;
+				}
+			}
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
 			if (hasSession && options.contextFiles === undefined) {
-				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
+				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptHome, agentDir, [
 					...(settings.get("disabledExtensions") ?? []),
 				]);
 				toolSession.contextFiles = contextFiles;
@@ -3202,7 +3272,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (hasSession && options.rules === undefined) {
 				const ttsrSettings = settings.getGroup("ttsr");
 				const rulesResult = await logger.time("rediscoverRules", () =>
-					loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd }),
+					loadCapability<Rule>(ruleCapability.id, { cwd: promptHome }),
 				);
 				const buckets = bucketRules(rulesResult.items, ttsrManager, {
 					builtinRules: ttsrSettings.builtinRules,
@@ -3299,6 +3369,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				sessionHome: promptHome,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: toolSession.xdev
@@ -3331,7 +3402,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled,
-				workspaceTree: workspaceTreePromise,
+				workspaceTree: liveWorkspaceTree,
 				includeWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
 				securityEnabled: settings.get("security.enabled"),
@@ -4236,14 +4307,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// perceived latency.
 		let lspServers: CreateAgentSessionResult["lspServers"];
 		const lspStartupCwd = sessionManager.getCwd();
+		// Server definitions come from the session home (H); servers themselves
+		// launch and analyze in the execution checkout (E).
+		const lspRoots = { sessionHome: sessionManager.getSessionHome(), cwd: lspStartupCwd };
 		if (enableLsp && options.hasUI && settings.get("lsp.lazy")) {
-			lspServers = discoverStartupLspServers(lspStartupCwd, "available");
+			lspServers = discoverStartupLspServers(lspRoots, "available");
 		} else if (enableLsp && options.hasUI) {
-			lspServers = discoverStartupLspServers(lspStartupCwd);
+			lspServers = discoverStartupLspServers(lspRoots);
 			if (lspServers.length > 0) {
 				void (async () => {
 					try {
-						const result = await logger.time("warmupLspServers", warmupLspServers, lspStartupCwd);
+						const result = await logger.time("warmupLspServers", warmupLspServers, lspRoots);
 						const serversByName = new Map(result.servers.map(server => [server.name, server] as const));
 						for (const server of lspServers ?? []) {
 							const next = serversByName.get(server.name);

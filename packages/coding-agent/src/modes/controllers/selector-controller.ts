@@ -312,7 +312,7 @@ export class SelectorController {
 						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
 					onPluginsChanged: async () => {
-						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
+						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getSessionHome());
 						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 						await this.ctx.refreshSkillState();
 						await this.ctx.refreshSlashCommandState();
@@ -379,7 +379,9 @@ export class SelectorController {
 	}
 
 	showAdvisorConfigure(): void {
-		const cwd = this.ctx.sessionManager.getCwd();
+		// Advisor configuration is session-home state: a bound execution worktree
+		// must not gain or lose advisor definitions on its own.
+		const cwd = this.ctx.sessionManager.getSessionHome();
 		const agentDir = getAgentDir() ?? getProjectDir();
 		const initialScope: AdvisorConfigScope = "project";
 		void (async () => {
@@ -506,7 +508,7 @@ export class SelectorController {
 	async showExtensionsDashboard(): Promise<void> {
 		const dashboard = await ExtensionDashboard.create({
 			runtime: createExtensionDashboardRuntime({
-				cwd: getProjectDir(),
+				cwd: this.ctx.sessionManager.getSessionHome(),
 				settings: this.ctx.settings,
 				mcpManager: this.ctx.mcpManager,
 				eventBus: this.ctx.eventBus,
@@ -576,7 +578,7 @@ export class SelectorController {
 		const hub = await AgentsHubComponent.create(
 			this.ctx.ui,
 			createAgentsHubDeps(
-				getProjectDir(),
+				this.ctx.sessionManager.getSessionHome(),
 				this.ctx.settings,
 				this.ctx.session.modelRegistry,
 				() => this.ctx.session.effectiveExtensionRoots,
@@ -1310,7 +1312,8 @@ export class SelectorController {
 		const mgr = new MarketplaceManager({
 			marketplacesRegistryPath: getMarketplacesRegistryPath(),
 			installedRegistryPath: getInstalledPluginsRegistryPath(),
-			projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
+			projectInstalledRegistryPath:
+				(await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getSessionHome())) ?? undefined,
 			marketplacesCacheDir: getMarketplacesCacheDir(),
 			pluginsCacheDir: getPluginsCacheDir(),
 			clearPluginRootsCache: clearPluginRootsAndCaches,
@@ -2033,12 +2036,15 @@ export class SelectorController {
 		// if applying the target project's cwd fails, including in-memory sessions.
 		if (
 			(await this.ctx.session.switchSession(sessionPath, {
-				onCwdChange: async (newCwd, sourceCwd) => {
-					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
-					return this.ctx.applyCwdChange(newCwd);
-				},
+				// switchSession only invokes this when execution OR discovery home
+				// changed; applyCwdChange re-scopes discovery from the new home.
+				onCwdChange: async newCwd => this.ctx.applyCwdChange(newCwd),
 			})) === false
 		) {
+			// A rejected/rescope-failed switch may have partially refreshed the
+			// command list against the target home before restoring the session;
+			// re-root it at the source. No-op when nothing was attempted.
+			await this.ctx.refreshSlashCommandState();
 			return false;
 		}
 		this.ctx.clearTransientSessionUi();

@@ -3,7 +3,7 @@ import { isEnoent, logger, once, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import { beginPendingDiskWrite, endPendingDiskWrite, FileChangeType, notifyWorkspaceWatchedFiles } from "./client";
-import { getConfig, getServersForFile } from "./config";
+import { type LspConfigRoots, getConfig, getServersForFile } from "./config";
 import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
@@ -121,7 +121,7 @@ function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughO
 
 export async function flushLspWritethroughBatch(
 	id: string,
-	cwd: string,
+	roots: LspConfigRoots,
 	signal?: AbortSignal,
 ): Promise<FileDiagnosticsResult | undefined> {
 	const state = writethroughBatches.get(id);
@@ -129,7 +129,7 @@ export async function flushLspWritethroughBatch(
 		return undefined;
 	}
 	writethroughBatches.delete(id);
-	return (await flushWritethroughBatch(Array.from(state.entries.values()), "", cwd, state.options, signal))
+	return (await flushWritethroughBatch(Array.from(state.entries.values()), "", roots, state.options, signal))
 		.diagnostics;
 }
 
@@ -296,7 +296,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 async function runLspWritethrough(
 	dst: string,
 	content: string,
-	cwd: string,
+	roots: LspConfigRoots,
 	options: ResolvedWritethroughOptions,
 	changeType: FileChangeType,
 	signal?: AbortSignal,
@@ -307,6 +307,8 @@ async function runLspWritethrough(
 	},
 	runOptions?: RunLspWritethroughOptions,
 ): Promise<WritethroughResult> {
+	// Everything below except config lookup is execution-scoped (E).
+	const cwd = roots.cwd;
 	const { enableFormat, enableDiagnostics } = options;
 	const contentAlreadyWritten = runOptions?.contentAlreadyWritten ?? false;
 
@@ -338,7 +340,7 @@ async function runLspWritethrough(
 		return { finalContent, diagnostics: undefined };
 	}
 
-	const config = getConfig(cwd);
+	const config = getConfig(roots);
 	const servers = getServersForFile(config, dst);
 
 	if (servers.length === 0) {
@@ -486,7 +488,7 @@ async function runLspWritethrough(
 async function flushWritethroughBatch(
 	batch: PendingWritethrough[],
 	requestedDst: string | undefined,
-	cwd: string,
+	roots: LspConfigRoots,
 	options: ResolvedWritethroughOptions,
 	signal?: AbortSignal,
 	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
@@ -520,7 +522,7 @@ async function flushWritethroughBatch(
 		const diag = await runLspWritethrough(
 			entry.dst,
 			content,
-			cwd,
+			roots,
 			options,
 			entry.changeType,
 			signal,
@@ -542,7 +544,7 @@ async function flushWritethroughBatch(
 }
 
 /** Create a writethrough callback for LSP aware write operations */
-export function createLspWritethrough(cwd: string, options?: WritethroughOptions): WritethroughCallback {
+export function createLspWritethrough(roots: LspConfigRoots, options?: WritethroughOptions): WritethroughCallback {
 	const resolvedOptions: ResolvedWritethroughOptions = {
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
@@ -568,7 +570,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 			const diagnostics = await runLspWritethrough(
 				dst,
 				content,
-				cwd,
+				roots,
 				resolvedOptions,
 				changeType,
 				signal,
@@ -592,7 +594,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 						await flushWritethroughBatch(
 							Array.from(pending.entries.values()),
 							"",
-							cwd,
+							roots,
 							pending.options,
 							signal,
 							getDeferred,
@@ -615,7 +617,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		const result = await flushWritethroughBatch(
 			Array.from(state.entries.values()),
 			dst,
-			cwd,
+			roots,
 			state.options,
 			signal,
 			getDeferred,

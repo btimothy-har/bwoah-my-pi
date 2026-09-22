@@ -53,8 +53,12 @@ describe("CwdWorkspaceReminderInjector", () => {
 		expect(first.messages.at(-1)?.role).toBe("developer");
 
 		// Identical content and timestamps at a new position: still a new request.
+		// One shared assistant message: `createAssistantMessage` stamps Date.now(),
+		// so two constructions can differ by a millisecond and break the
+		// byte-equality assertion below.
+		const assistantDone = createAssistantMessage("done");
 		const second = injector.transform(
-			{ systemPrompt: ["system"], messages: [firstUser, createAssistantMessage("done"), result, secondUser] },
+			{ systemPrompt: ["system"], messages: [firstUser, assistantDone, result, secondUser] },
 			policy("A"),
 		);
 		expect(controlText(second.messages)).toEqual([policyText("A"), policyText("A")]);
@@ -62,7 +66,7 @@ describe("CwdWorkspaceReminderInjector", () => {
 
 		// Replay of the same request adds nothing and preserves bytes.
 		const replay = injector.transform(
-			{ systemPrompt: ["system"], messages: [firstUser, createAssistantMessage("done"), result, secondUser] },
+			{ systemPrompt: ["system"], messages: [firstUser, assistantDone, result, secondUser] },
 			policy("A"),
 		);
 		expect(controlText(replay.messages)).toHaveLength(2);

@@ -30,6 +30,7 @@ import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
+import { getToolSessionHome } from "../tools/session-home";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { truncateForPrompt } from "../tools/approval";
 import {
@@ -196,13 +197,16 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 	const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
 	const deduplicate = enableDiagnostics && session.settings.get("lsp.diagnosticsDeduplicate");
 	return enableLsp
-		? createLspWritethrough(session.cwd, {
-				enableFormat,
-				enableDiagnostics,
-				transformDiagnostics: deduplicate
-					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
-					: undefined,
-			})
+		? createLspWritethrough(
+				{ sessionHome: getToolSessionHome(session), cwd: session.cwd },
+				{
+					enableFormat,
+					enableDiagnostics,
+					transformDiagnostics: deduplicate
+						? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
+						: undefined,
+				},
+			)
 		: writethroughNoop;
 }
 
@@ -510,10 +514,19 @@ export class EditTool implements AgentTool<TInput> {
 				(_error, request) => this.#write(request, signal),
 			);
 			if (outcome.isError && batch?.flush) {
-				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
+				await flushLspWritethroughBatch(
+					batch.id,
+					{ sessionHome: getToolSessionHome(this.session), cwd: this.session.cwd },
+					signal,
+				);
 			}
 		} catch (error) {
-			if (batch?.flush) await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
+			if (batch?.flush)
+				await flushLspWritethroughBatch(
+					batch.id,
+					{ sessionHome: getToolSessionHome(this.session), cwd: this.session.cwd },
+					signal,
+				);
 			throw error;
 		} finally {
 			editSession.close();
@@ -626,7 +639,11 @@ export class EditTool implements AgentTool<TInput> {
 			this.session.bumpFileMutationVersion?.(request.path);
 			const diagnostics =
 				request.flushLsp && request.lspBatchId
-					? await flushLspWritethroughBatch(request.lspBatchId, this.session.cwd, signal)
+					? await flushLspWritethroughBatch(
+							request.lspBatchId,
+							{ sessionHome: getToolSessionHome(this.session), cwd: this.session.cwd },
+							signal,
+						)
 					: undefined;
 			return {
 				written: "",
@@ -660,7 +677,11 @@ export class EditTool implements AgentTool<TInput> {
 			this.session.bumpFileMutationVersion?.(request.moveTo);
 			const diagnostics =
 				request.flushLsp && request.lspBatchId
-					? await flushLspWritethroughBatch(request.lspBatchId, this.session.cwd, signal)
+					? await flushLspWritethroughBatch(
+							request.lspBatchId,
+							{ sessionHome: getToolSessionHome(this.session), cwd: this.session.cwd },
+							signal,
+						)
 					: undefined;
 			return {
 				written: request.content,

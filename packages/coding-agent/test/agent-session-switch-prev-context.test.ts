@@ -237,11 +237,14 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(previousSessionFile).toBeString();
 		expect(targetSessionFile).toBeString();
 
-		const onCwdChange = vi.fn(async () => false);
+		// The mode rejects the target scope but accepts the source re-application
+		// that follows a failed switch.
+		const onCwdChange = vi.fn(async (newCwd: string) => newCwd === sourceDir.path());
 		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
 
 		expect(switched).toBe(false);
 		expect(onCwdChange).toHaveBeenCalledWith(targetDir.path(), sourceDir.path());
+		expect(onCwdChange).toHaveBeenCalledWith(sourceDir.path(), targetDir.path());
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 	});
@@ -367,5 +370,34 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(sessionManager.getRecordedCwd()).toBe(homeDir.path());
 		expect(sessionManager.getCwd()).toBe(executionDir.path());
 		expect(sessionManager.getSessionFile()).toBe(sessionFile);
+	});
+
+	it("rescopes on a discovery-home change even when execution cwd is unchanged", async () => {
+		const homeDir = TempDir.createSync("@pi-switch-home-axis-home-");
+		const otherHomeDir = TempDir.createSync("@pi-switch-home-axis-other-");
+		tempDirs.push(homeDir, otherHomeDir);
+
+		const { session, sessionManager } = buildSession(homeDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+
+		// Target shares the live execution directory but owns a different
+		// canonical home (plain dirs: the same-repo guard does not apply).
+		const targetManager = SessionManager.create(otherHomeDir.path(), otherHomeDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.setExecutionCwd(homeDir.path());
+		const targetSessionFile = targetManager.getSessionFile();
+		expect(targetSessionFile).toBeString();
+		await targetManager.close();
+
+		const onCwdChange = vi.fn(async () => true);
+		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
+
+		expect(switched).toBe(true);
+		// E never moved, but H did — the rescope callback must fire so discovery
+		// re-roots instead of silently keeping the source project's settings.
+		expect(onCwdChange).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getSessionHome()).toBe(otherHomeDir.path());
+		expect(sessionManager.getCwd()).toBe(homeDir.path());
 	});
 });

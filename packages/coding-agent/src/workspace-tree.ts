@@ -41,6 +41,12 @@ export interface BuildDirectoryTreeOptions {
 export interface BuildWorkspaceTreeOptions {
 	/** Abort the native workspace scan after this many milliseconds. */
 	timeoutMs?: number;
+	/**
+	 * Canonical session home (H) owning the AGENTS.md instruction index, when it
+	 * differs from `cwd`. The rendered tree always describes `cwd` (E); only the
+	 * instruction index comes from the home. Defaults to `cwd`.
+	 */
+	sessionHome?: string;
 }
 
 /**
@@ -82,35 +88,77 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 }
 
 /**
- * Build the workspace tree shown in the system prompt. Returns the rendered
- * tree plus the AGENTS.md files surfaced by the same native walk so callers
- * never need to do a second filesystem scan.
+ * Build the workspace tree shown in the system prompt. The rendered tree always
+ * describes `cwd` (E); the AGENTS.md instruction index comes from
+ * `options.sessionHome` (H) when supplied — a bound session renders the
+ * execution checkout while its directory rules stay anchored at the canonical
+ * home. Equal roots use one scan; different roots scan E for the tree and H for
+ * the instruction index in parallel, each failing independently.
  */
 export async function buildWorkspaceTree(cwd: string, options: BuildWorkspaceTreeOptions = {}): Promise<WorkspaceTree> {
 	const rootPath = path.resolve(cwd);
-	try {
-		const result = await listWorkspace({
+	const homeRoot = path.resolve(options.sessionHome ?? cwd);
+	if (homeRoot === rootPath) {
+		try {
+			const result = await listWorkspace({
+				path: rootPath,
+				maxDepth: WORKSPACE_DEFAULTS.maxDepth,
+				hidden: false,
+				gitignore: true,
+				collectAgentsMd: true,
+				timeoutMs: options.timeoutMs,
+			});
+			const tree = assembleTree(rootPath, result.entries, {
+				perDirLimit: WORKSPACE_DEFAULTS.perDirLimit,
+				rootLimit: WORKSPACE_DEFAULTS.perDirLimit,
+				lineCap: WORKSPACE_DEFAULTS.lineCap,
+				nativeTruncated: result.truncated,
+				// This tree is embedded in the cached system prompt. Render absolute
+				// mtimes so the block is byte-identical across sessions and does not
+				// bust the prompt cache (a relative "Nm ago" drifts every build).
+				ageMode: "absolute",
+			});
+			return { ...tree, agentsMdFiles: result.agentsMdFiles };
+		} catch {
+			return { ...emptyTree(rootPath), agentsMdFiles: [] };
+		}
+	}
+
+	const [executionScan, homeScan] = await Promise.allSettled([
+		listWorkspace({
 			path: rootPath,
 			maxDepth: WORKSPACE_DEFAULTS.maxDepth,
 			hidden: false,
 			gitignore: true,
+			collectAgentsMd: false,
+			timeoutMs: options.timeoutMs,
+		}),
+		// maxDepth 0 returns no tree entries; the native walker still scans the
+		// bounded AGENTS.md depth (crates/pi-natives/src/workspace.rs) independently.
+		listWorkspace({
+			path: homeRoot,
+			maxDepth: 0,
+			hidden: false,
+			gitignore: true,
 			collectAgentsMd: true,
 			timeoutMs: options.timeoutMs,
-		});
-		const tree = assembleTree(rootPath, result.entries, {
-			perDirLimit: WORKSPACE_DEFAULTS.perDirLimit,
-			rootLimit: WORKSPACE_DEFAULTS.perDirLimit,
-			lineCap: WORKSPACE_DEFAULTS.lineCap,
-			nativeTruncated: result.truncated,
-			// This tree is embedded in the cached system prompt. Render absolute
-			// mtimes so the block is byte-identical across sessions and does not
-			// bust the prompt cache (a relative "Nm ago" drifts every build).
-			ageMode: "absolute",
-		});
-		return { ...tree, agentsMdFiles: result.agentsMdFiles };
-	} catch {
-		return { ...emptyTree(rootPath), agentsMdFiles: [] };
-	}
+		}),
+	]);
+	const tree =
+		executionScan.status === "fulfilled"
+			? assembleTree(rootPath, executionScan.value.entries, {
+					perDirLimit: WORKSPACE_DEFAULTS.perDirLimit,
+					rootLimit: WORKSPACE_DEFAULTS.perDirLimit,
+					lineCap: WORKSPACE_DEFAULTS.lineCap,
+					nativeTruncated: executionScan.value.truncated,
+					ageMode: "absolute",
+				})
+			: emptyTree(rootPath);
+	// Native results are home-relative; the model reads these paths through
+	// tools rooted at E, so surface them as absolute H paths.
+	const agentsMdFiles =
+		homeScan.status === "fulfilled" ? homeScan.value.agentsMdFiles.map(entry => path.join(homeRoot, entry)) : [];
+	return { ...tree, agentsMdFiles };
 }
 
 // ─── internals ──────────────────────────────────────────────────────────────

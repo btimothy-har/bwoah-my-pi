@@ -112,7 +112,7 @@ describe("vibe_send attribution", () => {
 		const followUp = Promise.withResolvers<Parameters<typeof executorModule.runSubagentFollowUpTurn>[0]>();
 		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options => {
 			followUp.resolve(options);
-			return resultFor({ ...options, cwd: "/tmp", task: options.message } as ExecutorOptions);
+			return resultFor({ ...options, cwd: "/tmp", sessionHome: "/tmp", task: options.message } as ExecutorOptions);
 		});
 
 		const outcome = await registry.send(parent, { session: spawned.id, message: "next task" });
