@@ -910,7 +910,7 @@ describe("DebugTool launch validation", () => {
 			await expect(tool.execute("call", { action: "attach", adapter: "pico-openocd" })).rejects.toThrow(
 				/captured attach/,
 			);
-			expect(selectAttachSpy).toHaveBeenCalledWith(process.cwd(), "pico-openocd", undefined);
+			expect(selectAttachSpy).toHaveBeenCalledWith(process.cwd(), "pico-openocd", undefined, process.cwd());
 			expect(sessionAttachSpy).toHaveBeenCalledTimes(1);
 			const [opts] = sessionAttachSpy.mock.calls[0]!;
 			expect(opts.adapter).toBe(adapter);
