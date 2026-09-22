@@ -28,10 +28,9 @@ import type { SlashCommandSpec } from "./types";
  * `reloadPlugins` hook so both honor the command's documented reload scope.
  */
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
-	const home = ctx.sessionManager.getSessionHome();
-	const projectPath = await resolveActiveProjectRegistryPath(home);
+	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-	await refreshAgentDiscovery(home, ctx.session.effectiveExtensionRoots);
+	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
 	await ctx.refreshSkillState();
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();

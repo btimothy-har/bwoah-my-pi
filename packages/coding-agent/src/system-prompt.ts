@@ -623,13 +623,6 @@ export interface BuildSystemPromptOptions {
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
-	/**
-	 * Canonical session home (H) owning harness discovery — SYSTEM.md,
-	 * context files, skills, and the AGENTS.md instruction index — when it
-	 * differs from `cwd`. Repository context and the workspace tree still
-	 * describe `cwd` (E). Defaults to `cwd`.
-	 */
-	sessionHome?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute. Injected into the project prompt. */
 	additionalWorkspaceRoots?: string[];
 	/** Pre-loaded context files (skips discovery if provided). */
@@ -753,7 +746,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolNames: providedToolNames,
 		directToolNames,
 		cwd,
-		sessionHome,
 		additionalWorkspaceRoots = [],
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
@@ -787,7 +779,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
-	const resolvedHome = sessionHome ?? resolvedCwd;
 
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
@@ -846,28 +837,48 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		(typeof customPrompt === "string" && customPrompt.length > 0);
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
-		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedHome });
+		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
 	const contextFilesPromise = (async () => {
-		if (providedContextFiles) return providedContextFiles;
-		// Context files belong to the session home only. Additional workspace
-		// roots are extra EXECUTION directories, not extra config authorities —
-		// scanning them would silently widen the instruction universe on /add-dir.
-		return await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedHome });
-	})();
-	const workspaceTreePromise = (async () => {
-		if (providedWorkspaceTree !== undefined) return await Promise.resolve(providedWorkspaceTree);
-		if (!includeWorkspaceTree) {
-			return { rootPath: resolvedCwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
-		}
-		return await logger.time("buildWorkspaceTree", () =>
-			buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS, sessionHome: resolvedHome }),
+		const primary = providedContextFiles
+			? providedContextFiles
+			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
+		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+		if (additionalRoots.length === 0) return primary;
+		const extra = await Promise.all(
+			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
 		);
+		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
+	})();
+	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+	const workspaceTreePromise = (async () => {
+		const primary =
+			providedWorkspaceTree !== undefined
+				? await Promise.resolve(providedWorkspaceTree)
+				: includeWorkspaceTree
+					? await logger.time("buildWorkspaceTree", () =>
+							buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
+						)
+					: { rootPath: resolvedCwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
+		if (additionalRootsForTree.length === 0 || !includeWorkspaceTree) return primary;
+		const extraTrees = await Promise.all(
+			additionalRootsForTree.map(root =>
+				buildWorkspaceTree(root, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }).catch(() => ({
+					rootPath: root,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				})),
+			),
+		);
+		return { ...primary, agentsMdFiles: [...primary.agentsMdFiles, ...extraTrees.flatMap(t => t.agentsMdFiles)] };
 	})();
 	const skillsPromise: Promise<readonly Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
 			: skillsSettings?.enabled !== false
-				? loadSkills({ ...skillsSettings, cwd: resolvedHome }).then(result => result.skills)
+				? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
 				: Promise.resolve([]);
 	const activeRepoContextPromise =
 		providedActiveRepoContext !== undefined
@@ -1043,8 +1054,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,
-		sessionHome: normalizePromptPath(resolvedHome),
-		separateSessionHome: path.resolve(resolvedHome) !== path.resolve(resolvedCwd),
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
 		delegationBias,

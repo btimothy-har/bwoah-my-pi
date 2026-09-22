@@ -84,7 +84,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 
 	const baseOptions = {
 		cwd: "/tmp",
-		sessionHome: "/tmp",
 		agent: baseAgent,
 		task: "do work",
 		index: 0,

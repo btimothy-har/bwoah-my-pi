@@ -39,8 +39,6 @@ export interface MCPToolsLoadOptions {
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
-	/** Returns the session home (discovery root) for MCP config loading; defaults to cwd */
-	getSessionHome?: () => string;
 }
 
 async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
@@ -63,7 +61,7 @@ async function resolveToolCache(storage: AgentStorage | null | undefined): Promi
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
 	const toolCache = await resolveToolCache(options?.cacheStorage);
-	const manager = new MCPManager(cwd, toolCache, undefined, undefined, options?.getSessionHome);
+	const manager = new MCPManager(cwd, toolCache);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
 	}

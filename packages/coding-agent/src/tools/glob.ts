@@ -12,7 +12,7 @@ import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
-import { type ToolSession, getToolSessionHome } from "./session-home";
+import type { ToolSession } from ".";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
@@ -194,7 +194,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					const memoryGlob = splitMemoryGlobPattern(rawPattern);
 					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
 						cwd: this.session.cwd,
-						sessionHome: getToolSessionHome(this.session),
 						settings: this.session.settings,
 						signal,
 						sessionFile: this.session.getSessionFile() ?? undefined,
@@ -216,7 +215,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				}
 				const resource = await internalRouter.resolve(rawPattern, {
 					cwd: this.session.cwd,
-					sessionHome: getToolSessionHome(this.session),
 					settings: this.session.settings,
 					signal,
 					sessionFile: this.session.getSessionFile() ?? undefined,

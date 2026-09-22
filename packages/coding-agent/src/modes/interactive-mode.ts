@@ -3,7 +3,6 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -72,7 +71,7 @@ import {
 	Settings,
 	settings,
 } from "../config/settings";
-import { clearClaudePluginRootsCache, preloadPluginRoots } from "../discovery/helpers";
+import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -133,7 +132,6 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
-import { refreshAgentDiscovery } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -999,7 +997,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const session = this.viewSession;
 		return resolveMarkdownLinkTargets(texts, {
 			cwd: session.sessionManager.getCwd(),
-			sessionHome: session.sessionManager.getSessionHome(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
 			localProtocolOptions: {
@@ -1808,7 +1805,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *  ({@link AgentSession.#refreshTitleAfterReplan}) share one source
 	 *  ({@link discoverTitleSystemPromptFile}; issue #3734). */
 	async refreshTitleSystemPrompt(cwd?: string): Promise<void> {
-		const basePath = cwd ?? this.sessionManager.getSessionHome();
+		const basePath = cwd ?? this.sessionManager.getCwd();
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(basePath);
 		const resolved = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		this.session.setTitleSystemPrompt(resolved);
@@ -1838,7 +1835,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string, preloaded?: ReadonlyArray<FileSlashCommand>): Promise<void> {
-		const basePath = cwd ?? this.sessionManager.getSessionHome();
+		const basePath = cwd ?? this.sessionManager.getCwd();
 		// Session construction already ran slash-command discovery for this cwd;
 		// init passes that result through instead of re-walking the providers.
 		const fileCommands = preloaded
@@ -1926,15 +1923,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Re-point the process at `newCwd` (execution root) after the active
-	 * session's working directory changed (`/wt` binding, `/move` relocation, or
-	 * resuming a session from another project). Harness discovery re-scopes to
-	 * the session HOME, which `/wt` leaves unchanged and `/move` re-anchors. The
-	 * SessionManager's cwd MUST already reflect `newCwd` before this is called.
+	 * Re-point the process and every cwd-derived cache at `newCwd` after the
+	 * active session's working directory changed (`/move` relocation or resuming
+	 * a session from another project). The SessionManager's cwd MUST already
+	 * reflect `newCwd` before this is called.
 	 */
 	async applyCwdChange(newCwd: string): Promise<boolean> {
 		const previousCwd = getProjectDir();
-		const previousDiscoveryCwd = isSettingsInitialized() ? settings.getCwd() : undefined;
 		try {
 			setProjectDir(newCwd);
 		} catch (error) {
@@ -1943,57 +1938,64 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return false;
 		}
-		// Everything after chdir is a rescope of cwd-derived state. Discovery
-		// anchors at the session home — after `/move` the manager's home already
-		// names the destination; after `/wt` it still names the canonical home.
-		const discoveryHome = this.sessionManager.getSessionHome();
+		// Everything after chdir is a rescope of cwd-derived state. If any of it
+		// fails, undo the chdir so `false` reliably means "nothing committed";
+		// callers roll back their own session/manager state on false.
 		try {
-			// Re-scope project settings to the session home in place so the active
-			// session and every settings reader keep the owning project's
-			// configuration across execution rebinds.
+			// Re-scope project settings (`.claude/settings.yml` etc.) to the new
+			// directory in place so the active session and every settings reader pick
+			// up the destination project's configuration.
 			if (isSettingsInitialized()) {
-				await settings.reloadForCwd(discoveryHome);
+				await settings.reloadForCwd(newCwd);
 				// The reload fired the memory scope hooks; complete the rebind
 				// before the move commits so the next prompt cannot recall or
-				// retain against the wrong project's memory.
+				// retain against the source project's memory.
 				await rebindMemoryBackendForCwd(this.session);
-				// Reapply provider preferences from the home-scoped settings so the
-				// module-level search/image provider state reflects the owning
-				// project's configuration.
+				// Reapply provider preferences from the newly-loaded settings so the
+				// module-level search/image provider state reflects the destination
+				// project's configuration. Without this, the previous project's
+				// exclusions leak and newly-excluded providers are still used.
 				applyProviderGlobalsFromSettings(settings);
 			}
-			// Re-warm plugin roots, task agents, capabilities, slash commands, and
-			// the ssh tool so the next prompt sees everything scoped to the home.
+			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
+			// the next prompt sees everything scoped to the new project directory.
 			clearClaudePluginRootsCache();
-			// Sync consumers (LSP/DAP config) read preloaded plugin roots keyed by
-			// discovery root — a newly selected home has no snapshot yet.
-			await preloadPluginRoots(os.homedir(), discoveryHome);
-			await refreshAgentDiscovery(discoveryHome, this.session.effectiveExtensionRoots);
-			await this.refreshTitleSystemPrompt(discoveryHome);
+			await this.refreshTitleSystemPrompt(newCwd);
 			resetCapabilities();
 			await this.refreshSkillState();
-			await this.refreshSlashCommandState(discoveryHome);
+			await this.refreshSlashCommandState(newCwd);
 		} catch (error) {
-			// Process/settings rollback ONLY: the owning caller restores the
-			// session/manager snapshot before re-running this method for the
-			// source. After a `/move` the header still names the failed
-			// destination, so rebuilding discovery here would read it; and
-			// `setCwdWithoutRelocation` would mis-mark an intentional state as a
-			// recovery fallback.
+			// Undo the whole transition: the process cwd, Settings scope, and
+			// cwd-derived caches (provider globals, plugin roots, capabilities,
+			// skills, slash commands) must all return to the source project so a
+			// `false` result reliably means nothing was committed.
+			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				if (isSettingsInitialized() && previousDiscoveryCwd !== undefined) {
-					await settings.reloadForCwd(previousDiscoveryCwd);
+				if (isSettingsInitialized()) {
+					await settings.reloadForCwd(previousCwd);
+					await rebindMemoryBackendForCwd(this.session);
 					applyProviderGlobalsFromSettings(settings);
 				}
+				clearClaudePluginRootsCache();
+				await this.refreshTitleSystemPrompt(previousCwd);
+				resetCapabilities();
+				await this.refreshSkillState();
+				await this.refreshSlashCommandState(previousCwd);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
 					if (isSettingsInitialized()) {
-						await settings.reloadForCwd(this.sessionManager.getSessionHome());
+						await settings.reloadForCwd(actual);
+						await rebindMemoryBackendForCwd(this.session);
 						applyProviderGlobalsFromSettings(settings);
 					}
+					clearClaudePluginRootsCache();
+					await this.refreshTitleSystemPrompt(actual);
+					resetCapabilities();
+					await this.refreshSkillState();
+					await this.refreshSlashCommandState(actual);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,

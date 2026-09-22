@@ -13,7 +13,7 @@ import {
 	syncContent,
 	WARMUP_TIMEOUT_MS,
 } from "./client";
-import { getServersForFile, type LspConfig, type LspConfigRoots, loadConfig } from "./config";
+import { getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
 
@@ -53,10 +53,10 @@ export interface LspWarmupOptions {
 }
 
 export function discoverStartupLspServers(
-	roots: LspConfigRoots,
+	cwd: string,
 	status: LspStartupServerInfo["status"] = "connecting",
 ): LspStartupServerInfo[] {
-	const config = loadConfig(roots);
+	const config = loadConfig(cwd);
 	return getLspServers(config).map(([name, serverConfig]) => ({
 		name,
 		status,
@@ -68,12 +68,12 @@ export function discoverStartupLspServers(
  * Warm up LSP servers for a directory by connecting to all detected servers.
  * This should be called at startup to avoid cold-start delays.
  *
- * @param roots - Two-root discovery config: `sessionHome` for config files, `cwd` for client spawn
+ * @param cwd - Working directory to detect and start servers for
  * @param options - Optional callbacks for progress reporting
  * @returns Status of each server that was started
  */
-export async function warmupLspServers(roots: LspConfigRoots, options?: LspWarmupOptions): Promise<LspWarmupResult> {
-	const config = loadConfig(roots);
+export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
+	const config = loadConfig(cwd);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);
 
@@ -86,11 +86,7 @@ export async function warmupLspServers(roots: LspConfigRoots, options?: LspWarmu
 	// Servers that don't respond quickly will be initialized lazily on first use
 	const results = await Promise.allSettled(
 		lspServers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(
-				serverConfig,
-				roots.cwd,
-				serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS,
-			);
+			const client = await getOrCreateClient(serverConfig, cwd, serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS);
 			return { name, client, fileTypes: serverConfig.fileTypes };
 		}),
 	);

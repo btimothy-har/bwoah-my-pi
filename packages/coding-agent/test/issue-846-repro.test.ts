@@ -26,7 +26,6 @@ interface SessionLike {
 		getSessionDir: () => string;
 		getSessionId: () => string;
 		getCwd: () => string;
-		getSessionHome: () => string;
 	};
 	settings: Settings;
 	model: Model;
@@ -111,7 +110,6 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 				getSessionDir: () => sessionDir,
 				getSessionId: () => "current-thread",
 				getCwd: () => agentDir,
-				getSessionHome: () => agentDir,
 			},
 			settings,
 			model,

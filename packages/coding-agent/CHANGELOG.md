@@ -3,16 +3,17 @@
 ## [Unreleased]
 
 ### Added
+
 - Added a per-request workspace reminder that tells the agent its current working directory and checkout role: the primary checkout is read-only pending a user-selected implementation checkout, an execution worktree carries the work with the primary as read-only reference, and native task-isolation sandboxes stay confined to their assigned tree ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 
 ### Changed
-- Changed `/wt` to leave harness discovery anchored at the canonical session home: settings, agents, skills, rules, context files, extension/plugin sources, and MCP/LSP/DAP configuration no longer follow the bound worktree, while native tools, eval, and language servers keep executing in it. Task subagents now anchor discovery at their owning session's home, and native task isolation binds execution ephemerally without a persisted binding ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+
 - Changed the per-request date/cwd reminder to date-only (`date-reminder`); the current working directory now rides in the workspace-policy reminder (`cwd-workspace-reminder`) ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed `/wt` to bind worktrees for execution only: the canonical session home, session id, transcript, and artifacts stay in place, and `/move` remains the session-relocation command. `worktree.cleanSource` now resets the canonical home after binding instead of a relocated source checkout ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
-- Changed `/wt` to leave harness discovery anchored at the canonical session home: settings, agents, skills, rules, context files, extension/plugin sources, and MCP/LSP/DAP configuration no longer follow the bound worktree, while native tools, eval, and language servers keep executing in it. Task subagents now anchor discovery at their owning session's home, and native task isolation binds execution ephemerally without a persisted binding ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi))
 
 ### Fixed
+
 - Fixed rejected `/wt` execution bindings being revived when their old path later became valid; restore now clears the saved binding and keeps the conversation at its canonical home ([Bwoah My Pi #10](https://github.com/btimothy-har/bwoah-my-pi/pull/10) by [@btimothy-har](https://github.com/btimothy-har)).
 - Fixed `/wt` execution bindings silently adopting a directory that now belongs to a different Git repository; binding and restore now verify the candidate shares the session home's repository and fall back to the home with the existing unavailable-worktree notice ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed the advisor treating a fork's parent repository metadata as the intended pull request target ([Bwoah My Pi #3](https://github.com/btimothy-har/bwoah-my-pi/pull/3) by [@btimothy-har](https://github.com/btimothy-har)).
@@ -21,6 +22,7 @@
 - Fixed clipboard paste stalling on an empty clipboard; image and text clipboard reads now run concurrently so the empty-clipboard status surfaces after the slower read instead of the sum of both.
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
+
 ## [18.2.5] - 2026-09-17
 
 ### Breaking Changes

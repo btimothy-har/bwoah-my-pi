@@ -82,7 +82,6 @@ describe("autoloadSkills in executor", () => {
 
 	const baseOptions = {
 		cwd: "/tmp",
-		sessionHome: "/tmp",
 		agent: baseAgent,
 		task: "do work",
 		index: 0,

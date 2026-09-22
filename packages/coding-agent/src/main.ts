@@ -877,16 +877,9 @@ async function switchToResumedProject(
 	sessionManager: SessionManager,
 ): Promise<ResumedProjectResult> {
 	const launchCwd = getProjectDir();
-	// Process/execution follows the resume target (E, possibly a bound worktree);
-	// settings and plugin discovery follow the session home (H). Capture the
-	// settings scope as the discovery rollback root — it equals the launch cwd
-	// before any rescope.
-	const launchDiscoveryCwd = activeSettings.getCwd();
-	const discoveryHome = sessionManager.getSessionHome();
 	if (
 		!resumedCwd ||
-		(normalizePathForComparison(resumedCwd) === normalizePathForComparison(launchCwd) &&
-			normalizePathForComparison(discoveryHome) === normalizePathForComparison(launchDiscoveryCwd)) ||
+		normalizePathForComparison(resumedCwd) === normalizePathForComparison(launchCwd) ||
 		(await directoryIsMissing(resumedCwd))
 	) {
 		return { cwd: launchCwd };
@@ -908,8 +901,8 @@ async function switchToResumedProject(
 	// destination preload so sync consumers (plugin-provided LSP/DAP config) never
 	// read the launch project's stale/empty roots during session creation.
 	try {
-		await preloadPluginRoots(os.homedir(), discoveryHome);
-		await activeSettings.reloadForCwd(discoveryHome);
+		await preloadPluginRoots(os.homedir(), cwd);
+		await activeSettings.reloadForCwd(cwd);
 		if (normalizePathForComparison(sessionManager.getCwd()) !== normalizePathForComparison(cwd)) {
 			sessionManager.adoptRecordedCwd();
 		}
@@ -922,11 +915,11 @@ async function switchToResumedProject(
 			setProjectDir(launchCwd);
 			sessionManager.setCwdWithoutRelocation(launchCwd);
 			clearPluginRootsAndCaches();
-			await preloadPluginRoots(os.homedir(), launchDiscoveryCwd);
+			await preloadPluginRoots(os.homedir(), launchCwd);
 			// Settings.#cwd was already assigned the destination; re-scope it
 			// back so path-derived values and project saves target the launch
 			// project, not the failed resume target.
-			await activeSettings.reloadForCwd(launchDiscoveryCwd);
+			await activeSettings.reloadForCwd(launchCwd);
 		} catch (rollbackError) {
 			throw new SessionResolutionError(
 				`Could not switch to resumed project ${resumedCwd} (${error instanceof Error ? error.message : String(error)}); failed to restore launch directory ${launchCwd}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
@@ -1212,14 +1205,14 @@ export async function createSessionManager(
 }
 
 /** Discover SYSTEM.md file if no CLI system prompt was provided */
-function discoverSystemPromptFile(cwd?: string): string | undefined {
+function discoverSystemPromptFile(): string | undefined {
 	// Check project-local first (.omp/SYSTEM.md, .pi/SYSTEM.md legacy)
-	const projectPath = findConfigFile("SYSTEM.md", { user: false, cwd });
+	const projectPath = findConfigFile("SYSTEM.md", { user: false });
 	if (projectPath) {
 		return projectPath;
 	}
 	// If not found, check SYSTEM.md file in the global directory.
-	const globalPath = findConfigFile("SYSTEM.md", { user: true, cwd });
+	const globalPath = findConfigFile("SYSTEM.md", { user: true });
 	if (globalPath) {
 		return globalPath;
 	}
@@ -1227,12 +1220,12 @@ function discoverSystemPromptFile(cwd?: string): string | undefined {
 }
 
 /** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
-function discoverAppendSystemPromptFile(cwd?: string): string | undefined {
-	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false, cwd });
+function discoverAppendSystemPromptFile(): string | undefined {
+	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false });
 	if (projectPath) {
 		return projectPath;
 	}
-	const globalPath = findConfigFile("APPEND_SYSTEM.md", { user: true, cwd });
+	const globalPath = findConfigFile("APPEND_SYSTEM.md", { user: true });
 	if (globalPath) {
 		return globalPath;
 	}
@@ -1278,12 +1271,10 @@ export async function buildSessionOptions(
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
 
-	// Auto-discover SYSTEM.md if no CLI system prompt provided. Discovery anchors
-	// at the session home (H); a bound execution checkout must not swap prompts.
-	const promptDiscoveryHome = sessionManager?.getSessionHome() ?? getProjectDir();
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile(promptDiscoveryHome);
-	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile(promptDiscoveryHome);
-	const titleSystemPromptSource = discoverTitleSystemPromptFile(promptDiscoveryHome);
+	// Auto-discover SYSTEM.md if no CLI system prompt provided
+	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
+	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
+	const titleSystemPromptSource = discoverTitleSystemPromptFile();
 	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
 		resolvePromptInput(systemPromptSource, "system prompt"),
 		resolvePromptInput(appendPromptSource, "append system prompt"),
@@ -1869,9 +1860,7 @@ export async function runRootCommand(
 				lightTheme: settingsInstance.get("theme.light"),
 			},
 		});
-		// The composer renders before any session manager exists; launch cwd is
-		// both roots here. A resumed/bound session re-derives servers per-session.
-		setStartupComposerLspServers(discoverStartupLspServers({ sessionHome: cwd, cwd }, "connecting"));
+		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",
@@ -2108,9 +2097,6 @@ export async function runRootCommand(
 			autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
 			resolveActiveProjectRegistryPath,
 			clearPluginRootsCache: clearPluginRootsAndCaches,
-			// Deferred: the process may already execute in a bound worktree by the
-			// time the update fires, but the project registry belongs to the home.
-			projectRoot: sessionManager?.getSessionHome() ?? cwd,
 		});
 
 		const sessionOptions = await logger.time(
@@ -2188,10 +2174,9 @@ export async function runRootCommand(
 
 			const eventBus = new EventBus();
 			const subagentEventBus = new EventBus();
-			const sessionDiscoveryHome = sessionOptions.sessionManager?.getSessionHome() ?? cwd;
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
-				: await loadSessionExtensions(sessionOptions, sessionDiscoveryHome, settingsInstance, eventBus, cwd);
+				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
 			const extensionFlagSink: ExtensionFlagSink = {
 				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {

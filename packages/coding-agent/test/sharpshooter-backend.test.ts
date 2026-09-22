@@ -66,7 +66,7 @@ describe("sharpshooter memory backend", () => {
 		const enqueue = spyOn(sharpshooterBackend, "enqueue").mockResolvedValue(undefined);
 		const runtime = {
 			session,
-			sessionManager: { getSessionHome: () => cwd } as unknown as SessionManager,
+			sessionManager: {} as SessionManager,
 			settings,
 			cwd,
 			output: (text: string) => {

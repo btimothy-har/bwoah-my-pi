@@ -71,7 +71,7 @@ describe("issue #1022 — path-scoped enabledModels respected by default fallbac
 				authStorage,
 				modelRegistry,
 				settings,
-				sessionManager: SessionManager.inMemory(cwd),
+				sessionManager: SessionManager.inMemory(),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],

@@ -1305,8 +1305,6 @@ export interface ResolvedExternalSearchUrl {
 export interface ToolScopeOptions {
 	rawPaths: string[];
 	cwd: string;
-	/** Session home (H) — forwarded to the internal-URL router for config-discovery handlers. */
-	sessionHome?: string;
 	/** Verb used in the "Cannot {action} internal URL without a backing file: …" message. */
 	internalUrlAction: string;
 	/** Collect absolute paths flagged immutable by their internal-URL handler. */
@@ -1419,7 +1417,6 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		const resource = await internalRouter.resolve(rawPath, {
 			cwd,
-			sessionHome: opts.sessionHome,
 			settings: opts.settings,
 			signal: opts.signal,
 			sessionFile: opts.sessionFile,

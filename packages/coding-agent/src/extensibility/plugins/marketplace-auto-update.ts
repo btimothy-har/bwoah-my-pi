@@ -6,13 +6,6 @@ interface MarketplaceAutoUpdateOptions {
 	autoUpdate: MarketplaceAutoUpdateMode;
 	resolveActiveProjectRegistryPath: (cwd: string) => Promise<string | null>;
 	clearPluginRootsCache: () => void;
-	/**
-	 * Project registry root (session home) to scan for installed plugins. The
-	 * update fires after startup, by which time the process cwd may have moved
-	 * to an execution worktree — capture the discovery root at schedule time.
-	 * Defaults to the current project directory.
-	 */
-	projectRoot?: string;
 }
 
 export function scheduleMarketplaceAutoUpdate(options: MarketplaceAutoUpdateOptions): void {
@@ -36,8 +29,7 @@ async function runMarketplaceAutoUpdate(options: MarketplaceAutoUpdateOptions): 
 		const mgr = new MarketplaceManager({
 			marketplacesRegistryPath: getMarketplacesRegistryPath(),
 			installedRegistryPath: getInstalledPluginsRegistryPath(),
-			projectInstalledRegistryPath:
-				(await options.resolveActiveProjectRegistryPath(options.projectRoot ?? getProjectDir())) ?? undefined,
+			projectInstalledRegistryPath: (await options.resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
 			marketplacesCacheDir: getMarketplacesCacheDir(),
 			pluginsCacheDir: getPluginsCacheDir(),
 			clearPluginRootsCache: options.clearPluginRootsCache,

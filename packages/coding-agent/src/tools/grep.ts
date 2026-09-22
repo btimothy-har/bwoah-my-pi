@@ -29,7 +29,7 @@ import { DEFAULT_MAX_COLUMN, truncateHead, truncateLineBytes } from "@oh-my-pi/p
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { type ToolSession, getToolSessionHome } from "./session-home";
+import type { ToolSession } from ".";
 import { getExperimentalContextSession } from "./context-notes";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
@@ -750,7 +750,6 @@ async function resolveInternalSearchInputs(opts: {
 	pathSpecs: readonly GrepPathSpec[];
 	resolvedPaths: string[];
 	cwd: string;
-	sessionHome?: string;
 	settings: unknown;
 	signal?: AbortSignal;
 	archiveDisplayMap: ReadonlyMap<string, string>;
@@ -772,7 +771,6 @@ async function resolveInternalSearchInputs(opts: {
 	let virtualScopePath: string | undefined;
 	const context: ResolveContext = {
 		cwd: opts.cwd,
-		sessionHome: opts.sessionHome,
 		settings: opts.settings,
 		signal: opts.signal,
 		sessionFile: opts.sessionFile,
@@ -958,7 +956,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					pathSpecs,
 					resolvedPaths,
 					cwd: this.session.cwd,
-					sessionHome: getToolSessionHome(this.session),
 					archiveDisplayMap,
 					settings: this.session.settings,
 					signal,
@@ -1008,7 +1005,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const scope = await resolveToolSearchScope({
 						rawPaths: searchablePaths,
 						cwd: this.session.cwd,
-						sessionHome: getToolSessionHome(this.session),
 						internalUrlAction: "search",
 						settings: this.session.settings,
 						localProtocolOptions: this.session.localProtocolOptions,

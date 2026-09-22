@@ -136,13 +136,10 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
 		const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: false,
+		});
 		const result = await writethrough(filePath, ".section {}\n");
 
 		expect(result.finalContent).toBe(".section {}\n");
@@ -163,13 +160,10 @@ describe("LSP diagnostics freshness", () => {
 			.mockRejectedValue(new Error("disabled write-time LSP features must not start a server"));
 		const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: false,
+		});
 		const result = await writethrough(filePath, "export const value = 1;\n");
 
 		expect(result.finalContent).toBe("export const value = 1;\n");
@@ -200,13 +194,10 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 		const result = await writethrough(filePath, "export const value=1\n");
 
 		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
@@ -224,13 +215,10 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 		const content = "export const value=1\n";
 		const result = await writethrough(filePath, content);
 
@@ -276,13 +264,10 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 		await writethrough(filePath, "export const value=1\n");
 
 		expect(getOrCreate).not.toHaveBeenCalled();
@@ -308,13 +293,10 @@ describe("LSP diagnostics freshness", () => {
 		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 		const resultPromise = writethrough(filePath, "export const value=1\n");
 		await Bun.sleep(0);
 		expect(sync).not.toHaveBeenCalled();
@@ -358,13 +340,10 @@ describe("LSP diagnostics freshness", () => {
 		});
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: true,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: true,
+		});
 		const result = await writethrough(filePath, "export const value=1\n");
 
 		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
@@ -400,13 +379,10 @@ describe("LSP diagnostics freshness", () => {
 			publishDiagnostics(mockClient, tsUri, [], mockClient.openFiles.get(tsUri)?.version ?? null);
 		});
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: true,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: true,
+		});
 		await writethrough(stylesPath, ".section {}\n", undefined, undefined, { id: "batch", flush: false });
 		const result = await writethrough(tsPath, 'import styles from "./probe.module.scss";\n', undefined, undefined, {
 			id: "batch",
@@ -450,13 +426,10 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: true,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: true,
+		});
 		const result = await writethrough(filePath, "export const value = 2;\n");
 
 		expect(result).toBeDefined();
@@ -497,13 +470,10 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: true,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: true,
+		});
 		const result = await writethrough(filePath, "export const value: number = 'x';\n");
 
 		expect(result).toBeDefined();
@@ -533,13 +503,10 @@ describe("LSP diagnostics freshness", () => {
 			});
 		});
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: false,
-				enableDiagnostics: true,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: true,
+		});
 		const result = await writethrough(filePath, "export const value = missing;\n");
 
 		expect(result?.diagnostics?.errored).toBe(true);
@@ -593,10 +560,7 @@ describe("LSP diagnostics freshness", () => {
 			finalize: () => {},
 		};
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: false, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
@@ -649,10 +613,7 @@ describe("LSP diagnostics freshness", () => {
 			finalize: () => {},
 		};
 
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: false, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
@@ -769,10 +730,7 @@ describe("LSP diagnostics freshness", () => {
 				mockClient.diagnosticsVersion += 1;
 			});
 
-			const writethrough = createLspWritethrough(
-				{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-				{ enableFormat: false, enableDiagnostics: true },
-			);
+			const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
 			const result = await writethrough(filePath, 'import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 
 			expect(result).toBeDefined();

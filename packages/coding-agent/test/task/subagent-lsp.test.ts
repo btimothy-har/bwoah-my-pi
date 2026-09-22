@@ -140,10 +140,7 @@ function mockCreateAgentSession(): { getOptions: () => CreateAgentSessionOptions
 	return { getOptions: () => capturedOptions };
 }
 
-async function mockIsolation(): Promise<void> {
-	// The real runner creates the merged directory before binding; the mock must
-	// too — the executor's trusted isolation handoff requires an enterable root.
-	await fs.mkdir("/tmp/isolated-subagent", { recursive: true });
+function mockIsolation(): void {
 	const baseline: WorktreeBaseline = {
 		root: {
 			repoRoot: "/repo",
@@ -170,9 +167,8 @@ async function mockIsolation(): Promise<void> {
 }
 
 describe("subagent LSP availability", () => {
-	afterEach(async () => {
+	afterEach(() => {
 		vi.restoreAllMocks();
-		await fs.rm("/tmp/isolated-subagent", { recursive: true, force: true });
 	});
 
 	it("disables LSP for subagents by default", async () => {
@@ -232,7 +228,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["lsp"],
 		});
-		await mockIsolation();
+		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 
 		const tool = await TaskTool.create(createSession({ isolationEnabled: true }));
@@ -250,7 +246,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["write"],
 		});
-		await mockIsolation();
+		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-session-cwd-"));
 		try {

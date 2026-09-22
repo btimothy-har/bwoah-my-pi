@@ -55,7 +55,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 	const ctx = {
 		mcpManager,
 		session,
-		sessionManager: { getCwd: () => cwd, getSessionHome: () => cwd },
+		sessionManager: { getCwd: () => cwd },
 		settings: { get: (key: string): unknown => settingsValues[key] },
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),

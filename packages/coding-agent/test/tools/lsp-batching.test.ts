@@ -38,10 +38,7 @@ describe("createLspWritethrough batching", () => {
 			.spyOn(lspConfig, "loadConfig")
 			.mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		const getServersSpy = vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true, enableDiagnostics: true });
 
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
@@ -72,10 +69,7 @@ describe("createLspWritethrough batching", () => {
 	it("preserves a newer external change made before the batch flush", async () => {
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true, enableDiagnostics: true });
 
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
@@ -98,10 +92,7 @@ describe("createLspWritethrough batching", () => {
 	it("does not recreate a file deleted before the batch flush", async () => {
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true, enableDiagnostics: true });
 
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
@@ -125,13 +116,10 @@ describe("createLspWritethrough batching", () => {
 		const formatter = createFormatter(async (_filePath, content) => content.replace("=1", " = 1;"));
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", formatter]]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
@@ -156,13 +144,10 @@ describe("createLspWritethrough batching", () => {
 		});
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{
-				enableFormat: true,
-				enableDiagnostics: false,
-			},
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
 
 		const batchId = "formatter-failure";
 		await writethrough(path.join(tempDir.path(), "a.ts"), "const a=1\n", undefined, undefined, {
@@ -182,10 +167,7 @@ describe("createLspWritethrough batching", () => {
 			.spyOn(lspConfig, "loadConfig")
 			.mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		const getServersSpy = vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true, enableDiagnostics: true });
 
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
@@ -214,10 +196,7 @@ describe("createLspWritethrough batching", () => {
 			.spyOn(lspConfig, "loadConfig")
 			.mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		const getServersSpy = vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: tempDir.path(), cwd: tempDir.path() },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true, enableDiagnostics: true });
 
 		const filePath = path.join(tempDir.path(), "single.ts");
 		const result = await writethrough(filePath, "const single = true;\n");
@@ -255,10 +234,7 @@ describe.skipIf(process.getuid?.() === 0)("createLspWritethrough batching with a
 	it("flushes a batch whose brokered destination cannot be read back", async () => {
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
-		const writethrough = createLspWritethrough(
-			{ sessionHome: root, cwd: root },
-			{ enableFormat: true, enableDiagnostics: true },
-		);
+		const writethrough = createLspWritethrough(root, { enableFormat: true, enableDiagnostics: true });
 
 		// Denied for writing and for reading at once, which is what a sandbox that
 		// hides a path produces: the direct write fails, a privileged helper lands

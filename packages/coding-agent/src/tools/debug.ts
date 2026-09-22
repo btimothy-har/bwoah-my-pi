@@ -39,7 +39,6 @@ import {
 } from "../dap";
 import debugDescription from "../prompts/tools/debug.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { getToolSessionHome } from "./session-home";
 import { truncateForPrompt } from "./approval";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -454,8 +453,8 @@ function buildOutcomeText(outcome: DapContinueOutcome, timeoutSec: number, verb:
 	return lines.join("\n");
 }
 
-function getConfiguredAdapters(cwd: string, sessionHome?: string): string {
-	const adapters = getAvailableAdapters(cwd, sessionHome).map(adapter => adapter.name);
+function getConfiguredAdapters(cwd: string): string {
+	const adapters = getAvailableAdapters(cwd).map(adapter => adapter.name);
 	const names = adapters.length > 0 ? adapters.join(", ") : "none";
 	return truncateToWidth(replaceTabs(names), TRUNCATE_LENGTHS.LONG);
 }
@@ -475,7 +474,7 @@ const ADAPTER_CANONICAL_COMMANDS: Readonly<Record<string, string>> = {
 	"js-debug-adapter": "js-debug-adapter",
 };
 
-function formatAdapterUnavailable(adapterName: string, command: string, cwd: string, sessionHome?: string): string {
+function formatAdapterUnavailable(adapterName: string, command: string, cwd: string): string {
 	const displayName = truncateToWidth(replaceTabs(adapterName), TRUNCATE_LENGTHS.SHORT);
 	const canonicalCommand = ADAPTER_CANONICAL_COMMANDS[adapterName] ?? adapterName;
 	if (command !== canonicalCommand) {
@@ -484,7 +483,7 @@ function formatAdapterUnavailable(adapterName: string, command: string, cwd: str
 	}
 	return (
 		ADAPTER_UNAVAILABLE_MESSAGES[adapterName] ??
-		`adapter '${displayName}' is not available. Installed adapters: ${getConfiguredAdapters(cwd, sessionHome)}`
+		`adapter '${displayName}' is not available. Installed adapters: ${getConfiguredAdapters(cwd)}`
 	);
 }
 
@@ -606,16 +605,13 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
 				const program = resolveToCwd(params.program, commandCwd);
 				const programKind = await classifyLaunchProgram(program);
-				const sessionHome = getToolSessionHome(this.session);
-				const selection = selectLaunchAdapter(program, commandCwd, params.adapter, programKind, sessionHome);
+				const selection = selectLaunchAdapter(program, commandCwd, params.adapter, programKind);
 				if (selection.kind === "unavailable") {
-					throw new ToolError(
-						formatAdapterUnavailable(selection.adapterName, selection.command, commandCwd, sessionHome),
-					);
+					throw new ToolError(formatAdapterUnavailable(selection.adapterName, selection.command, commandCwd));
 				}
 				if (selection.kind === "none") {
 					throw new ToolError(
-						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd, sessionHome)}`,
+						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
 					);
 				}
 				const { adapter } = selection;
@@ -635,15 +631,14 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 					throw new ToolError("attach requires pid or port");
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
-				const sessionHome = getToolSessionHome(this.session);
-				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port, sessionHome);
+				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port);
 				if (!adapter) {
 					if (params.adapter) {
-						const command = getAdapterConfigs(commandCwd, sessionHome)[params.adapter]?.command ?? params.adapter;
-						throw new ToolError(formatAdapterUnavailable(params.adapter, command, commandCwd, sessionHome));
+						const command = getAdapterConfigs(commandCwd)[params.adapter]?.command ?? params.adapter;
+						throw new ToolError(formatAdapterUnavailable(params.adapter, command, commandCwd));
 					}
 					throw new ToolError(
-						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd, sessionHome)}`,
+						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
 					);
 				}
 				const snapshot = await dapSessionManager.attach(

@@ -35,29 +35,21 @@ export function memoryRootsFromRegistry(): string[] {
 	for (const ref of AgentRegistry.global().list()) {
 		const sm = ref.session?.sessionManager;
 		if (!sm) continue;
-		// Registry entries can be partial stub sessions (tests, extension
-		// replicas); fall back to the execution cwd for those.
-		const root = getMemoryRoot(agentDir, sm.getSessionHome?.() ?? sm.getCwd());
+		const root = getMemoryRoot(agentDir, sm.getCwd());
 		if (root && !roots.includes(root)) roots.push(root);
 	}
 	return roots;
 }
 
 /**
- * File-backed memory roots visible to one caller. A context that names a
- * session home pins the root to it; otherwise the bound caller's own home is
- * used, so a session-id-only caller never reads a peer project's summary.
- * Contextless legacy callers keep the registry-wide sweep.
+ * File-backed memory roots visible to one caller. A context that names a cwd
+ * pins the root to it; otherwise the bound caller's own cwd is used, so a
+ * session-id-only caller never reads a peer project's summary. Contextless
+ * legacy callers keep the registry-wide sweep.
  */
 function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSession | undefined): string[] {
-	// Explicit session home wins (bound sessions); standalone callers that only
-	// supply cwd keep their legacy same-root behavior.
-	const sessionHome =
-		context?.sessionHome ??
-		context?.cwd ??
-		caller?.sessionManager.getSessionHome?.() ??
-		caller?.sessionManager.getCwd();
-	if (sessionHome) return [getMemoryRoot(getAgentDir(), sessionHome)];
+	const cwd = context?.cwd ?? caller?.sessionManager.getCwd();
+	if (cwd) return [getMemoryRoot(getAgentDir(), cwd)];
 	return memoryRootsFromRegistry();
 }
 

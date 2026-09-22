@@ -186,7 +186,6 @@ describe("runSubprocess result acceptance", () => {
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
-			sessionHome: "/tmp",
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,
@@ -220,7 +219,6 @@ describe("runSubprocess result acceptance", () => {
 		const jobId = manager.register("task", AGENT_ID, async ({ signal }) => {
 			const result = await runSubprocess({
 				cwd: "/tmp",
-				sessionHome: "/tmp",
 				agent: baseAgent,
 				task: "do the work",
 				index: 0,

@@ -13,7 +13,7 @@ import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { type ToolSession, getToolSessionHome } from "./session-home";
+import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
@@ -250,7 +250,6 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const scope = await resolveToolSearchScope({
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
-				sessionHome: getToolSessionHome(this.session),
 				internalUrlAction: "rewrite",
 				settings: this.session.settings,
 				signal,

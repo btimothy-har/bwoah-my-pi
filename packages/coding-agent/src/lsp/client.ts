@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
@@ -67,7 +68,7 @@ export function setSharedLspEnabled(enabled: boolean): void {
 
 /**
  * Configure the global fallback idle timeout for LSP clients (used in tests/overrides).
- * When unset, each client evaluates against its load-time config (`client.config.resolvedIdleTimeoutMs`).
+ * When unset, each client evaluates against its workspace config (`getConfig(client.cwd).idleTimeoutMs`).
  * @param ms - Timeout in milliseconds, or null/undefined to disable global override
  */
 export function setIdleTimeout(ms: number | null | undefined): void {
@@ -97,11 +98,11 @@ export function isIdleClient(client: LspClient, now: number, timeoutMs: number):
 function hasConfiguredIdleTimeout(client?: LspClient): boolean {
 	if (idleTimeoutMs && idleTimeoutMs > 0) return true;
 	if (client) {
-		const timeoutMs = client.config.resolvedIdleTimeoutMs;
+		const timeoutMs = getConfig(client.cwd).idleTimeoutMs;
 		if (timeoutMs && timeoutMs > 0) return true;
 	}
 	for (const c of clients.values()) {
-		const timeoutMs = c.config.resolvedIdleTimeoutMs;
+		const timeoutMs = getConfig(c.cwd).idleTimeoutMs;
 		if (timeoutMs && timeoutMs > 0) return true;
 	}
 	return false;
@@ -147,7 +148,7 @@ function maybeStopIdleChecker(): void {
 export async function checkIdleClients(): Promise<void> {
 	const now = Date.now();
 	for (const [key, client] of Array.from(clients.entries())) {
-		const timeoutMs = idleTimeoutMs ?? client.config.resolvedIdleTimeoutMs;
+		const timeoutMs = idleTimeoutMs ?? getConfig(client.cwd).idleTimeoutMs;
 		if (timeoutMs && timeoutMs > 0 && isIdleClient(client, now, timeoutMs)) {
 			await shutdownClient(key);
 		}
@@ -907,14 +908,8 @@ function clientKey(config: ServerConfig, cwd: string): string {
 		config.initOptions ?? null,
 		config.settings ?? null,
 		config.languageId ?? null,
-		// Stamped at config load; a reload that changes the idle policy must
-		// resolve to a fresh client instead of reaping the retained one with the
-		// stale stamp.
-		config.resolvedIdleTimeoutMs ?? null,
 	]);
-	// Config files live at the session home, so the same cwd with a different
-	// discovery home must not share a client (or its idle policy).
-	return `${spawnCommand}:${cwd}:${config.sessionHome ?? cwd}:${identity}`;
+	return `${spawnCommand}:${cwd}:${identity}`;
 }
 
 /**
@@ -930,9 +925,7 @@ export function shutdownStaleClients(
 	cwd: string,
 	configs: readonly ServerConfig[],
 	signal?: AbortSignal,
-	sessionHome: string = cwd,
 ): Promise<string[]> {
-	const resolvedSessionHome = path.resolve(sessionHome);
 	const fresh = new Set(configs.map(config => clientKey(config, cwd)));
 	const resolvedCwd = path.resolve(cwd);
 	const previousBarrier = clientReloadBarriers.get(resolvedCwd);
@@ -951,18 +944,11 @@ export function shutdownStaleClients(
 		// callers keep sharing their in-flight promise; later callers cannot spawn
 		// another stale process while reload is blocked on teardown.
 		const stalePending = Array.from(clientLocks.entries()).filter(
-			([key, pending]) =>
-				path.resolve(pending.cwd) === resolvedCwd &&
-				path.resolve(pending.config.sessionHome ?? pending.cwd) === resolvedSessionHome &&
-				!fresh.has(key),
+			([key, pending]) => path.resolve(pending.cwd) === resolvedCwd && !fresh.has(key),
 		);
 		for (const [key] of stalePending) invalidatedClientKeys.add(key);
 		for (const client of clients.values()) {
-			if (
-				path.resolve(client.cwd) === resolvedCwd &&
-				path.resolve(client.config.sessionHome ?? client.cwd) === resolvedSessionHome &&
-				!fresh.has(client.name)
-			) {
+			if (path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name)) {
 				invalidatedClientKeys.add(client.name);
 			}
 		}
@@ -977,10 +963,7 @@ export function shutdownStaleClients(
 		);
 
 		const stale = Array.from(clients.values()).filter(
-			client =>
-				path.resolve(client.cwd) === resolvedCwd &&
-				path.resolve(client.config.sessionHome ?? client.cwd) === resolvedSessionHome &&
-				!fresh.has(client.name),
+			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
 		);
 		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
 		const failed = stale.filter((_client, index) => results[index] !== true);
