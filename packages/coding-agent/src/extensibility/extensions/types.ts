@@ -288,6 +288,14 @@ export interface ExtensionUIContext {
 		options?: ExtensionCustomOptions,
 	): Promise<T>;
 
+	/**
+	 * True only when this host can mount native overlay components through
+	 * `custom()`. A client may answer prompts (hasUI) without hosting a local
+	 * TUI — RPC sets hasUI but cannot mount components. Only literal `true`
+	 * opts in; hosts that cannot render native components leave it absent.
+	 */
+	readonly supportsCustomComponents?: boolean;
+
 	/** Set the text in the core input editor. */
 	setEditorText(text: string): void;
 

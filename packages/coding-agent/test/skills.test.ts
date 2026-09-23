@@ -13,7 +13,7 @@ import {
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -172,17 +172,19 @@ describe("skills", () => {
 				customDirectories: [fixturesDir],
 			});
 		});
-		it("should load from customDirectories only when built-ins disabled", async () => {
+		it("should load from customDirectories when built-in sources are disabled", async () => {
 			const { skills } = customDirectorySkills;
-			expect(skills.length).toBeGreaterThan(0);
-			// Custom directory skills have source "custom:user"
-			expect(skills.every(s => s.source.startsWith("custom"))).toBe(true);
+			// Custom directory skills have source "custom:user"; the bundled
+			// omp-builtin provider is OMP-native and loads unconditionally (like
+			// managed skills), so it is not expected to be absent here.
+			const customSkills = skills.filter(s => s.source.startsWith("custom"));
+			expect(customSkills.length).toBeGreaterThan(0);
 		});
 
 		it("should return customDirectory skills sorted by name (case-insensitive)", async () => {
 			const { skills } = customDirectorySkills;
 
-			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
+			expect(skills.filter(s => s.source.startsWith("custom")).map(s => s.name)).toEqual(expectedFixtureSkillOrder);
 		});
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
@@ -504,9 +506,24 @@ description: Skill loaded from a tilde-expanded custom directory.
 		}
 	});
 
-	it("should return empty when all sources disabled and no custom dirs", async () => {
-		const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS });
-		expect(skills).toHaveLength(0);
+	it("should return only bundled builtin skills when all sources are disabled and no custom dirs", async () => {
+		// Isolate the agent dir: the omp-builtin provider materializes under
+		// <agentDir>/builtin-skills, and a real agent dir could contribute
+		// managed skills or user files.
+		const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-empty-"));
+		const originalAgentDir = getAgentDir();
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+		setAgentDir(path.join(tempHome, ".omp", "agent"));
+		try {
+			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS });
+			expect(skills).toHaveLength(1);
+			expect(skills[0]!.name).toBe("code-review");
+			expect(skills[0]!._source?.provider).toBe("omp-builtin");
+		} finally {
+			homedirSpy.mockRestore();
+			setAgentDir(originalAgentDir);
+			await removeWithRetries(tempHome);
+		}
 	});
 
 	it("should filter skills with includeSkills glob patterns", async () => {

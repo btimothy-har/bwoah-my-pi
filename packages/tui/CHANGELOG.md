@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `ReviewFindingsOverlay` and `review_findings` transcript renderer: a fullscreen findings list/card/comment navigator with per-invocation draft comments, submit/cancel latching, live editor echo, and bounded small-viewport rendering ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

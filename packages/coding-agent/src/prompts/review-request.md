@@ -4,6 +4,23 @@
 
 {{mode}}
 
+{{#if scope}}
+### Review Scope
+
+- Repository root: `{{scope.repositoryRoot}}`
+{{#if scope.baseSha}}
+- Comparison base (merge base): {{scope.baseSha}}
+- Head: `{{scope.headLabel}}` ({{scope.headSha}})
+{{#if scope.baseLabel}}
+- Selected base branch: `{{scope.baseLabel}}`{{#if scope.baseTipSha}} (tip {{scope.baseTipSha}}){{/if}} — informational; the diff runs from the merge base
+{{/if}}
+- Only committed changes from the merge base to the head SHA are reviewed; staged and unstaged changes are excluded.
+{{/if}}
+{{#if scope.commitSha}}
+- Commit: {{scope.commitSha}}
+{{/if}}
+{{/if}}
+
 ### Changed Files ({{len files}} files, +{{totalAdded}}/-{{totalRemoved}} lines)
 
 {{#if files.length}}
@@ -21,16 +38,11 @@ _No files to review._
 {{/list}}
 {{/if}}
 
-### Distribution Guidelines
+### Dispatch
 
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
-{{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
-{{#if multiAgent}}
-Group files by locality, e.g.:
-- Same directory/module → same agent
-- Related functionality → same agent
-- Tests with their implementation files → same agent
-{{/if}}
+Invoke the `code-review` skill (`skill://code-review`) for the code review contract. If the skill is not available in this session, state that limitation and follow the `review_findings` tool's contract directly.
+
+Use the `task` tool with a `tasks` array to dispatch reviewers; the skill decides how the scope partitions.
 
 ### Reviewer Instructions
 
@@ -38,7 +50,7 @@ Reviewer MUST:
 1. Focus ONLY on assigned files
 2. {{#if skipDiff}}{{diffInstruction}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
 3. {{contextInstruction}}
-4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
+4. Use incremental `yield` sections for findings and verdict fields; reviewers MUST NOT call `review_findings` — only the primary (as review chair) calls it after synthesis
 
 {{#if skipDiff}}
 ### Diff Previews

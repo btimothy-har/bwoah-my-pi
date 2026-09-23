@@ -8,8 +8,8 @@
  * 4. Custom review instructions
  *
  * Runs VCS diffs upfront, parses results, filters noise, and provides
- * rich context for the orchestrating agent to distribute work across
- * multiple reviewer agents based on diff weight and locality.
+ * rich context for the review chair to dispatch reviewer agents and to
+ * synthesize a structured findings report.
  */
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -64,6 +64,18 @@ type ReviewMenuChoice =
 	| { kind: "uncommitted" }
 	| { kind: "commit" }
 	| { kind: "custom" };
+
+interface ReviewScopeDetails {
+	repositoryRoot: string;
+	/** Merge base SHA — the actual comparison base for branch review. */
+	baseSha?: string;
+	/** Selected base branch label and its tip SHA, informational only. */
+	baseLabel?: string;
+	baseTipSha?: string;
+	headLabel?: string;
+	headSha?: string;
+	commitSha?: string;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Exclusion patterns for noise files
@@ -174,28 +186,6 @@ function getFileExt(path: string): string {
 }
 
 /**
- * Determine recommended number of reviewer agents based on diff weight.
- * Uses total lines changed as the primary metric.
- */
-function getRecommendedAgentCount(stats: DiffStats): number {
-	const totalLines = stats.totalAdded + stats.totalRemoved;
-	const fileCount = stats.files.length;
-
-	// Heuristics:
-	// - Tiny (<100 lines or 1-2 files): 1 agent
-	// - Small (<500 lines): 1-2 agents
-	// - Medium (<2000 lines): 2-4 agents
-	// - Large (<5000 lines): 4-8 agents
-	// - Huge (>5000 lines): 8-16 agents
-
-	if (totalLines < 100 || fileCount <= 2) return 1;
-	if (totalLines < 500) return Math.min(2, fileCount);
-	if (totalLines < 2000) return Math.min(4, Math.ceil(fileCount / 3));
-	if (totalLines < 5000) return Math.min(8, Math.ceil(fileCount / 2));
-	return Math.min(16, fileCount);
-}
-
-/**
  * Extract first N lines of actual diff content (excluding headers) for preview.
  */
 function getDiffPreview(hunks: string, maxLines: number): string {
@@ -229,18 +219,31 @@ const GIT_UNCOMMITTED_DIFF_INSTRUCTION =
 	"MUST run both `git diff -- <path>` and `git diff --cached -- <path>` for assigned files";
 const JJ_UNCOMMITTED_DIFF_INSTRUCTION = "MUST run `jj --ignore-working-copy diff --git -- <path>` for assigned files";
 
+/** SHA-pinned diff instruction for merge-base branch review. */
+function buildBranchLargeDiffInstruction(mergeBaseSha: string, headSha: string): string {
+	return `MUST run \`git diff ${mergeBaseSha} ${headSha} -- <path>\` for assigned files; NEVER review a moving branch name or run bare \`git diff\`/\`git show\``;
+}
+
+/** SHA-pinned diff instruction for single-commit review. */
+function buildCommitLargeDiffInstruction(sha: string): string {
+	return `MUST run \`git show --first-parent ${sha} -- <path>\` for assigned files; NEVER review a moving branch name or run bare \`git show\``;
+}
+
 /**
- * Build the full review prompt with diff stats and distribution guidance.
+ * Build the full review prompt with diff stats and reviewer distribution context.
  */
 function buildReviewPrompt(
 	mode: string,
 	stats: DiffStats,
 	rawDiff: string,
-	options: { additionalInstructions?: string; diffInstruction?: string; contextInstruction?: string } = {},
+	options: {
+		additionalInstructions?: string;
+		diffInstruction?: string;
+		contextInstruction?: string;
+		scope?: ReviewScopeDetails;
+	} = {},
 ): string {
-	const agentCount = getRecommendedAgentCount(stats);
 	const skipDiff = rawDiff.length > MAX_DIFF_CHARS || stats.files.length > MAX_FILES_FOR_INLINE_DIFF;
-	const totalLines = stats.totalAdded + stats.totalRemoved;
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / stats.files.length)) : 0;
 
 	const filesWithExt = stats.files.map(f => ({
@@ -255,12 +258,10 @@ function buildReviewPrompt(
 		excluded: stats.excluded,
 		totalAdded: stats.totalAdded,
 		totalRemoved: stats.totalRemoved,
-		totalLines,
-		agentCount,
-		multiAgent: agentCount > 1,
 		skipDiff,
 		rawDiff: rawDiff.trim(),
 		linesPerFile,
+		scope: options.scope,
 		additionalInstructions: options.additionalInstructions,
 		diffInstruction: options.diffInstruction ?? DEFAULT_LARGE_DIFF_INSTRUCTION,
 		contextInstruction: options.contextInstruction ?? DEFAULT_CONTEXT_INSTRUCTION,
@@ -372,7 +373,12 @@ function buildReviewPromptFromDiff(
 	diffText: string,
 	extraInstructions: string | undefined,
 	emptyMessage: string,
-	options: { diffInstruction?: string; filteredMessage?: string; contextInstruction?: string } = {},
+	options: {
+		diffInstruction?: string;
+		filteredMessage?: string;
+		contextInstruction?: string;
+		scope?: ReviewScopeDetails;
+	} = {},
 ): string | undefined {
 	if (!diffText.trim()) {
 		if (ctx.hasUI) ctx.ui.notify(emptyMessage, "warning");
@@ -390,18 +396,19 @@ function buildReviewPromptFromDiff(
 		additionalInstructions: extraInstructions,
 		diffInstruction: options.diffInstruction,
 		contextInstruction: options.contextInstruction,
+		scope: options.scope,
 	});
 }
 
 async function buildPrReviewPrompt(
-	api: CustomCommandAPI,
+	cwd: string,
 	ctx: HookCommandContext,
 	ref: ReviewPrRef,
 	extraInstructions: string,
 ): Promise<string | undefined> {
 	let diffText: string;
 	try {
-		const lookup = await gh.getOrFetchPrDiff({ cwd: api.cwd, repo: ref.repo, number: ref.number });
+		const lookup = await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number });
 		diffText = lookup.payload.unified;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -479,14 +486,30 @@ export class ReviewCommand implements CustomCommand {
 	constructor(private api: CustomCommandAPI) {}
 
 	async execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> {
+		const invocation = { sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.sessionManager.getCwd() };
+		const executionCwd = invocation.cwd;
+		const finish = (promptText: string | undefined): string | undefined => {
+			if (promptText === undefined) return undefined;
+			if (
+				ctx.sessionManager.getSessionId() !== invocation.sessionId ||
+				ctx.sessionManager.getCwd() !== invocation.cwd
+			) {
+				if (ctx.hasUI) {
+					ctx.ui.notify("Session or working directory changed during review setup; review cancelled", "warning");
+				}
+				return undefined;
+			}
+			return promptText;
+		};
+
 		const parsedArgs = extractReviewPrRefFromArgs(args);
 		if (parsedArgs.prRef) {
-			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
+			return finish(await buildPrReviewPrompt(executionCwd, ctx, parsedArgs.prRef, parsedArgs.extraInstructions));
 		}
 
 		const extraInstructions = parsedArgs.extraInstructions || undefined;
 		if (!ctx.hasUI) {
-			return buildHeadlessReviewPrompt(extraInstructions);
+			return finish(buildHeadlessReviewPrompt(extraInstructions));
 		}
 
 		const choices: Array<{ label: string; value: ReviewMenuChoice }> = [
@@ -526,10 +549,10 @@ export class ReviewCommand implements CustomCommand {
 
 		switch (selectedChoice.kind) {
 			case "detected-pr":
-				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "");
+				return finish(await buildPrReviewPrompt(executionCwd, ctx, selectedChoice.ref, extraInstructions ?? ""));
 
 			case "base-branch": {
-				const branches = await getGitBranches(this.api);
+				const branches = await getGitBranches(executionCwd);
 				if (branches.length === 0) {
 					ctx.ui.notify("No git branches found", "error");
 					return undefined;
@@ -538,53 +561,77 @@ export class ReviewCommand implements CustomCommand {
 				const baseBranch = await ctx.ui.select("Select base branch to compare against", branches);
 				if (!baseBranch) return undefined;
 
-				const currentBranch = await getCurrentBranch(this.api);
+				const currentBranch = await getCurrentBranch(executionCwd);
 				let diffText: string;
+				let scope: ReviewScopeDetails;
+				let diffInstruction: string;
 				try {
-					const repository = vcs.requireGit(this.api.cwd);
-					// PR-style review compares the merge base against the current
-					// branch (`base...head`), so base-only commits are excluded.
-					const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
-					if (!mergeBase) {
+					const repository = vcs.requireGit(executionCwd);
+					// Resolve both tips to commits before diffing: the review is
+					// pinned to these SHAs even if a branch moves during dispatch.
+					const baseSha = await repository.resolveRef(baseBranch);
+					const headSha = await repository.resolveRef(currentBranch);
+					if (!baseSha || !headSha) {
+						ctx.ui.notify(`Cannot resolve ${!baseSha ? baseBranch : currentBranch} to a commit`, "error");
+						return undefined;
+					}
+					// PR-style review compares the merge base against the head
+					// SHA (`base...head`), so base-only commits are excluded.
+					const mergeBaseSha = await repository.mergeBase(baseSha, headSha);
+					if (!mergeBaseSha) {
 						// No common ancestor: `git diff base...head` aborts here
 						// rather than comparing unrelated trees tip-to-tip.
 						ctx.ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
 						return undefined;
 					}
-					diffText = await repository.diffText({ base: mergeBase, head: currentBranch });
+					diffText = await repository.diffText({ base: mergeBaseSha, head: headSha });
+					scope = {
+						repositoryRoot: repository.info().repoRoot,
+						baseSha: mergeBaseSha,
+						baseLabel: baseBranch,
+						baseTipSha: baseSha,
+						headLabel: currentBranch,
+						headSha,
+					};
+					diffInstruction = buildBranchLargeDiffInstruction(mergeBaseSha, headSha);
 				} catch (err) {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
 				}
 
-				return buildReviewPromptFromDiff(
-					ctx,
-					`Reviewing changes between \`${baseBranch}\` and \`${currentBranch}\` (PR-style)`,
-					diffText,
-					extraInstructions,
-					`No changes between ${baseBranch} and ${currentBranch}`,
+				return finish(
+					buildReviewPromptFromDiff(
+						ctx,
+						`Reviewing changes between \`${baseBranch}\` and \`${currentBranch}\` (PR-style)`,
+						diffText,
+						extraInstructions,
+						`No changes between ${baseBranch} and ${currentBranch}`,
+						{ diffInstruction, scope },
+					),
 				);
 			}
 
 			case "uncommitted": {
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(err => {
+				const reviewDiff = await getUncommittedReviewDiff(executionCwd).catch(err => {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
 				});
 				if (!reviewDiff) return undefined;
 
-				return buildReviewPromptFromDiff(
-					ctx,
-					reviewDiff.mode,
-					reviewDiff.diffText,
-					extraInstructions,
-					reviewDiff.emptyMessage ?? "No diff content found",
-					{ diffInstruction: reviewDiff.diffInstruction },
+				return finish(
+					buildReviewPromptFromDiff(
+						ctx,
+						reviewDiff.mode,
+						reviewDiff.diffText,
+						extraInstructions,
+						reviewDiff.emptyMessage ?? "No diff content found",
+						{ diffInstruction: reviewDiff.diffInstruction },
+					),
 				);
 			}
 
 			case "commit": {
-				const commits = await getRecentCommits(this.api, 20);
+				const commits = await getRecentCommits(executionCwd, 20);
 				if (commits.length === 0) {
 					ctx.ui.notify("No commits found", "error");
 					return undefined;
@@ -596,21 +643,41 @@ export class ReviewCommand implements CustomCommand {
 				const hash = selectedCommit.split(" ")[0];
 
 				let diffText: string;
+				let resolvedSha: string;
+				let scope: ReviewScopeDetails;
+				let diffInstruction: string;
 				try {
-					const result = await vcs.requireGit(this.api.cwd).showCommit(hash);
+					const repository = vcs.requireGit(executionCwd);
+					// Pin the review to the resolved commit; the menu's short hash
+					// may be ambiguous and the commit must not drift.
+					const sha = await repository.resolveRef(hash);
+					if (!sha) {
+						ctx.ui.notify(`Cannot resolve commit ${hash}`, "error");
+						return undefined;
+					}
+					resolvedSha = sha;
+					const result = await repository.showCommit(resolvedSha);
 					diffText = result.data.toString("utf8");
+					scope = { repositoryRoot: repository.info().repoRoot, commitSha: resolvedSha };
+					diffInstruction = buildCommitLargeDiffInstruction(resolvedSha);
 				} catch (err) {
 					ctx.ui.notify(`Failed to get commit: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
 				}
 
-				return buildReviewPromptFromDiff(
-					ctx,
-					`Reviewing commit \`${hash}\``,
-					diffText,
-					extraInstructions,
-					"Commit has no diff content",
-					{ filteredMessage: "No reviewable files in commit (all changes filtered out)" },
+				return finish(
+					buildReviewPromptFromDiff(
+						ctx,
+						`Reviewing commit \`${resolvedSha}\``,
+						diffText,
+						extraInstructions,
+						"Commit has no diff content",
+						{
+							diffInstruction,
+							filteredMessage: "No reviewable files in commit (all changes filtered out)",
+							scope,
+						},
+					),
 				);
 			}
 
@@ -623,45 +690,47 @@ export class ReviewCommand implements CustomCommand {
 				);
 				if (!instructions?.trim()) return undefined;
 
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(() => undefined);
+				const reviewDiff = await getUncommittedReviewDiff(executionCwd).catch(() => undefined);
 
 				if (reviewDiff?.diffText.trim()) {
 					const stats = parseDiff(reviewDiff.diffText);
-					return buildReviewPrompt(
-						`Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`,
-						stats,
-						reviewDiff.diffText,
-						{
-							additionalInstructions: instructions,
-							diffInstruction: reviewDiff.diffInstruction,
-						},
+					return finish(
+						buildReviewPrompt(
+							`Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`,
+							stats,
+							reviewDiff.diffText,
+							{
+								additionalInstructions: instructions,
+								diffInstruction: reviewDiff.diffInstruction,
+							},
+						),
 					);
 				}
 
-				return buildCustomReviewPrompt(instructions);
+				return finish(buildCustomReviewPrompt(instructions));
 			}
 		}
 	}
 }
 
-async function getGitBranches(api: CustomCommandAPI): Promise<string[]> {
+async function getGitBranches(cwd: string): Promise<string[]> {
 	try {
-		return await vcs.requireGit(api.cwd).listBranches(true);
+		return await vcs.requireGit(cwd).listBranches(true);
 	} catch {
 		return [];
 	}
 }
 
-async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
+async function getCurrentBranch(cwd: string): Promise<string> {
 	try {
-		return (await vcs.git(api.cwd)?.currentBranch()) ?? "HEAD";
+		return (await vcs.git(cwd)?.currentBranch()) ?? "HEAD";
 	} catch {
 		return "HEAD";
 	}
 }
 
-async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentReviewDiff> {
-	const repository = vcs.require(api.cwd);
+async function getUncommittedReviewDiff(cwd: string): Promise<CurrentReviewDiff> {
+	const repository = vcs.require(cwd);
 	const diffText = await repository.uncommittedDiff([]);
 	const isJj = repository.kind() === "jj";
 	return {
@@ -672,9 +741,9 @@ async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentR
 	};
 }
 
-async function getRecentCommits(api: CustomCommandAPI, count: number): Promise<string[]> {
+async function getRecentCommits(cwd: string, count: number): Promise<string[]> {
 	try {
-		return await vcs.require(api.cwd).logOnelines(count);
+		return await vcs.require(cwd).logOnelines(count);
 	} catch {
 		return [];
 	}
