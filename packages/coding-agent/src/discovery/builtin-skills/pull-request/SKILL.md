@@ -55,10 +55,10 @@ NEVER fill a gap with a plausible guess. The author declines → omit that conte
 **Cut:**
 
 - Restating the diff: file lists, commit lists, line-by-line walkthroughs.
-- Process narration: how the work was done, iterations, what the agent tried.
+- Process and branch history: how the work was done, what the agent tried, what earlier commits did that later commits changed. Describe the net change against the base.
 - Generic claims: "improves maintainability", "more robust", "clean implementation".
 - Unbacked assurances: "verified locally", "works as expected", "no regressions" without the output.
-- Template boilerplate: instruction text, empty sections, repeated "N/A". Delete what does not apply, or replace it with one line.
+- Template boilerplate: instruction text, notices addressed to the PR author, empty sections, repeated "N/A". Keep required sections; delete what does not apply, or replace it with one line.
 - Decorative structure: bold-label bullet lists, em-dash chains, arrows, extra headings on a small PR.
 - Secrets, credentials, private tokens, PII, and unnecessary production data.
 
