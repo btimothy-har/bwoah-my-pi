@@ -371,7 +371,9 @@ export class ReviewFindingsOverlay implements Component {
 			? new Text(`${uiTheme.fg("dim", "Explanation")} ${sanitizeModelText(review.explanation)}`, 0, 0).render(width)
 			: [];
 		const recommendationRows = review.recommendation.trim()
-			? new Text(`${uiTheme.fg("dim", "Recommendation")} ${sanitizeModelText(review.recommendation)}`, 0, 0).render(width)
+			? new Text(`${uiTheme.fg("dim", "Recommendation")} ${sanitizeModelText(review.recommendation)}`, 0, 0).render(
+					width,
+				)
 			: [];
 		const recBudget = recommendationRows.length > 0 ? Math.max(1, Math.ceil(sharedRows / 2)) : 0;
 		const recShown = recommendationRows.slice(0, recBudget);

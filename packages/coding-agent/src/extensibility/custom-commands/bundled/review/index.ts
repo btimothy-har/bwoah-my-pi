@@ -268,7 +268,6 @@ function buildReviewPrompt(
 	});
 }
 
-
 function buildCustomReviewPrompt(instructions: string): string {
 	return prompt.render(reviewCustomRequestTemplate, { instructions });
 }

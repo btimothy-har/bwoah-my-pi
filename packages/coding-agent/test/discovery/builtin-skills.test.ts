@@ -65,7 +65,13 @@ describe("builtin-skills provider", () => {
 		const resource = await handler.resolve(parseInternalUrl("skill://code-review"));
 		expect(resource.sourcePath).toBe(builtinSkillPath());
 		// Semantic markers: the four procedure phases and the trust boundary.
-		for (const marker of ["### 1. Prepare", "### 2. Dispatch", "### 3. Synthesize", "### 4. Report", "UNTRUSTED DATA"]) {
+		for (const marker of [
+			"### 1. Prepare",
+			"### 2. Dispatch",
+			"### 3. Synthesize",
+			"### 4. Report",
+			"UNTRUSTED DATA",
+		]) {
 			expect(resource.content).toContain(marker);
 		}
 	});
