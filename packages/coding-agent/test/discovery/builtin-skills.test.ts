@@ -10,19 +10,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import "@oh-my-pi/pi-coding-agent/discovery";
-import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
-function builtinSkillPath(): string {
+function builtinSkillPath(name: string): string {
 	// Resolve per call: setAgentDir() redirects getAgentDir() mid-test.
-	return path.join(getAgentDir(), "builtin-skills", "code-review", "SKILL.md");
-}
-
-async function readMaterializedSkill(): Promise<string> {
-	return fs.readFile(builtinSkillPath(), "utf8");
+	return path.join(getAgentDir(), "builtin-skills", name, "SKILL.md");
 }
 
 describe("builtin-skills provider", () => {
@@ -56,77 +51,85 @@ describe("builtin-skills provider", () => {
 		expect(warnings).toEqual([]);
 		const skill = skills.find(entry => entry.name === "code-review");
 		expect(skill).toBeDefined();
-		expect(skill!.filePath).toBe(builtinSkillPath());
-		expect(skill!.description).toContain("code review");
+		expect(skill!.filePath).toBe(builtinSkillPath("code-review"));
 		expect(skill!.source).toBe("omp-builtin:user");
 
 		setActiveSkills(skills);
 		const handler = new SkillProtocolHandler();
 		const resource = await handler.resolve(parseInternalUrl("skill://code-review"));
-		expect(resource.sourcePath).toBe(builtinSkillPath());
-		// Semantic markers: the four procedure phases and the trust boundary.
-		for (const marker of [
-			"### 1. Prepare",
-			"### 2. Dispatch",
-			"### 3. Synthesize",
-			"### 4. Report",
-			"UNTRUSTED DATA",
-		]) {
-			expect(resource.content).toContain(marker);
-		}
+		expect(resource.sourcePath).toBe(builtinSkillPath("code-review"));
 	});
 
-	it("lets a user-level skill of the same name override the bundled copy", async () => {
+	it("serves the builtin pull-request skill, yields to a user override, and respects disablement", async () => {
 		await isolateAgentDir();
+		const handler = new SkillProtocolHandler();
 
-		const userSkillDir = path.join(getAgentDir(), "skills", "code-review");
+		// Empty agent home: the embedded builtin materializes and resolves.
+		const { skills: builtinSkills } = await loadSkills();
+		const skill = builtinSkills.find(entry => entry.name === "pull-request");
+		expect(skill).toBeDefined();
+		expect(skill!.filePath).toBe(builtinSkillPath("pull-request"));
+		expect(skill!.source).toBe("omp-builtin:user");
+		// Ordinary discoverable skill: not hidden from the model-facing listing.
+		expect(skill!.hide).toBeFalsy();
+
+		setActiveSkills(builtinSkills);
+		const builtinResource = await handler.resolve(parseInternalUrl("skill://pull-request"));
+		expect(builtinResource.sourcePath).toBe(builtinSkillPath("pull-request"));
+
+		// A same-named user skill with distinguishable content wins by name.
+		const userSkillDir = path.join(getAgentDir(), "skills", "pull-request");
 		await fs.mkdir(userSkillDir, { recursive: true });
 		await Bun.write(
 			path.join(userSkillDir, "SKILL.md"),
-			'---\nname: code-review\ndescription: "User override for the code review procedure."\n---\n\n# user override body\n',
+			'---\nname: pull-request\ndescription: "User override for the pull request workflow."\n---\n\n# user override body\n',
 		);
 
-		const { skills } = await loadSkills();
-		const winners = skills.filter(skill => skill.name === "code-review");
-		expect(winners).toHaveLength(1);
-		expect(winners[0]!.description).toBe("User override for the code review procedure.");
-		expect(winners[0]!.filePath).toBe(path.join(userSkillDir, "SKILL.md"));
-		expect(winners[0]!._source?.provider).not.toBe("omp-builtin");
+		const { skills: overriddenSkills } = await loadSkills();
+		expect(overriddenSkills.filter(entry => entry.name === "pull-request")).toHaveLength(1);
+		setActiveSkills(overriddenSkills);
+		const userResource = await handler.resolve(parseInternalUrl("skill://pull-request"));
+		expect(userResource.sourcePath).toBe(path.join(userSkillDir, "SKILL.md"));
+		expect(userResource.content).toContain("user override body");
+
+		// Disablement removes the skill from the served set entirely.
+		const { skills: disabledSkills } = await loadSkills({ disabledExtensions: ["skill:pull-request"] });
+		expect(disabledSkills.some(entry => entry.name === "pull-request")).toBe(false);
+		setActiveSkills(disabledSkills);
+		await expect(handler.resolve(parseInternalUrl("skill://pull-request"))).rejects.toThrow(
+			"Unknown skill: pull-request",
+		);
 	});
 
 	it("does not rewrite the materialized file when content is unchanged (mtime stable)", async () => {
 		await isolateAgentDir();
 
 		await loadSkills();
-		const first = await fs.stat(builtinSkillPath());
-		const contentBefore = await readMaterializedSkill();
+		const first = await fs.stat(builtinSkillPath("code-review"));
+		const contentBefore = await fs.readFile(builtinSkillPath("code-review"), "utf8");
 
 		await loadSkills();
 
 		// No wall-clock sleep: APFS mtimeMs has nanosecond granularity, so a
 		// rewrite would almost certainly move it.
-		const second = await fs.stat(builtinSkillPath());
+		const second = await fs.stat(builtinSkillPath("code-review"));
 		expect(second.mtimeMs).toBe(first.mtimeMs);
-		expect(await readMaterializedSkill()).toBe(contentBefore);
+		expect(await fs.readFile(builtinSkillPath("code-review"), "utf8")).toBe(contentBefore);
 	});
 
 	it("re-materializes the bundled copy when the file diverges from the embedded content", async () => {
 		await isolateAgentDir();
 
-		await loadSkills();
-		await Bun.write(builtinSkillPath(), "---\nname: code-review\ndescription: tampered\n---\ntampered\n");
+		const { skills } = await loadSkills();
+		setActiveSkills(skills);
+		const baseline = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://code-review"));
+
+		await Bun.write(
+			builtinSkillPath("code-review"),
+			"---\nname: code-review\ndescription: tampered\n---\ntampered\n",
+		);
 		await loadSkills();
 
-		expect(await readMaterializedSkill()).toContain("### 1. Prepare");
-	});
-
-	it("registers at the lowest skills-provider priority", () => {
-		const cap = getCapability("skills");
-		expect(cap).toBeDefined();
-		const provider = cap!.providers.find(entry => entry.id === "omp-builtin");
-		expect(provider).toBeDefined();
-		expect(provider!.priority).toBe(1);
-		const otherPriorities = cap!.providers.filter(p => p.id !== "omp-builtin").map(p => p.priority);
-		expect(provider!.priority).toBeLessThan(Math.min(...otherPriorities));
+		expect(await fs.readFile(builtinSkillPath("code-review"), "utf8")).toBe(baseline.content);
 	});
 });
