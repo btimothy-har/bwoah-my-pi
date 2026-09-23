@@ -122,5 +122,17 @@ describe("issue #5764: registerTool loadMode default", () => {
 			if (!tool) continue;
 			expect(tool.loadMode, `${name} must declare loadMode "essential"`).toBe("essential");
 		}
+
+		// Reverse direction: a class declaring loadMode "essential" without a list
+		// entry is demotable by any adapter re-register that omits loadMode.
+		for (const [name, factory] of Object.entries(BUILTIN_TOOLS)) {
+			const tool = await factory(session);
+			if (!tool) continue;
+			if (tool.loadMode !== "essential") continue;
+			expect(
+				name in ESSENTIAL_BUILTIN_TOOL_NAMES,
+				`${name} declares loadMode "essential" but is missing from ESSENTIAL_BUILTIN_TOOL_NAMES`,
+			).toBe(true);
+		}
 	});
 });

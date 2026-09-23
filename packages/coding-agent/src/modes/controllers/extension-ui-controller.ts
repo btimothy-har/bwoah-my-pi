@@ -121,6 +121,7 @@ export class ExtensionUiController {
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
 			setTitle: title => setExtensionTerminalTitle(title),
 			custom: (factory, options) => this.showHookCustom(factory, options),
+			supportsCustomComponents: true,
 			setEditorText: text => {
 				this.ctx.editor.setText(text);
 				this.ctx.ui.requestRender();

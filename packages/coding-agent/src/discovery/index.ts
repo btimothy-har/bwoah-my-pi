@@ -25,6 +25,7 @@ import "./agents-md";
 import "./claude-md";
 import "./builtin";
 import "./builtin-defaults";
+import "./builtin-skills";
 import "./claude";
 import "./claude-plugins";
 import "./cline";

@@ -60,6 +60,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { ReviewFindingsTool } from "./review-findings";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
@@ -121,6 +122,7 @@ export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
 export * from "./report-tool-issue";
+export * from "./review-findings";
 export * from "./resolve";
 export type {
 	FindingPriority,
@@ -513,6 +515,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	eval: s => new EvalTool(s),
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
+	review_findings: ReviewFindingsTool.createIf,
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
 	checkpoint: CheckpointTool.createIf,

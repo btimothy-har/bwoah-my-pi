@@ -102,19 +102,29 @@ describe("ReviewCommand", () => {
 	}
 
 	function createContext(options?: {
+		hasUI?: boolean;
 		selectedMode?: string;
 		selectResults?: string[];
 		editorValue?: string | undefined;
 		sessionEntries?: SessionEntry[];
 		branchEntries?: SessionEntry[];
+		sessionId?: string;
+		sessionCwd?: string;
+		sessionState?: { sessionId: string; cwd: string };
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
 		onNotify?: (call: NotifyCall) => void;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
+		const session = options?.sessionState ?? {
+			sessionId: options?.sessionId ?? "review-session",
+			cwd: options?.sessionCwd ?? tmpDir,
+		};
 		return {
-			hasUI: true,
+			hasUI: options?.hasUI ?? true,
 			sessionManager: {
+				getSessionId: () => session.sessionId,
+				getCwd: () => session.cwd,
 				getEntries: () => options?.sessionEntries ?? [],
 				getBranch: () => options?.branchEntries ?? options?.sessionEntries ?? [],
 			},
@@ -175,6 +185,7 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("Check authentication boundaries");
+		expect(promptText).toContain("skill://code-review");
 	});
 
 	it("does not submit empty custom review instructions", async () => {
@@ -253,7 +264,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 
 		const cases = [
 			"https://github.com/owner/repo/pull/123",
@@ -279,7 +290,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 
 		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
 
@@ -294,7 +305,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(21)));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 
 		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
 
@@ -308,7 +319,7 @@ describe("ReviewCommand", () => {
 	it("rejects unsupported PR-like URL formats as normal instructions", async () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 
 		const cases = [
 			"https://github.com/owner/repo/issues/123",
@@ -333,7 +344,7 @@ describe("ReviewCommand", () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 		const secondUrl = "https://github.com/owner/repo/pull/456";
 
 		const result = await command.execute(["focus", "https://github.com/owner/repo/pull/123", "on", secondUrl], ctx);
@@ -559,11 +570,13 @@ describe("ReviewCommand", () => {
 		]);
 	});
 
-	it("keeps base branch review mode working", async () => {
+	it("keeps base branch review mode working with resolved SHAs", async () => {
 		const dir = await createTempDir();
 		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
 		const mergeBaseSpy = vi.fn(async () => "basesha");
 		const repository = {
+			info: () => ({ repoRoot: dir }),
+			resolveRef: async (name: string) => (name === "main" ? "mainsha" : "featsha"),
 			currentBranch: async () => "feature",
 			mergeBase: mergeBaseSpy,
 			diffText: diffSpy,
@@ -581,8 +594,12 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Reviewing changes between `main` and `feature`");
 		expect(result!).toContain("src/pr.ts");
-		expect(mergeBaseSpy).toHaveBeenCalledWith("main", "feature");
-		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "feature" });
+		expect(mergeBaseSpy).toHaveBeenCalledWith("mainsha", "featsha");
+		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "featsha" });
+		expect(result!).toContain(`Repository root: \`${dir}\``);
+		expect(result!).toContain("Comparison base (merge base): basesha");
+		expect(result!).toContain("Selected base branch: `main` (tip mainsha)");
+		expect(result!).toContain("skill://code-review");
 	});
 
 	it("resolves base-branch review against a real repo without a range revspec", async () => {
@@ -591,6 +608,9 @@ describe("ReviewCommand", () => {
 			await $`git init -q -b main`.cwd(dir).quiet();
 			await $`git config user.email test@example.com`.cwd(dir).quiet();
 			await $`git config user.name Test`.cwd(dir).quiet();
+			// Hermetic fixtures: the host may set commit.gpgsign globally, and a
+			// locked gpg agent would hang git commit.
+			await $`git config commit.gpgsign false`.cwd(dir).quiet();
 			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
 			await $`git add a.txt`.cwd(dir).quiet();
 			await $`git commit -q -m init`.cwd(dir).quiet();
@@ -602,6 +622,7 @@ describe("ReviewCommand", () => {
 			const sameResult = await sameBranch.execute(
 				[],
 				createContext({
+					sessionCwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 					onNotify: call => notices.push(call),
 				}),
@@ -626,6 +647,7 @@ describe("ReviewCommand", () => {
 			const featureResult = await feature.execute(
 				[],
 				createContext({
+					sessionCwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 				}),
 			);
@@ -643,6 +665,9 @@ describe("ReviewCommand", () => {
 			await $`git init -q -b main`.cwd(dir).quiet();
 			await $`git config user.email test@example.com`.cwd(dir).quiet();
 			await $`git config user.name Test`.cwd(dir).quiet();
+			// Hermetic fixtures: the host may set commit.gpgsign globally, and a
+			// locked gpg agent would hang git commit.
+			await $`git config commit.gpgsign false`.cwd(dir).quiet();
 			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
 			await $`git add a.txt`.cwd(dir).quiet();
 			await $`git commit -q -m init`.cwd(dir).quiet();
@@ -660,6 +685,7 @@ describe("ReviewCommand", () => {
 			const result = await command.execute(
 				[],
 				createContext({
+					sessionCwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 					onNotify: call => notices.push(call),
 				}),
@@ -671,13 +697,16 @@ describe("ReviewCommand", () => {
 		}
 	});
 
-	it("keeps specific commit review mode working", async () => {
+	it("keeps specific commit review mode working with the resolved SHA", async () => {
 		const dir = await createTempDir();
+		const resolvedSha = "abcdef890abcdef890abcdef890abcdef890abcdef89";
 		const showSpy = vi.fn(async () => ({ data: Buffer.from(SAMPLE_PR_DIFF), truncated: false }));
 		spyOn(vcs, "require").mockReturnValue({
 			logOnelines: async () => ["abc1234 Fix review command"],
 		} as unknown as VcsRepo);
 		spyOn(vcs, "requireGit").mockReturnValue({
+			info: () => ({ repoRoot: dir }),
+			resolveRef: async (name: string) => (name === "abc1234" ? resolvedSha : null),
 			showCommit: showSpy,
 		} as unknown as VcsGitRepo);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
@@ -688,18 +717,243 @@ describe("ReviewCommand", () => {
 		const result = await command.execute([], ctx);
 
 		expect(result).toBeDefined();
-		expect(result!).toContain("Reviewing commit `abc1234`");
+		expect(result!).toContain(`Reviewing commit \`${resolvedSha}\``);
 		expect(result!).toContain("src/pr.ts");
-		expect(showSpy).toHaveBeenCalledWith("abc1234");
+		expect(showSpy).toHaveBeenCalledWith(resolvedSha);
+		expect(result!).toContain(`Commit: ${resolvedSha}`);
 	});
+
+	it("rejects commit review when the selected ref cannot be resolved", async () => {
+		const dir = await createTempDir();
+		const showSpy = vi.fn(async () => ({ data: Buffer.from(SAMPLE_PR_DIFF), truncated: false }));
+		spyOn(vcs, "require").mockReturnValue({
+			logOnelines: async () => ["abc1234 Fix review command"],
+		} as unknown as VcsRepo);
+		spyOn(vcs, "requireGit").mockReturnValue({
+			info: () => ({ repoRoot: dir }),
+			resolveRef: async () => null,
+			showCommit: showSpy,
+		} as unknown as VcsGitRepo);
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const notifications: NotifyCall[] = [];
+		const ctx = createContext({
+			selectResults: ["3. Review a specific commit", "abc1234 Fix review command"],
+			onNotify: call => notifications.push(call),
+		});
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeUndefined();
+		expect(showSpy).not.toHaveBeenCalled();
+		expect(notifications).toEqual([{ message: "Cannot resolve commit abc1234", type: "error" }]);
+	});
+
+	it("pins large merge-commit review to a first-parent show of the resolved SHA", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-merge-"));
+		try {
+			await $`git init -q -b main`.cwd(dir).quiet();
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			// Hermetic fixture: the host may set commit.gpgsign globally, and a
+			// locked gpg agent would hang git commit.
+			await $`git config commit.gpgsign false`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -q -m init`.cwd(dir).quiet();
+
+			// Feature branch adds 25 files: the merge commit's first-parent
+			// patch exceeds MAX_FILES_FOR_INLINE_DIFF, forcing the large-diff
+			// path where the reviewer instruction names the exact show command.
+			await $`git checkout -q -b feature`.cwd(dir).quiet();
+			for (let idx = 0; idx < 25; idx++) {
+				await fs.writeFile(path.join(dir, `feature-${idx}.ts`), `export const value${idx} = ${idx};\n`);
+				await $`git add feature-${idx}.ts`.cwd(dir).quiet();
+			}
+			await $`git commit -q -m feature-files`.cwd(dir).quiet();
+			await $`git checkout -q main`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await $`git commit -q -am main-advance`.cwd(dir).quiet();
+			await $`git merge -q --no-ff -m merge-commit feature`.cwd(dir).quiet();
+			const mergeSha = (await $`git rev-parse HEAD`.cwd(dir).quiet().text()).trim();
+
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				sessionCwd: dir,
+				selectResults: ["3. Review a specific commit", `${mergeSha.slice(0, 7)} merge-commit`],
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeDefined();
+			const promptText = result!;
+			expect(promptText).toContain(`Reviewing commit \`${mergeSha}\``);
+			// The reviewer instruction must match the first-parent patch the
+			// inline path would have shown: a plain `git show` on a merge
+			// commit returns an empty/combined patch and loses content.
+			expect(promptText).toContain(`git show --first-parent ${mergeSha} -- <path>`);
+			expect(promptText).toContain("Diff Previews");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
+		const ctx = createContext({ hasUI: false });
 
 		const result = await command.execute(["focus", "auth"], ctx);
 
-		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("focus auth");
+		expect(promptText).toContain("skill://code-review");
+	});
+
+	it("pins branch review to the SHAs resolved at selection time", async () => {
+		const dir = await createTempDir();
+		const mainShaBefore = "b".repeat(40);
+		const featureShaBefore = "c".repeat(40);
+		// Diverged history: the merge base differs from the base branch tip.
+		const mergeBaseSha = "m".repeat(40);
+		const featureShaAfter = "e".repeat(40);
+		const refs = new Map([
+			["main", mainShaBefore],
+			["feature", featureShaBefore],
+		]);
+		const mergeBaseSpy = vi.fn(async () => {
+			// Branch tips move after the command resolved both SHAs but before
+			// diffing: acquisition must still use the resolved pre-move SHAs.
+			refs.set("main", "d".repeat(40));
+			refs.set("feature", featureShaAfter);
+			return mergeBaseSha;
+		});
+		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
+		const repository = {
+			info: () => ({ repoRoot: dir }),
+			resolveRef: async (name: string) => refs.get(name) ?? null,
+			currentBranch: async () => "feature",
+			mergeBase: mergeBaseSpy,
+			diffText: diffSpy,
+			listBranches: async () => ["main", "feature"],
+		} as unknown as VcsGitRepo;
+		spyOn(vcs, "git").mockReturnValue(repository);
+		spyOn(vcs, "requireGit").mockReturnValue(repository);
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const state = { sessionId: "review-session", cwd: dir };
+		const ctx = createContext({
+			selectResults: ["1. Review against a base branch (PR Style)", "main"],
+			sessionState: state,
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		const promptText = result!;
+		expect(mergeBaseSpy).toHaveBeenCalledWith(mainShaBefore, featureShaBefore);
+		expect(diffSpy).toHaveBeenCalledWith({ base: mergeBaseSha, head: featureShaBefore });
+		expect(promptText).toContain(`Comparison base (merge base): ${mergeBaseSha}`);
+		expect(promptText).toContain(`(tip ${mainShaBefore})`);
+		expect(promptText).toContain(featureShaBefore);
+		expect(promptText).not.toContain(featureShaAfter);
+	});
+
+	it("limits branch review to committed changes, excluding staged and unstaged edits", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-live-"));
+		try {
+			await $`git init -q -b main`.cwd(dir).quiet();
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			// Hermetic fixtures: the host may set commit.gpgsign globally, and a
+			// locked gpg agent would hang git commit.
+			await $`git config commit.gpgsign false`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -q -m init`.cwd(dir).quiet();
+			await $`git checkout -q -b feature`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "committed.ts"), "export const value = 1;\n");
+			await $`git add committed.ts`.cwd(dir).quiet();
+			await $`git commit -q -m feature-change`.cwd(dir).quiet();
+
+			// Live working-tree edits unrelated to the committed review scope.
+			await fs.writeFile(path.join(dir, "staged.ts"), "export const staged = true;\n");
+			await $`git add staged.ts`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "committed.ts"), "export const value = 2;\n");
+
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const result = await command.execute(
+				[],
+				createContext({
+					sessionCwd: dir,
+					selectResults: ["1. Review against a base branch (PR Style)", "main"],
+				}),
+			);
+
+			expect(result).toBeDefined();
+			expect(result!).toContain("committed.ts");
+			expect(result!).not.toContain("staged.ts");
+			expect(result!).toContain("staged and unstaged changes are excluded");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("refuses to dispatch when the session changes during the scope picker", async () => {
+		const dir = await createTempDir();
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		try {
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const state = { sessionId: "session-1", cwd: dir };
+			const notifications: NotifyCall[] = [];
+			const ctx = createContext({
+				selectedMode: "2. Review uncommitted changes",
+				sessionState: state,
+				onSelectCall: () => {
+					state.sessionId = "session-2";
+				},
+				onNotify: call => notifications.push(call),
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeUndefined();
+			expect(jjDiffSpy).toHaveBeenCalledTimes(1);
+			expect(notifications.some(call => call.type === "warning")).toBe(true);
+		} finally {
+			jjRepoSpy.mockRestore();
+			jjDiffSpy.mockRestore();
+		}
+	});
+
+	it("refuses to dispatch when the working directory changes during the scope picker", async () => {
+		const dir = await createTempDir();
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		try {
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const state = { sessionId: "session-1", cwd: dir };
+			const notifications: NotifyCall[] = [];
+			const ctx = createContext({
+				selectedMode: "2. Review uncommitted changes",
+				sessionState: state,
+				onSelectCall: () => {
+					state.cwd = path.join(dir, "elsewhere");
+				},
+				onNotify: call => notifications.push(call),
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeUndefined();
+			expect(jjDiffSpy).toHaveBeenCalledTimes(1);
+			expect(notifications.some(call => call.type === "warning")).toBe(true);
+		} finally {
+			jjRepoSpy.mockRestore();
+			jjDiffSpy.mockRestore();
+		}
 	});
 });

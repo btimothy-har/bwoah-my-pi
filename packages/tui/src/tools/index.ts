@@ -19,6 +19,7 @@ import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
 import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
+import { reviewFindingsToolRenderer } from "./review-findings";
 import { resolveRenderer } from "./resolve";
 import { taskToolRenderer } from "./task";
 import { thinkToolRenderer } from "./think";
@@ -50,6 +51,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	// through the `resolve` entry. Both devices carry the same ResolveDetails.
 	resolve: resolveRenderer,
 	reject: resolveRenderer,
+	review_findings: reviewFindingsToolRenderer,
 	retain: retainToolRenderer,
 	recall: recallToolRenderer,
 	reflect: reflectToolRenderer,
