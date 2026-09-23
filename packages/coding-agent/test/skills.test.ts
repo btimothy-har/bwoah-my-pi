@@ -516,9 +516,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		try {
 			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS });
-			expect(skills).toHaveLength(1);
-			expect(skills[0]!.name).toBe("code-review");
-			expect(skills[0]!._source?.provider).toBe("omp-builtin");
+			expect(skills.map(skill => skill.name).sort()).toEqual(["code-review", "pull-request"]);
+			expect(skills.every(skill => skill._source?.provider === "omp-builtin")).toBe(true);
 		} finally {
 			homedirSpy.mockRestore();
 			setAgentDir(originalAgentDir);
