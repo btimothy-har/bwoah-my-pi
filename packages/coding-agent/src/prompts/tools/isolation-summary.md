@@ -79,3 +79,9 @@ Nested repository patches (not applied):
 {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}
 {{/if}}
 {{/when}}
+{{#when kind "==" "discarded"}}
+Isolation: ran in a discarded worktree; file changes were not kept. The yielded result is the deliverable.
+{{/when}}
+{{#when kind "==" "unavailable"}}
+Isolation: unavailable ({{error}}); this agent ran in the parent checkout and its file changes were NOT discarded.
+{{/when}}

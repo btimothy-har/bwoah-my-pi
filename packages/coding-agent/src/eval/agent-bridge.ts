@@ -182,7 +182,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		Object.hasOwn(parsed, "isolated") || Object.hasOwn(parsed, "apply") || Object.hasOwn(parsed, "merge")
 			? {
 					...(parsed.isolated !== undefined ? { requested: parsed.isolated } : {}),
-					...(parsed.merge === false ? { merge: "patch" } : {}),
+					...(parsed.merge !== undefined
+						? { merge: parsed.merge ? options.session.settings.get("task.isolation.merge") : "patch" }
+						: {}),
 					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
 				}
 			: undefined;

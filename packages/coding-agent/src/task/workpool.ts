@@ -10,6 +10,7 @@ import { isIrcEnabled } from "../tools/hub";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { runSubagentFollowUpTurn } from "./executor";
 import {
+	buildStructuredSubagentRecoveryHint,
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
 	runStructuredSubagent,
@@ -130,7 +131,9 @@ export class WorkPool {
 		this.policy = options.policy;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
-		this.freshAgents = session.settings.get("eval.workpool.freshAgents");
+		this.freshAgents =
+			session.settings.get("eval.workpool.freshAgents") ||
+			(options.policy.isIsolated && !options.policy.discardChanges);
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		}
@@ -385,14 +388,31 @@ export class WorkPool {
 							outputSchema,
 							schemaMode: "strict",
 							workPoolYieldItems,
-							keepAlive: true,
+							keepAlive: !(this.freshAgents && this.policy.isIsolated),
 							retainArtifacts: true,
 							shareEvalSession: false,
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,
 						});
-						result = execution.result;
+						const mergeFailed =
+							execution.changesApplied === false || execution.mergeSummary.includes("<system-notification>");
+						const output = execution.result.output + execution.mergeSummary;
+						if (mergeFailed) {
+							const recoveryHint = await buildStructuredSubagentRecoveryHint(
+								execution.result,
+								execution.artifactsDir,
+							);
+							result = {
+								...execution.result,
+								output: output + recoveryHint,
+								error:
+									(execution.mergeSummary.replace(/<\/?system-notification>/g, "").trim() ||
+										"Isolated changes were not applied.") + recoveryHint,
+							};
+						} else {
+							result = { ...execution.result, output };
+						}
 					} else {
 						result = await runSubagentFollowUpTurn({
 							id: agent.id,

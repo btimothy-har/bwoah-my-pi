@@ -25,8 +25,11 @@ Project-wide validation is the main agent's job, run once after all subagents la
 
 {{#if worktree}}
 # Working Tree
-You are working in an isolated working tree at `{{worktree}}` for this sub-task.
-You NEVER modify files outside this tree or in the original repository.
+You are working in an isolated copy of the repository at `{{worktree}}`{{#if parentRepoRoot}} (original checkout: `{{parentRepoRoot}}`){{/if}} for this sub-task.
+You NEVER modify files outside this tree or in the original repository; a path under the original checkout refers to the same file inside this copy.
+{{#if discardChanges}}
+File changes in this copy are discarded when you finish; your yielded result is the only deliverable. Report file paths relative to the repository root, never as absolute paths into this copy.
+{{/if}}
 {{/if}}
 
 {{#if ircSelfId}}

@@ -1,3 +1,4 @@
+import { $ } from "bun";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -28,6 +29,7 @@ const AGENT: AgentDefinition = {
 	description: "Test worker",
 	systemPrompt: "Do the assigned work.",
 	source: "bundled",
+	isolation: "apply",
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
@@ -215,6 +217,60 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
+	it("isolates discovered agents by default but applies only when their frontmatter opts in", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-policy-"));
+		try {
+			await $`git init -q ${repo}`.quiet();
+			const original = { ...AGENT, name: "reviewer", isolation: undefined };
+			const applying = { ...AGENT, name: "m1", isolation: "apply" as const };
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [original, applying],
+				projectAgentsDir: null,
+			});
+			const enabled = session({ cwd: repo, isolationEnabled: true });
+			const discarded = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
+			expect(discarded).toMatchObject({ isIsolated: true, discardChanges: true, applyChanges: false });
+			const retained = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "m1" }));
+			expect(retained).toMatchObject({ isIsolated: true, discardChanges: false, applyChanges: true });
+			const direct = await resolveEffectiveSubagentPolicy(
+				request({ session: enabled, agent: "m1", isolation: { requested: false } }),
+			);
+			expect(direct.isIsolated).toBe(false);
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({ session: enabled, agent: "reviewer", isolation: { requested: false } }),
+				),
+			).rejects.toThrow("discards its file changes");
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({ session: enabled, agent: "reviewer", isolation: { apply: true } }),
+				),
+			).rejects.toThrow("discards its file changes");
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("reports unavailable default isolation instead of losing agents outside Git", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nongit-agent-"));
+		try {
+			const enabled = session({ cwd, isolationEnabled: true });
+			const fallback = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
+			expect(fallback.isIsolated).toBe(false);
+			expect(fallback.isolationUnavailable).toContain("Git repository not found");
+			await expect(
+				runStructuredSubagent(request({ session: enabled, agent: "reviewer", isolation: { requested: true } })),
+			).rejects.toThrow("Git repository not found for isolated task execution");
+			const disabled = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ cwd, isolationEnabled: false }), agent: "reviewer" }),
+			);
+			expect(disabled.isolationUnavailable).toBe("task.isolation.enabled is false");
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
@@ -750,6 +806,25 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("returns a discard agent's report without retaining an unapplied patch", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp", baseline: null });
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue({
+			...result(),
+			agent: "reviewer",
+			isolated: true,
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ agent: "reviewer", session: session({ isolationEnabled: true }), isolation: { requested: true } }),
+		);
+
+		expect(settled.mergeSummary).toContain("Isolation: ran in a discarded worktree; file changes were not kept");
+		expect(settled.changesApplied).toBeNull();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+		await expect(fs.stat(settled.artifactsDir)).rejects.toThrow();
 	});
 
 	it("retains isolated failure artifacts needed for recovery", async () => {

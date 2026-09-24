@@ -151,6 +151,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "PreserveBranchFailure",
 			mergeMode: "branch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
@@ -237,6 +238,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "RescueBranchCommits",
 			mergeMode: "branch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
@@ -294,6 +296,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "DeferredCleanup",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir: "/artifacts",
 			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
 		});
@@ -353,6 +356,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "DeferredSuccess",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
@@ -446,6 +450,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "RetainedIsolation",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
 		});
@@ -462,6 +467,70 @@ describe("runIsolatedSubprocess", () => {
 		expect(await Bun.file(patchPath).text()).toBe(finalPatch);
 		expect(commitSpy).toHaveBeenCalledWith(isolationDir, baseline, "RetainedIsolation", undefined, undefined);
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("discards kept-alive follow-up changes when its lifecycle releases", async () => {
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-discard-retained-"));
+		tempRoots.push(artifactsDir);
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: "/repo/isolated",
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		const liveSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: liveSession,
+				sessionFile: "/tmp/DiscardRetained.jsonl",
+				status: "running",
+			});
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: liveSession,
+				aborted: false,
+				keepAlive: true,
+				isolated: true,
+				agentIdleTtlMs: 0,
+				reviveSession: async () => liveSession,
+				onRelease: options.onRelease,
+			});
+			return result({ id: options.id });
+		});
+		const captureSpy = vi.spyOn(worktreeModule, "captureDeltaPatch");
+		const commitSpy = vi.spyOn(worktreeModule, "commitToBranch");
+		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+		const outcome = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: "/repo",
+				agent: { name: "reviewer", description: "Review", systemPrompt: "Review", source: "bundled" },
+				task: "Review",
+				index: 0,
+				id: "DiscardRetained",
+				keepAlive: true,
+			},
+			context: { repoRoot: "/repo", baseline: null },
+			preferredBackend: undefined,
+			agentId: "DiscardRetained",
+			mergeMode: "branch",
+			discard: true,
+			artifactsDir,
+			buildFailureResult: error => result({ id: "DiscardRetained", exitCode: 1, error: String(error) }),
+		});
+		expect(outcome.exitCode).toBe(0);
+		expect(cleanupSpy).not.toHaveBeenCalled();
+		await AgentLifecycleManager.global().release("DiscardRetained");
+		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+		expect(captureSpy).not.toHaveBeenCalled();
+		expect(commitSpy).not.toHaveBeenCalled();
+		expect(await Bun.file(path.join(artifactsDir, "DiscardRetained.patch")).exists()).toBe(false);
 	});
 
 	it("captures a one-shot isolated patch before cleanup when its lifecycle releases early", async () => {
@@ -539,6 +608,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "OneShotIsolation",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
 		});
@@ -611,6 +681,7 @@ describe("runIsolatedSubprocess", () => {
 				preferredBackend: undefined,
 				agentId: "UsageAccounting",
 				mergeMode: "patch",
+				discard: false,
 				artifactsDir: "/artifacts",
 				buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
 				onSubprocessResult,
@@ -686,6 +757,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "NestedPersist",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
@@ -744,6 +816,7 @@ describe("runIsolatedSubprocess", () => {
 			preferredBackend: undefined,
 			agentId: "RetainOnWriteFailure",
 			mergeMode: "patch",
+			discard: false,
 			artifactsDir,
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
@@ -753,6 +826,43 @@ describe("runIsolatedSubprocess", () => {
 		expect(outcome.error).not.toContain("mount metadata");
 		expect(outcome.nestedPatchPaths).toBeUndefined();
 		expect(cleanupSpy).not.toHaveBeenCalled();
+	});
+
+	it("discards a successful agent's file changes without a patch or branch", async () => {
+		const { repoRoot } = await seedFooRepo("old\n");
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-discard-artifacts-"));
+		tempRoots.push(artifactsDir);
+		let cloneDir = "";
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			cloneDir = options.worktree!;
+			await Bun.write(path.join(cloneDir, "probe.txt"), "probe\n");
+			return result({ id: "DiscardProbe", agent: "reviewer" });
+		});
+
+		const outcome = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: repoRoot,
+				agent: { name: "reviewer", description: "Reviewer", systemPrompt: "Review", source: "bundled" },
+				task: "Probe the patch",
+				index: 0,
+				id: "DiscardProbe",
+				keepAlive: false,
+			},
+			context: { repoRoot, baseline: null },
+			preferredBackend: natives.IsoBackendKind.Rcopy,
+			agentId: "DiscardProbe",
+			mergeMode: "patch",
+			discard: true,
+			artifactsDir,
+			buildFailureResult: err => result({ id: "DiscardProbe", exitCode: 1, error: String(err) }),
+		});
+
+		expect(outcome).toMatchObject({ exitCode: 0, isolated: true });
+		expect(outcome.patchPath).toBeUndefined();
+		expect(outcome.branchName).toBeUndefined();
+		expect(await Bun.file(path.join(repoRoot, "probe.txt")).exists()).toBe(false);
+		expect(await Bun.file(path.join(artifactsDir, "DiscardProbe.patch")).exists()).toBe(false);
+		expect(await Bun.file(path.join(cloneDir, "probe.txt")).exists()).toBe(false);
 	});
 
 	it("removes partial nested patches when a later write fails", async () => {

@@ -72,6 +72,7 @@ export async function prepareSecurityRemediationWorkspace(
 	const createIsolation = dependencies.createIsolation ?? ensureIsolation;
 	const disposeIsolation = dependencies.cleanupIsolation ?? cleanupIsolation;
 	const context = await prepareContext(request.cwd);
+	if (!context.baseline) throw new Error("Security remediation requires a captured isolation baseline.");
 	assertSecurityRemediationBaselineClean(context.baseline);
 	const id = request.isolationId?.trim() || dependencies.createId?.() || createRemediationId();
 	const handle = await createIsolation(context.repoRoot, id, request.preferredBackend);

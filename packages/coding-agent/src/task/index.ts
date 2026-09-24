@@ -145,6 +145,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
+		appliesChanges: options.isolationEnabled && agent.isolation === "apply",
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -1083,13 +1084,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
-			// Isolated runs are parked without a reviver once the run ends
-			// (`finalizeSubagentLifecycle`), so "message it" would point the
-			// caller at a follow-up path that no longer exists. The template says
-			// nothing about the worktree itself: the runner keeps it when captured
-			// changes could not be written, and names that path in the result.
-			const isolated = spawnParams.isolated === true;
+		const buildFollowUpHint = async (aborted: boolean, isolated: boolean): Promise<string> => {
 			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
@@ -1237,7 +1232,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true, singleResult?.isolated === true)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1254,7 +1249,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();

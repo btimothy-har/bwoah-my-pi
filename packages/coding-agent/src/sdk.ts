@@ -606,6 +606,8 @@ export interface CreateAgentSessionOptions {
 	 * never persisted, never a tool argument. Non-isolated sessions omit it.
 	 */
 	isolatedTaskRoot?: string;
+	/** Parent session's canonical checkout key, so an isolated child resolves the same workspace.related entry. */
+	parentWorkspaceKey?: string;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -1867,6 +1869,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
+			resolveRelatedWorkspace: () => resolveSessionRelatedWorkspace(),
 			enableLsp,
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,
@@ -3223,7 +3226,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// state in so Git discovery runs once per request.
 		const resolveSessionRelatedWorkspace = async (state?: WorkspacePolicyState): Promise<RelatedWorkspace> => {
 			const relatedCwd = sessionManager.getCwd();
-			const resolved = state ?? (await resolveWorkspacePolicyState(relatedCwd, options.isolatedTaskRoot));
+			const resolved =
+				state ??
+				(await resolveWorkspacePolicyState(relatedCwd, options.isolatedTaskRoot, options.parentWorkspaceKey));
 			return resolveRelatedWorkspace({
 				state: resolved,
 				cwd: relatedCwd,
@@ -3662,7 +3667,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// as a per-user-request control, so open-weight providers keep their
 				// tool-schema prefix cache (#7404).
 				const rawCwd = sessionManager.getCwd();
-				const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+				const workspaceState = await resolveWorkspacePolicyState(
+					rawCwd,
+					options.isolatedTaskRoot,
+					options.parentWorkspaceKey,
+				);
 				const related = await resolveSessionRelatedWorkspace(workspaceState);
 				const workspaceRoots = effectiveWorkspaceDirectories(
 					rawCwd,
@@ -4441,7 +4450,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 						const rawCwd = sessionManager.getCwd();
-						const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+						const workspaceState = await resolveWorkspacePolicyState(
+							rawCwd,
+							options.isolatedTaskRoot,
+							options.parentWorkspaceKey,
+						);
 						const related = await resolveSessionRelatedWorkspace(workspaceState);
 						const workspaceRoots = effectiveWorkspaceDirectories(
 							rawCwd,

@@ -18,6 +18,7 @@
 - Changed fork builds to skip the upstream release check at startup, and `omp update` now refuses app updates on `+bwoah` builds — pointing at the fork installer or source checkout instead of replacing the install with upstream artifacts ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed the per-request date/cwd reminder to date-only (`date-reminder`); the current working directory now rides in the workspace-policy reminder (`cwd-workspace-reminder`) ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed `/wt` to bind worktrees for execution only: the canonical session home, session id, transcript, and artifacts stay in place, and `/move` remains the session-relocation command. `worktree.cleanSource` now resets the canonical home after binding instead of a relocated source checkout ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Changed Bwoah My Pi subagents to use isolated clones by default when task isolation is enabled: `task` and `sonic` keep their changes, while reviewers and other agents return only their reports and discard file edits; related reference directories remain available in the clone ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
 
 ### Fixed

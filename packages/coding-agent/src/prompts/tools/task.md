@@ -36,9 +36,9 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
-  - `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
+  - `isolated`: Every spawn runs in its own isolated worktree by default. Agents marked `isolation: apply` below have their changes applied to the parent checkout on success; pass `false` to run one directly in the parent checkout instead. Other agents discard file changes; their yielded result is the deliverable. `isolated: false` is rejected for them.
 {{else}}
-  - `isolated`: Run in a dedicated worktree; changes are retained as patch or branch artifacts without modifying the parent checkout.
+  - `isolated`: Every spawn runs in its own isolated worktree by default. Agents marked `isolation: apply` below retain patch or branch artifacts without modifying the parent checkout; pass `false` to run one directly in the parent checkout instead. Other agents discard file changes; their yielded result is the deliverable. `isolated: false` is rejected for them.
 {{/if}}
 {{/if}}
 {{else}}
@@ -55,9 +55,9 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
-- `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
+- `isolated`: Every spawn runs in its own isolated worktree by default. Agents marked `isolation: apply` below have their changes applied to the parent checkout on success; pass `false` to run one directly in the parent checkout instead. Other agents discard file changes; their yielded result is the deliverable. `isolated: false` is rejected for them.
 {{else}}
-- `isolated`: Run in a dedicated worktree; changes are retained as patch or branch artifacts without modifying the parent checkout.
+- `isolated`: Every spawn runs in its own isolated worktree by default. Agents marked `isolation: apply` below retain patch or branch artifacts without modifying the parent checkout; pass `false` to run one directly in the parent checkout instead. Other agents discard file changes; their yielded result is the deliverable. `isolated: false` is rejected for them.
 {{/if}}
 {{/if}}
 {{/if}}
@@ -88,7 +88,7 @@ Pick the most specific agent. Omit `agent` only when the spawn-policy default is
 Agents named `m<N>` are models the user tagged in this conversation (`<model agent="m<N>" name="…"/>` in their message): the general-purpose task agent pinned to that model. Spawn one only when the user's request names it; never substitute it for a specialist on your own.
 {{/if}}
 {{#list agents join="\n"}}
-### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
+### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if appliesChanges}} (isolation: apply){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
 {{description}}
 {{#if readOnly}}Use ONLY for investigation; do edits yourself or assign to a writing agent.{{/if}}
 {{/list}}

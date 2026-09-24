@@ -238,6 +238,9 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		...scanSettings.get("task.agentPrewalk"),
 		"security-reviewer": "off",
 	});
+	// Ref-diff scans already execute in their own detached worktree (below), so
+	// scan reviewers must not be re-cloned per spawn.
+	scanSettings.override("task.isolation.enabled", false);
 	const providerSessionId = `security:${input.scanId}`;
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,

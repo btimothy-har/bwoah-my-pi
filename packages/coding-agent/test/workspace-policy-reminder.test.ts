@@ -118,6 +118,12 @@ describe("workspace policy resolver", () => {
 		await initRepoAt(isolated);
 
 		expect(await resolveWorkspacePolicyState(isolated, isolated)).toEqual({ kind: "isolated", root: isolated });
+		const primary = await uniqueDir("isolated-parent");
+		expect(await resolveWorkspacePolicyState(isolated, isolated, primary)).toEqual({
+			kind: "isolated",
+			root: isolated,
+			primaryRoot: primary,
+		});
 
 		// Same independent repository without the trusted context is an ordinary primary checkout.
 		expect(await resolveWorkspacePolicyState(isolated)).toEqual({ kind: "primary", root: isolated });

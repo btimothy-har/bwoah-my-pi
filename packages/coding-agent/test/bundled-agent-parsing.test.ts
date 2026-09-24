@@ -7,7 +7,7 @@ import {
 	resolveModelOverride,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
@@ -18,6 +18,24 @@ describe("bundled agent parsing", () => {
 		expect(task).toBeDefined();
 		expect(task?.model).toEqual(["@task"]);
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
+	});
+
+	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {
+		expect(getBundledAgent("task")?.isolation).toBe("apply");
+		expect(getBundledAgent("sonic")?.isolation).toBe("apply");
+		expect(getBundledAgent("reviewer")?.isolation).toBeUndefined();
+		for (const [value, expected] of [
+			["apply", "apply"],
+			["discard", "discard"],
+			["typo", undefined],
+		] as const) {
+			const agent = parseAgent(
+				"custom.md",
+				`---\nname: custom\ndescription: Custom agent\nisolation: ${value}\n---\nReview the assignment.`,
+				"user",
+			);
+			expect(agent.isolation).toBe(expected);
+		}
 	});
 
 	it("accepts security-reviewer findings with optional remediation metadata", () => {

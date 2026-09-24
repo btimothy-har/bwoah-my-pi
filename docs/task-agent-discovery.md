@@ -125,7 +125,7 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 `EMBEDDED_AGENT_DEFS` defines:
 
 - `scout`, `reviewer`, and `security-reviewer` from prompt files
-- `task` and `sonic` from the shared `task.md` body plus injected frontmatter; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
+- `task` and `sonic` from the shared `task.md` body plus injected frontmatter, including `isolation: apply`; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
 
 Loading path:
 
@@ -238,6 +238,10 @@ Runtime output schema precedence is:
 3. parent session `outputSchema`
 
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
+
+When `task.isolation.enabled` is true, each task/eval spawn defaults to an isolated clone. Agent frontmatter `isolation: apply` captures changes and follows `task.isolation.apply` and `task.isolation.merge`; omitted or `isolation: discard` skips diff capture and deletes the clone at completion. The bundled `task` and `sonic` agents declare `apply`; user-tagged model agents inherit `task`'s declaration. Project/user agents of the same name override bundled ones. An `apply` agent may pass `isolated: false` to work directly in the parent checkout; a discard agent cannot opt out or request apply/merge. With isolation disabled, in plan mode, or outside Git, the child runs without a clone; discard agents get an explicit unavailable notice rather than a promise that their edits vanish. Isolation is not a filesystem or network sandbox: absolute paths and external systems remain accessible.
+
+Isolated children resolve the parent's `workspace.related` entry as read-only reference material, including shared context files. They do not inherit session-added `/add-dir` roots, which may be writable and would fall outside change capture.
 
 The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and warns against offloading reasoning to `scout`/`sonic`.
 

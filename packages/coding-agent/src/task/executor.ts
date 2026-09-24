@@ -409,6 +409,12 @@ export interface ExecutorOptions {
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
+	/** Isolated child whose file changes are discarded on completion. */
+	discardChanges?: boolean;
+	/** Checkout root used to create the isolation clone. */
+	parentRepoRoot?: string;
+	/** Parent session's canonical checkout key, so an isolated child resolves the same workspace.related entry. */
+	parentWorkspaceKey?: string;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -3717,6 +3723,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				isolatedTaskRoot: worktree,
+				parentWorkspaceKey: worktree !== undefined ? options.parentWorkspaceKey : undefined,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,
@@ -3761,6 +3768,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
+						discardChanges: options.discardChanges === true,
+						parentRepoRoot: options.parentRepoRoot ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						// Read the live item set through the registry instead of capturing
