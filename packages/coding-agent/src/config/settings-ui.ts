@@ -1,5 +1,19 @@
+import * as fs from "node:fs/promises";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import {
+	SETTING_TABS,
+	type RelatedPathResolution,
+	type SettingsDisplayEntry,
+	type SettingsHost,
+} from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import {
+	directoryIsEnterable,
+	isRecord,
+	normalizePathForComparison,
+	relativePathWithinNormalizedRoot,
+	resolveEquivalentPath,
+} from "@oh-my-pi/pi-utils";
 import {
 	normalizeProviderMaxInFlightRequests,
 	Settings,
@@ -15,6 +29,9 @@ import {
 	isCredential,
 	type SettingPath,
 } from "./settings-schema";
+import { normalizeRelatedWorkspaceMap, relatedWorkspaceKey } from "../session/related-workspace";
+import { normalizeWorkspaceDirectory } from "../session/session-workspace";
+import { resolveWorkspacePolicyState } from "../session/workspace-policy";
 
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
@@ -114,5 +131,85 @@ export function createSettingsHost(): SettingsHost {
 		set: (path, value) => settings.set(path as SettingPath, value as never),
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
+		relatedWorkspaces: {
+			reload: () => settings.reloadFromDisk(),
+			readGlobal: () => {
+				const raw = settings.getGlobalSettings();
+				return normalizeRelatedWorkspaceMap(isRecord(raw.workspace) ? raw.workspace.related : undefined);
+			},
+			write: map => {
+				const raw = settings.getGlobalSettings();
+				const rawRelated = isRecord(raw.workspace) && isRecord(raw.workspace.related) ? raw.workspace.related : {};
+				const next = Object.fromEntries(
+					Object.entries(map).map(([key, entry]) => [
+						key,
+						{
+							...(isRecord(rawRelated[key]) ? rawRelated[key] : {}),
+							directories: entry.directories,
+							contextFiles: entry.contextFiles,
+						},
+					]),
+				);
+				settings.set("workspace.related", next);
+			},
+			resolveCheckout: async (input, existingKeys): Promise<RelatedPathResolution> => {
+				const abs = normalizeWorkspaceDirectory(input.trim());
+				if (!(await directoryIsEnterable(abs))) return { ok: false, error: "Directory not found or not readable." };
+				const key = relatedWorkspaceKey(await resolveWorkspacePolicyState(abs));
+				if (key === null) return { ok: false, error: "Not inside a Git checkout." };
+				const comparable = normalizePathForComparison(key);
+				if (
+					existingKeys.some(
+						existing => normalizePathForComparison(normalizeWorkspaceDirectory(existing)) === comparable,
+					)
+				)
+					return { ok: false, error: "This checkout is already configured." };
+				return { ok: true, path: shortenPath(key) };
+			},
+			resolvePath: async (kind, checkoutKey, input, existing): Promise<RelatedPathResolution> => {
+				const root = normalizeWorkspaceDirectory(checkoutKey);
+				let abs = normalizeWorkspaceDirectory(input.trim(), root);
+				if (kind === "directory") {
+					if (!(await directoryIsEnterable(abs)))
+						return { ok: false, error: "Directory not found or not readable." };
+					abs = resolveEquivalentPath(abs);
+					if (
+						relativePathWithinNormalizedRoot(
+							normalizePathForComparison(abs),
+							normalizePathForComparison(root),
+						) !== null
+					)
+						return { ok: false, error: "Contains the checkout itself; it would be ignored at runtime." };
+				} else {
+					try {
+						if (!(await fs.stat(abs)).isFile()) return { ok: false, error: "Not a regular file." };
+					} catch {
+						return { ok: false, error: "File not found." };
+					}
+				}
+				const comparable = normalizePathForComparison(abs);
+				if (
+					existing.some(stored => {
+						const existingAbs = normalizeWorkspaceDirectory(stored, root);
+						return (
+							normalizePathForComparison(
+								kind === "directory" ? resolveEquivalentPath(existingAbs) : existingAbs,
+							) === comparable
+						);
+					})
+				)
+					return { ok: false, error: "Already listed." };
+				return { ok: true, path: shortenPath(abs) };
+			},
+			pathAvailable: async (kind, checkoutKey, stored) => {
+				const abs = normalizeWorkspaceDirectory(stored, normalizeWorkspaceDirectory(checkoutKey));
+				if (kind === "directory") return directoryIsEnterable(abs);
+				try {
+					return (await fs.stat(abs)).isFile();
+				} catch {
+					return false;
+				}
+			},
+		},
 	};
 }

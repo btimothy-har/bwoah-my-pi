@@ -43,6 +43,7 @@ import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./compos
 import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
+import { RelatedWorkspacesSubmenu } from "./related-workspaces-submenu";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "../status-line/presets";
@@ -926,6 +927,12 @@ export class SettingsSelectorComponent implements Component {
 					currentValue: this.#formatProviderLimitsValue(currentValue),
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
 				};
+			case "relatedWorkspaces":
+				return {
+					...item,
+					currentValue: this.#formatRelatedWorkspacesValue(),
+					submenu: (_cv, done) => this.#createRelatedWorkspacesInput(done),
+				};
 
 			case "multiselect":
 				return {
@@ -1129,6 +1136,19 @@ export class SettingsSelectorComponent implements Component {
 		const entries = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b));
 		if (entries.length === 0) return "Unlimited";
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
+	}
+	#createRelatedWorkspacesInput(done: (value?: string) => void): Container {
+		return new RelatedWorkspacesSubmenu(
+			this.#context.settings.relatedWorkspaces,
+			map => this.#callbacks.onChange("workspace.related", map),
+			() => done(this.#formatRelatedWorkspacesValue()),
+			this.#context.requestRender,
+		);
+	}
+
+	#formatRelatedWorkspacesValue(): string {
+		const count = Object.keys(this.#context.settings.relatedWorkspaces.readGlobal()).length;
+		return count === 0 ? "none" : `${count} checkout${count === 1 ? "" : "s"}`;
 	}
 
 	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {

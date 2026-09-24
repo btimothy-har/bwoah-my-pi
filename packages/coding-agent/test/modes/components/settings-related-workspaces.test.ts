@@ -1,0 +1,436 @@
+/**
+ * Structured `/settings` editor for `workspace.related`.
+ *
+ * Drives `SettingsSelectorComponent` through the real `createSettingsHost`:
+ * keyboard add/edit/remove flows, canonical checkout keys for linked
+ * worktrees, inline rejection of invalid paths, global-layer isolation, and
+ * unknown-field preservation. Assertions observe only the persisted global
+ * settings layer and the rendered UI — never component internals.
+ */
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+
+const ENTER = "\n";
+const ESC = "\x1b";
+const DOWN = "\x1b[B";
+const DELETE_KEY = "\x1b[3~";
+const BACKSPACE = "\x7f";
+
+beforeAll(async () => {
+	await initTheme();
+});
+
+let geometryStub: { restore(): void } | undefined;
+
+beforeEach(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+	geometryStub = stubStdoutGeometry(120);
+});
+
+afterEach(() => {
+	resetSettingsForTest();
+	geometryStub?.restore();
+	geometryStub = undefined;
+});
+
+function stubStdoutGeometry(cols: number): { restore(): void } {
+	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+	const rows = 40;
+	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
+	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
+	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
+		if (desc) Object.defineProperty(process.stdout, key, desc);
+	};
+	return {
+		restore() {
+			restoreOne("rows", rowsDesc);
+			restoreOne("columns", colsDesc);
+		},
+	};
+}
+
+function createSelector(onChange: (path: string, value: unknown) => void): SettingsSelectorComponent {
+	return new SettingsSelectorComponent(
+		{
+			availableThinkingLevels: [],
+			thinkingLevel: undefined,
+			availableThemes: ["dark"],
+			providers: [],
+			settings: createSettingsHost(),
+			plugins: createPluginSettingsHost(process.cwd()),
+		},
+		{
+			onChange,
+			onCancel: () => {},
+		},
+	);
+}
+
+function recordChanges(): {
+	changes: Array<{ path: string; value: unknown }>;
+	onChange: (path: string, value: unknown) => void;
+} {
+	const changes: Array<{ path: string; value: unknown }> = [];
+	return { changes, onChange: (path, value) => changes.push({ path, value }) };
+}
+
+function rendered(component: SettingsSelectorComponent): string {
+	return Bun.stripANSI(component.render(120).join("\n"));
+}
+
+function typeText(component: SettingsSelectorComponent, text: string): void {
+	for (const ch of text) component.handleInput(ch);
+}
+
+/**
+ * Submissions resolve asynchronously through the real filesystem and native Git
+ * with no promise or event exposed to the test, so poll the platform clock
+ * (fake timers cannot drive real fs/VCS work).
+ */
+async function waitFor(condition: () => boolean, description: string): Promise<void> {
+	const deadline = Date.now() + 2000;
+	while (Date.now() < deadline) {
+		if (condition()) return;
+		await Bun.sleep(10);
+	}
+	throw new Error(`Timed out waiting for ${description}`);
+}
+
+interface RelatedEntrySnapshot {
+	directories?: string[];
+	contextFiles?: string[];
+	[field: string]: unknown;
+}
+
+/** Global-layer `workspace.related` only — the layer the editor reads and writes. */
+function relatedMap(): Record<string, RelatedEntrySnapshot> {
+	const raw = settings.getGlobalSettings() as unknown as {
+		workspace?: { related?: Record<string, RelatedEntrySnapshot> };
+	};
+	return raw.workspace?.related ?? {};
+}
+
+/** Filter the settings list down to the Related Directories row and open its editor. */
+async function openEditor(component: SettingsSelectorComponent): Promise<void> {
+	typeText(component, "related directories");
+	component.handleInput(ENTER);
+	await waitFor(() => rendered(component).includes("Add checkout…"), "related-directories editor to open");
+}
+
+/** Only `git init` lacks a native facade API; config and the seed commit go through the VCS natives. */
+async function gitCli(cwd: string, ...args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${stderr}`);
+	return stdout.trim();
+}
+
+async function initRepoAt(dir: string): Promise<void> {
+	await fs.mkdir(dir, { recursive: true });
+	await gitCli(dir, "init", "-q", "-b", "main");
+	const repo = vcs.git(dir);
+	if (!repo) throw new Error(`git repository not discovered at ${dir}`);
+	await repo.configSet("user.email", "test@example.com");
+	await repo.configSet("user.name", "test");
+	await Bun.write(path.join(dir, "README.md"), "seed\n");
+	await repo.stageFiles(["README.md"]);
+	await repo.commitCreate("init", {});
+}
+
+interface Fixture {
+	root: string;
+	/** Canonical Git checkout. */
+	repoA: string;
+	/** Linked worktree of `repoA`; adding it must store `repoA`. */
+	worktreeA: string;
+	/** Plain directory containing an AGENTS.md, used as a related directory. */
+	dirB: string;
+	/** Plain directory that is not a Git checkout. */
+	plainP: string;
+	/** Markdown file outside the checkout, used as a shared context file. */
+	sharedFile: string;
+}
+
+async function makeFixture(): Promise<Fixture> {
+	// Canonicalize once: on macOS mkdtemp under /var resolves to /private/var,
+	// and stored paths must match the resolver's realpath'd output. Temp roots
+	// live outside $HOME, so `shortenPath` is a no-op and stored values equal
+	// these absolute paths.
+	const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-related-settings-")));
+	const repoA = path.join(root, "repo-a");
+	await initRepoAt(repoA);
+	const repo = vcs.git(repoA);
+	if (!repo) throw new Error(`git repository not discovered at ${repoA}`);
+	await repo.createBranch("wt-branch", "HEAD", false);
+	const worktreeA = path.join(root, "repo-a-wt");
+	await repo.worktreeAdd(worktreeA, "wt-branch", { detach: false, clone: false });
+	const dirB = path.join(root, "dir-b");
+	await fs.mkdir(dirB, { recursive: true });
+	await Bun.write(path.join(dirB, "AGENTS.md"), "# B\n");
+	const plainP = path.join(root, "plain");
+	await fs.mkdir(plainP, { recursive: true });
+	const sharedFile = path.join(root, "shared.md");
+	await Bun.write(sharedFile, "# shared\n");
+	return { root, repoA, worktreeA, dirB, plainP, sharedFile };
+}
+
+describe("workspace.related structured editor", () => {
+	let fixture: Fixture | undefined;
+
+	afterEach(async () => {
+		if (fixture) await fs.rm(fixture.root, { recursive: true, force: true });
+		fixture = undefined;
+	});
+
+	it("adds a checkout by linked-worktree path, then a directory and a context file", async () => {
+		const fx = (fixture = await makeFixture());
+		const { changes, onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+		expect(rendered(comp)).toContain("Add checkout…");
+
+		// The map is empty, so "Add checkout…" is the only row.
+		comp.handleInput(ENTER);
+		typeText(comp, fx.worktreeA);
+		comp.handleInput(ENTER);
+		await waitFor(() => Object.keys(relatedMap()).length === 1, "checkout to persist");
+
+		// Stored under the canonical primary checkout, not the worktree path.
+		expect(relatedMap()).toEqual({ [fx.repoA]: { directories: [], contextFiles: [] } });
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view for the new checkout");
+
+		// Both lists are empty: the first enabled row is "Add directory…".
+		comp.handleInput(ENTER);
+		typeText(comp, fx.dirB);
+		comp.handleInput(ENTER);
+		await waitFor(() => relatedMap()[fx.repoA]?.directories?.length === 1, "directory to persist");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [fx.dirB], contextFiles: [] });
+
+		// Enabled rows are now: the stored directory, Add directory…, Add context file….
+		await waitFor(() => rendered(comp).includes("Add context file…"), "entry view after directory add");
+		comp.handleInput(DOWN);
+		comp.handleInput(DOWN);
+		comp.handleInput(ENTER);
+		typeText(comp, fx.sharedFile);
+		comp.handleInput(ENTER);
+		await waitFor(() => relatedMap()[fx.repoA]?.contextFiles?.length === 1, "context file to persist");
+		expect(relatedMap()).toEqual({ [fx.repoA]: { directories: [fx.dirB], contextFiles: [fx.sharedFile] } });
+
+		expect(changes.map(change => change.path)).toEqual([
+			"workspace.related",
+			"workspace.related",
+			"workspace.related",
+		]);
+		expect(changes.at(-1)?.value).toEqual({
+			[fx.repoA]: { directories: [fx.dirB], contextFiles: [fx.sharedFile] },
+		});
+	});
+
+	it("rejects invalid input inline and leaves the map unchanged", async () => {
+		const fx = (fixture = await makeFixture());
+		settings.set("workspace.related", { [fx.repoA]: { directories: [], contextFiles: [] } });
+		const { changes, onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+
+		// A plain directory is not a Git checkout.
+		comp.handleInput(DOWN); // checkout row → Add checkout…
+		comp.handleInput(ENTER);
+		typeText(comp, fx.plainP);
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Not inside a Git checkout."), "checkout rejection");
+		expect(Object.keys(relatedMap())).toEqual([fx.repoA]);
+		expect(changes).toEqual([]);
+		comp.handleInput(ESC);
+
+		// A nonexistent directory.
+		await waitFor(() => rendered(comp).includes("Add checkout…"), "checkouts view");
+		comp.handleInput(ENTER); // the seeded checkout row
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view");
+		comp.handleInput(ENTER); // Add directory… is the first enabled row
+		typeText(comp, path.join(fx.root, "nope"));
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Directory not found"), "missing-directory rejection");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [], contextFiles: [] });
+		comp.handleInput(ESC);
+
+		// The checkout itself would be ignored at runtime.
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view");
+		comp.handleInput(ENTER);
+		typeText(comp, fx.repoA);
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Contains the checkout"), "self-containing rejection");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [], contextFiles: [] });
+		comp.handleInput(ESC);
+
+		// A regular file is not a directory.
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view");
+		comp.handleInput(ENTER);
+		typeText(comp, path.join(fx.dirB, "AGENTS.md"));
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Directory not found"), "file-as-directory rejection");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [], contextFiles: [] });
+		comp.handleInput(ESC);
+
+		// A duplicate directory is rejected after a legitimate add.
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view");
+		comp.handleInput(ENTER);
+		typeText(comp, fx.dirB);
+		comp.handleInput(ENTER);
+		await waitFor(() => relatedMap()[fx.repoA]?.directories?.length === 1, "directory to persist");
+		expect(changes.length).toBe(1);
+
+		await waitFor(() => rendered(comp).includes(fx.dirB), "stored directory row");
+		comp.handleInput(DOWN); // stored row → Add directory…
+		comp.handleInput(ENTER);
+		typeText(comp, fx.dirB);
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Already listed."), "duplicate rejection");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [fx.dirB], contextFiles: [] });
+		expect(changes.length).toBe(1);
+	});
+
+	it("edits a stored directory in place and refuses to empty it", async () => {
+		const fx = (fixture = await makeFixture());
+		const nestedDir = path.join(fx.dirB, "nested");
+		await fs.mkdir(nestedDir, { recursive: true });
+		settings.set("workspace.related", { [fx.repoA]: { directories: [fx.dirB], contextFiles: [] } });
+		const { changes, onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+		comp.handleInput(ENTER); // the seeded checkout row
+		await waitFor(() => rendered(comp).includes(fx.dirB), "entry view");
+
+		// The stored directory is the first enabled row; Enter edits it with the
+		// value seeded, so appending retargets the path.
+		comp.handleInput(ENTER);
+		typeText(comp, path.sep + "nested");
+		comp.handleInput(ENTER);
+		await waitFor(() => relatedMap()[fx.repoA]?.directories?.[0] === nestedDir, "edit to persist");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [nestedDir], contextFiles: [] });
+		expect(changes.length).toBe(1);
+
+		// Resubmitting an unchanged value closes without writing.
+		await waitFor(() => rendered(comp).includes(nestedDir), "entry view after edit");
+		comp.handleInput(ENTER);
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view after unchanged submit");
+		expect(relatedMap()[fx.repoA]?.directories).toEqual([nestedDir]);
+		expect(changes.length).toBe(1);
+
+		// Clearing the seeded value rejects instead of removing the row.
+		comp.handleInput(ENTER);
+		for (let i = 0; i < nestedDir.length; i++) comp.handleInput(BACKSPACE);
+		comp.handleInput(ENTER);
+		await waitFor(() => rendered(comp).includes("Remove the row with Delete"), "empty-edit rejection");
+		expect(relatedMap()[fx.repoA]?.directories).toEqual([nestedDir]);
+		expect(changes.length).toBe(1);
+	});
+
+	it("removes items with Delete/Backspace and a checkout after confirmation", async () => {
+		const fx = (fixture = await makeFixture());
+		settings.set("workspace.related", {
+			[fx.repoA]: { directories: [fx.dirB], contextFiles: [fx.sharedFile] },
+		});
+		const { changes, onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+		comp.handleInput(ENTER); // the seeded checkout row
+		await waitFor(() => rendered(comp).includes(fx.dirB), "entry view");
+
+		// The stored directory is the first enabled row; Delete removes it without confirmation.
+		comp.handleInput(DELETE_KEY);
+		await waitFor(() => relatedMap()[fx.repoA]?.directories?.length === 0, "directory removal");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [], contextFiles: [fx.sharedFile] });
+
+		// Enabled rows are now Add directory…, the context file, Add context file….
+		await waitFor(() => !rendered(comp).includes(fx.dirB), "entry view after directory removal");
+		comp.handleInput(DOWN); // Add directory… → context-file row
+		comp.handleInput(BACKSPACE); // filter is empty: Backspace removes the selected row
+		await waitFor(() => relatedMap()[fx.repoA]?.contextFiles?.length === 0, "context file removal");
+		expect(relatedMap()[fx.repoA]).toEqual({ directories: [], contextFiles: [] });
+
+		// Removing a checkout asks first.
+		comp.handleInput(ESC);
+		await waitFor(() => rendered(comp).includes("Add checkout…"), "checkouts view");
+		comp.handleInput(DELETE_KEY);
+		await waitFor(() => rendered(comp).includes("Remove"), "removal confirmation");
+		comp.handleInput(DOWN); // Keep → Remove
+		comp.handleInput(ENTER);
+		await waitFor(() => Object.keys(relatedMap()).length === 0, "checkout removal");
+		expect(relatedMap()).toEqual({});
+
+		// Esc closes the editor; the row summary reflects the emptied map.
+		comp.handleInput(ESC);
+		const summaryLine = rendered(comp)
+			.split("\n")
+			.find(line => line.includes("Related Directories"));
+		expect(summaryLine).toBeDefined();
+		expect(summaryLine).toContain("none");
+
+		expect(changes.map(change => change.path)).toEqual([
+			"workspace.related",
+			"workspace.related",
+			"workspace.related",
+		]);
+	});
+
+	it("reads and writes only the global layer, ignoring runtime overrides", async () => {
+		const fx = (fixture = await makeFixture());
+		settings.override("workspace.related", { "/elsewhere/proj": { directories: ["/x"] } });
+		const { changes, onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+		// The override-layer checkout is never offered for editing.
+		expect(rendered(comp)).not.toContain("/elsewhere/proj");
+
+		// Only row is "Add checkout…".
+		comp.handleInput(ENTER);
+		typeText(comp, fx.repoA);
+		comp.handleInput(ENTER);
+		await waitFor(() => Object.keys(relatedMap()).length === 1, "checkout to persist");
+
+		// The write did not copy the override-layer entry into the global file…
+		expect(Object.keys(relatedMap())).toEqual([fx.repoA]);
+		// …nor disturb the override itself.
+		expect(settings.get("workspace.related")).toHaveProperty("/elsewhere/proj");
+		expect(changes.length).toBe(1);
+	});
+
+	it("preserves unknown fields on retained entries", async () => {
+		const fx = (fixture = await makeFixture());
+		settings.set("workspace.related", { [fx.repoA]: { directories: [], note: "keep" } } as never);
+		const { onChange } = recordChanges();
+		const comp = createSelector(onChange);
+
+		await openEditor(comp);
+		comp.handleInput(ENTER); // the seeded checkout row
+		await waitFor(() => rendered(comp).includes("Add directory…"), "entry view");
+		comp.handleInput(ENTER); // Add directory…
+		typeText(comp, fx.dirB);
+		comp.handleInput(ENTER);
+		await waitFor(() => relatedMap()[fx.repoA]?.directories?.length === 1, "directory to persist");
+
+		expect(relatedMap()[fx.repoA]?.note).toBe("keep");
+		expect(relatedMap()[fx.repoA]?.directories).toEqual([fx.dirB]);
+	});
+});
