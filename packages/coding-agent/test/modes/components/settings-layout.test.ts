@@ -131,6 +131,18 @@ describe("settings layout", () => {
 		});
 	});
 
+	it("shows related directories as a structured context setting", () => {
+		const def = getSettingsForTab(createSettingsHost().entries, "context").find(
+			item => item.path === "workspace.related",
+		);
+		expect(def).toMatchObject({
+			path: "workspace.related",
+			type: "relatedWorkspaces",
+			tab: "context",
+			group: "General",
+		});
+	});
+
 	it("exposes retry fallback chains as editable JSON in the model settings", () => {
 		const def = getSettingsForTab(createSettingsHost().entries, "model").find(
 			item => item.path === "retry.fallbackChains",

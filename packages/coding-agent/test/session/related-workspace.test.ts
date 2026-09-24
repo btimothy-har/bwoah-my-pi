@@ -16,6 +16,7 @@ import {
 	effectiveWorkspaceDirectories,
 	listRelatedContextFiles,
 	loadSharedContextFiles,
+	normalizeRelatedWorkspaceMap,
 	resolveRelatedWorkspace,
 } from "@oh-my-pi/pi-coding-agent/session/related-workspace";
 import { normalizePathForComparison, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -44,6 +45,18 @@ function expectSamePath(actual: string | null, expected: string): void {
 }
 
 const EMPTY = { key: null, directories: [], contextFiles: [] };
+test("normalizes malformed related-workspace map entries without changing surviving path order", () => {
+	const raw = {
+		first: { directories: ["../a", 12, "../b"], contextFiles: ["ctx.md", null], note: "untouched" },
+		invalid: "not an entry",
+		last: { contextFiles: "not a list", directories: ["~/c"] },
+	};
+	expect(normalizeRelatedWorkspaceMap(raw)).toEqual({
+		first: { directories: ["../a", "../b"], contextFiles: ["ctx.md"] },
+		last: { directories: ["~/c"], contextFiles: [] },
+	});
+	expect(normalizeRelatedWorkspaceMap(null)).toEqual({});
+});
 
 describe("resolveRelatedWorkspace", () => {
 	test("matches a primary checkout by ~-prefixed key and resolves entries against the canonical root", async () => {

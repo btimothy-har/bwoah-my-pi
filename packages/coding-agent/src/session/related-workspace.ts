@@ -37,6 +37,24 @@ export interface RelatedWorkspace {
 	/** Shared context file paths from the map: absolute, `~` expanded; existence checked by loadSharedContextFiles. */
 	contextFiles: string[];
 }
+export type RelatedWorkspaceMap = Record<string, { directories: string[]; contextFiles: string[] }>;
+
+export function normalizeRelatedWorkspaceMap(raw: unknown): RelatedWorkspaceMap {
+	if (!isRecord(raw)) return {};
+	const result: RelatedWorkspaceMap = {};
+	for (const [key, entry] of Object.entries(raw)) {
+		if (!isRecord(entry)) continue;
+		result[key] = {
+			directories: Array.isArray(entry.directories)
+				? entry.directories.filter(value => typeof value === "string")
+				: [],
+			contextFiles: Array.isArray(entry.contextFiles)
+				? entry.contextFiles.filter(value => typeof value === "string")
+				: [],
+		};
+	}
+	return result;
+}
 
 export const EMPTY_RELATED_WORKSPACE: RelatedWorkspace = { key: null, directories: [], contextFiles: [] };
 

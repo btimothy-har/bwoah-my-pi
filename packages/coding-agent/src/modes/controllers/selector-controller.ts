@@ -651,6 +651,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
+			case "workspace.related":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply related directories: ${err}`);
+				});
+				break;
 			case "memory.backend":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);

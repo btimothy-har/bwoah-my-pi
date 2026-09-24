@@ -126,12 +126,35 @@ export interface SettingsDisplayEntry {
 	condition?: () => boolean;
 }
 
+export interface RelatedWorkspaceEntryView {
+	directories: string[];
+	contextFiles: string[];
+}
+
+export type RelatedWorkspaceMapView = Record<string, RelatedWorkspaceEntryView>;
+export type RelatedPathResolution = { ok: true; path: string } | { ok: false; error: string };
+
+export interface RelatedWorkspacesHost {
+	reload(): Promise<void>;
+	readGlobal(): RelatedWorkspaceMapView;
+	write(map: RelatedWorkspaceMapView): void;
+	resolveCheckout(input: string, existingKeys: readonly string[]): Promise<RelatedPathResolution>;
+	resolvePath(
+		kind: "directory" | "contextFile",
+		checkoutKey: string,
+		input: string,
+		existing: readonly string[],
+	): Promise<RelatedPathResolution>;
+	pathAvailable(kind: "directory" | "contextFile", checkoutKey: string, stored: string): Promise<boolean>;
+}
+
 export interface SettingsHost {
 	entries: readonly SettingsDisplayEntry[];
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
+	relatedWorkspaces: RelatedWorkspacesHost;
 }
 
 /** Primitive value displayed by a settings control. */
@@ -182,6 +205,9 @@ export interface TextInputSettingDef extends BaseSettingDef {
 export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
 }
+export interface RelatedWorkspacesSettingDef extends BaseSettingDef {
+	type: "relatedWorkspaces";
+}
 
 /** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
 export interface MultiSelectSettingDef extends BaseSettingDef {
@@ -196,6 +222,7 @@ export type SettingDef =
 	| SubmenuSettingDef
 	| TextInputSettingDef
 	| ProviderLimitsSettingDef
+	| RelatedWorkspacesSettingDef
 	| MultiSelectSettingDef;
 
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
@@ -265,9 +292,9 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	}
 
 	if (schemaType === "record") {
-		return path === "providers.maxInFlightRequests"
-			? { ...base, type: "providerLimits" }
-			: { ...base, type: "text", secret: false };
+		if (path === "providers.maxInFlightRequests") return { ...base, type: "providerLimits" };
+		if (path === "workspace.related") return { ...base, type: "relatedWorkspaces" };
+		return { ...base, type: "text", secret: false };
 	}
 
 	return null;
