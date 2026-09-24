@@ -16,6 +16,8 @@ import { type Skill, skillCapability } from "../../capability/skill";
 import type { LoadContext, LoadResult } from "../../capability/types";
 import { scanSkillsFromDir } from "../helpers";
 import codeReviewSkill from "./code-review/SKILL.md" with { type: "text" };
+import dataAnalysisSkill from "./data-analysis/SKILL.md" with { type: "text" };
+import frontendDesignSkill from "./frontend-design/SKILL.md" with { type: "text" };
 import pullRequestSkill from "./pull-request/SKILL.md" with { type: "text" };
 
 const PROVIDER_ID = "omp-builtin";
@@ -25,6 +27,8 @@ const PRIORITY = 1;
 
 const BUILTIN_SKILLS: Record<string, string> = {
 	"code-review": codeReviewSkill,
+	"data-analysis": dataAnalysisSkill,
+	"frontend-design": frontendDesignSkill,
 	"pull-request": pullRequestSkill,
 };
 

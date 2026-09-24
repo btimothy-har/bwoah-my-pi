@@ -315,6 +315,108 @@ describe("builtin-defaults rule provider", () => {
 		).toEqual([]);
 	});
 
+	it("py-no-tiny-functions matches one-return Python wrappers only on *.py", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "py-no-tiny-functions");
+		if (!rule) throw new Error("py-no-tiny-functions rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["svc/user.py"] };
+
+		const hits = [
+			"def is_empty(items):\n    return len(items) == 0\n",
+			"async def fetch(client) -> Data:\n    return await client.get()\n",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				(await manager.checkAstSnapshot(snippet, ctx)).map(m => m.name),
+				snippet,
+			).toEqual(["py-no-tiny-functions"]);
+		}
+
+		// A multi-statement body is not a tiny wrapper.
+		manager.resetBuffer();
+		expect(await manager.checkAstSnapshot("def f(x):\n    y = x + 1\n    return y\n", ctx)).toEqual([]);
+
+		// AST conditions never reach a non-py path.
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot(hits[0], { source: "tool", toolName: "write", filePaths: ["svc/user.ts"] }),
+		).toEqual([]);
+	});
+
+	it("sql-explicit-inner-join fires on bare JOIN but not on typed joins", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "sql-explicit-inner-join");
+		if (!rule) throw new Error("sql-explicit-inner-join rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["models/orders.sql"] };
+
+		manager.resetBuffer();
+		expect(manager.checkDelta("select * from a join b on a.id = b.id", ctx).map(r => r.name)).toEqual([
+			"sql-explicit-inner-join",
+		]);
+
+		manager.resetBuffer();
+		expect(
+			manager.checkDelta("FROM orders AS o\nCROSS JOIN dates AS d\nLEFT JOIN users AS u ON u.id = o.user_id", ctx),
+		).toEqual([]);
+	});
+
+	it("sql-no-null-equality fires on NULL comparisons but not on SET assignments", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "sql-no-null-equality");
+		if (!rule) throw new Error("sql-no-null-equality rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["models/orders.sql"] };
+
+		for (const snippet of ["SELECT id FROM t WHERE deleted_at = NULL", "SELECT id FROM t WHERE NULL != deleted_at"]) {
+			manager.resetBuffer();
+			expect(
+				manager.checkDelta(snippet, ctx).map(r => r.name),
+				snippet,
+			).toEqual(["sql-no-null-equality"]);
+		}
+
+		for (const snippet of [
+			"UPDATE t SET deleted_at = NULL WHERE id = 1",
+			"SELECT id FROM t WHERE deleted_at IS NULL",
+		]) {
+			manager.resetBuffer();
+			expect(manager.checkDelta(snippet, ctx), snippet).toEqual([]);
+		}
+	});
+
+	it("py-no-silent-except fires only when pass/... is the whole handler", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "py-no-silent-except");
+		if (!rule) throw new Error("py-no-silent-except rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["svc/cache.py"] };
+
+		const hits = [
+			"try:\n    cache.invalidate(key)\nexcept CacheError:\n    pass\nreturn value\n",
+			"try:\n    x()\nexcept E:\n    ...\n",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				manager.checkDelta(snippet, ctx).map(r => r.name),
+				snippet,
+			).toEqual(["py-no-silent-except"]);
+		}
+
+		// The handler does more than pass: not silent.
+		manager.resetBuffer();
+		expect(
+			manager.checkDelta("try:\n    cache.invalidate(key)\nexcept CacheError:\n    pass\n    cleanup()\n", ctx),
+		).toEqual([]);
+	});
+
 	it("is the lowest-priority rule provider so user/project rules override defaults", () => {
 		const { cap, provider } = ruleProvider();
 		const others = cap.providers.filter(p => p.id !== BUILTIN_DEFAULTS_PROVIDER_ID);
