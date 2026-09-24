@@ -8,6 +8,8 @@
  * Registered by the lowest-priority `builtin-defaults` rule provider so any
  * user/project/tool rule with the same name overrides the bundled copy.
  */
+import codeComments from "./code-comments.md" with { type: "text" };
+import commitCheckpoints from "./commit-checkpoints.md" with { type: "text" };
 import goAddCleanup from "./go-add-cleanup.md" with { type: "text" };
 import goBenchLoop from "./go-bench-loop.md" with { type: "text" };
 import goExpPromoted from "./go-exp-promoted.md" with { type: "text" };
@@ -16,6 +18,7 @@ import goJoinHostport from "./go-join-hostport.md" with { type: "text" };
 import goNewExpr from "./go-new-expr.md" with { type: "text" };
 import goRandV2 from "./go-rand-v2.md" with { type: "text" };
 import goRangeInt from "./go-range-int.md" with { type: "text" };
+import ownership from "./ownership.md" with { type: "text" };
 import pyNoBareExcept from "./py-no-bare-except.md" with { type: "text" };
 import pyNoBroadExcept from "./py-no-broad-except.md" with { type: "text" };
 import pyNoFstringLogging from "./py-no-fstring-logging.md" with { type: "text" };
@@ -60,6 +63,8 @@ export interface BuiltinRuleSource {
 
 /** All bundled default rules, ordered by name. */
 export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
+	{ name: "code-comments", content: codeComments },
+	{ name: "commit-checkpoints", content: commitCheckpoints },
 	{ name: "go-add-cleanup", content: goAddCleanup },
 	{ name: "go-bench-loop", content: goBenchLoop },
 	{ name: "go-exp-promoted", content: goExpPromoted },
@@ -68,6 +73,7 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "go-new-expr", content: goNewExpr },
 	{ name: "go-rand-v2", content: goRandV2 },
 	{ name: "go-range-int", content: goRangeInt },
+	{ name: "ownership", content: ownership },
 	{ name: "py-no-bare-except", content: pyNoBareExcept },
 	{ name: "py-no-broad-except", content: pyNoBroadExcept },
 	{ name: "py-no-fstring-logging", content: pyNoFstringLogging },

@@ -9,9 +9,11 @@ import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import {
 	BUILTIN_DEFAULTS_PROVIDER_ID,
 	compileRuleCondition,
+	MAIN_AGENT_RULE_NAME,
 	type Rule,
 	ruleCapability,
 } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
@@ -42,13 +44,24 @@ describe("builtin-defaults rule provider", () => {
 		expect(new Set(names).size).toBe(names.length);
 	});
 
-	it("parses every bundled rule as a TTSR rule (non-empty condition/astCondition and scope)", async () => {
-		const rules = await loadBuiltinRules();
+	it("parses every bundled non-always-apply rule as a TTSR rule (non-empty condition/astCondition and scope)", async () => {
+		const rules = (await loadBuiltinRules()).filter(r => r.alwaysApply !== true);
 		for (const rule of rules) {
 			const conditionCount = (rule.condition?.length ?? 0) + (rule.astCondition?.length ?? 0);
 			expect(conditionCount, `${rule.name} condition/astCondition`).toBeGreaterThan(0);
 			expect(rule.scope?.length, `${rule.name} scope`).toBeGreaterThan(0);
 		}
+	});
+
+	it("renders the always-apply rules into the prompt, keeping main-only rules out of subagents", async () => {
+		const rules = await loadBuiltinRules();
+		const alwaysApplyNames = (agentName: string) =>
+			bucketRules(rules, new TtsrManager(), { agentName })
+				.alwaysApplyRules.map(r => r.name)
+				.sort();
+		expect(alwaysApplyNames(MAIN_AGENT_RULE_NAME)).toEqual(["code-comments", "commit-checkpoints", "ownership"]);
+		// Parallel subagents sharing one checkout must never inherit checkpoint commits.
+		expect(alwaysApplyNames("task")).toEqual(["code-comments"]);
 	});
 
 	it("bundles ast-grep conditions for the redundant-clear-guard rule", async () => {
@@ -65,8 +78,8 @@ describe("builtin-defaults rule provider", () => {
 		expect(lazylock?.condition).toHaveLength(2);
 	});
 
-	it("forces every bundled rule to warn without interrupting", async () => {
-		const rules = await loadBuiltinRules();
+	it("forces every bundled TTSR rule to warn without interrupting", async () => {
+		const rules = (await loadBuiltinRules()).filter(r => r.alwaysApply !== true);
 		for (const rule of rules) {
 			expect(rule.interruptMode, rule.name).toBe("never");
 		}

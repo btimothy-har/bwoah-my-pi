@@ -521,6 +521,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 				"data-analysis",
 				"frontend-design",
 				"pull-request",
+				"python-development",
+				"sql",
 			]);
 			expect(skills.every(skill => skill._source?.provider === "omp-builtin")).toBe(true);
 		} finally {
