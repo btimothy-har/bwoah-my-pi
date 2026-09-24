@@ -55,7 +55,7 @@ describe("resolveRelatedWorkspace", () => {
 		try {
 			const related: Record<string, RelatedWorkspaceEntry> = {
 				"~/repo": {
-					directories: ["../sibling", sibling, "./missing-dir", "sub", 42 as unknown as string],
+					directories: ["../sibling", sibling, repo, "./missing-dir", "sub", 42 as unknown as string],
 					contextFiles: ["shared/ctx.md"],
 				},
 			};
@@ -63,10 +63,8 @@ describe("resolveRelatedWorkspace", () => {
 			const resolved = await resolveRelatedWorkspace({ state: { kind: "primary", root: repo }, cwd, related });
 
 			expectSamePath(resolved.key, repo);
-			// "../sibling" resolves against the canonical root (cwd is repo/sub, so
-			// cwd-relative resolution would miss the real sibling); the absolute
-			// duplicate dedupes, the missing directory and non-string entry are
-			// skipped, and the entry resolving to cwd ("sub") is excluded.
+			// Relative entries use the canonical root, not cwd; the duplicate,
+			// missing, malformed, cwd, and ancestor entries are all excluded.
 			expect(resolved.directories).toHaveLength(1);
 			expectSamePath(resolved.directories[0], sibling);
 			// Context files resolve against the canonical root without an existence check.
@@ -133,6 +131,17 @@ describe("effectiveWorkspaceDirectories", () => {
 		// and cwd: raw-string dedup would keep them, canonical comparison drops them.
 		const result = effectiveWorkspaceDirectories(cwd, [a, b], [`${b}${path.sep}.`, `${cwd}${path.sep}.`, c]);
 		expect(result).toEqual([a, b, c]);
+	});
+
+	test("excludes ancestor roots of a nested execution directory", () => {
+		const primary = mkdirp(path.join(tempDir, "primary"));
+		const worktree = mkdirp(path.join(primary, "worktree"));
+		const cwd = mkdirp(path.join(worktree, "pkg"));
+		const child = mkdirp(path.join(cwd, "vendor"));
+		const sibling = mkdirp(path.join(tempDir, "sibling"));
+
+		const result = effectiveWorkspaceDirectories(cwd, [primary, sibling], [worktree, child]);
+		expect(result).toEqual([sibling, child]);
 	});
 });
 

@@ -18,6 +18,7 @@ import {
 	isRecord,
 	logger,
 	normalizePathForComparison,
+	relativePathWithinNormalizedRoot,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils";
 import { loadCapability } from "../capability";
@@ -31,7 +32,7 @@ import type { WorkspacePolicyState } from "./workspace-policy";
 export interface RelatedWorkspace {
 	/** Realpath-normalized canonical checkout that matched a map key; null when no entry applies. */
 	key: string | null;
-	/** Enterable related directories from the map: absolute, realpath-normalized, deduped, cwd excluded. */
+	/** Enterable, normalized related directories, excluding cwd and its ancestors. */
 	directories: string[];
 	/** Shared context file paths from the map: absolute, `~` expanded; existence checked by loadSharedContextFiles. */
 	contextFiles: string[];
@@ -72,7 +73,7 @@ export function relatedWorkspaceKey(state: WorkspacePolicyState): string | null 
  * The first map key whose normalized absolute path equals the canonical
  * checkout key wins; later duplicates warn and are ignored. Directory entries
  * resolve relative paths against the matched canonical root, must be
- * enterable, and are realpath-normalized, deduped, and stripped of `cwd`.
+ * enterable, and are realpath-normalized, deduped, and excluded when they contain `cwd`.
  * Context file entries follow the same path rules without an existence check
  * (missing files warn at load time). Never throws: any failure degrades to
  * {@link EMPTY_RELATED_WORKSPACE}.
@@ -122,7 +123,8 @@ export async function resolveRelatedWorkspace(args: {
 			}
 			directory = resolveEquivalentPath(directory);
 			const comparable = normalizePathForComparison(directory);
-			if (comparable === cwdComparable || seenDirectories.has(comparable)) continue;
+			if (relativePathWithinNormalizedRoot(comparable, cwdComparable) !== null || seenDirectories.has(comparable))
+				continue;
 			seenDirectories.add(comparable);
 			directories.push(directory);
 		}
@@ -150,8 +152,8 @@ export async function resolveRelatedWorkspace(args: {
 
 /**
  * Union of session-added and map-supplied workspace directories for prompt
- * rendering: session entries first, then related entries, dropping anything
- * equal to `cwd` and deduping by realpath comparison (first occurrence wins).
+ * rendering: session entries first, then related entries. A root containing
+ * `cwd` cannot be read-only reference; dedupe by realpath comparison.
  */
 export function effectiveWorkspaceDirectories(
 	cwd: string,
@@ -163,7 +165,7 @@ export function effectiveWorkspaceDirectories(
 	const directories: string[] = [];
 	for (const directory of [...sessionDirectories, ...relatedDirectories]) {
 		const comparable = normalizePathForComparison(directory);
-		if (comparable === cwdComparable || seen.has(comparable)) continue;
+		if (relativePathWithinNormalizedRoot(comparable, cwdComparable) !== null || seen.has(comparable)) continue;
 		seen.add(comparable);
 		directories.push(directory);
 	}
