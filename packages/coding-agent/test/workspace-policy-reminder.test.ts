@@ -183,4 +183,15 @@ describe("workspace policy reminder rendering", () => {
 		expect(text).not.toContain("MUST occur");
 		expect(text).not.toContain("Primary checkout root");
 	});
+
+	it("points at the system prompt's related-directories list only when related roots exist", () => {
+		const worktree = { kind: "worktree", root: "/repo/wt", primaryRoot: "/repo/primary" } as const;
+		const withRelated = renderWorkspacePolicyReminder("/repo/wt", worktree, true);
+		expect(withRelated).toContain("Related read-only directories are listed in the system prompt");
+		expect(withRelated).toContain("NEVER modify anything under them");
+		const explicitFalse = renderWorkspacePolicyReminder("/repo/wt", worktree, false);
+		expect(explicitFalse).not.toContain("Related read-only");
+		const omitted = renderWorkspacePolicyReminder("/repo/wt", worktree);
+		expect(omitted).not.toContain("Related read-only");
+	});
 });

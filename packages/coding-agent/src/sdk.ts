@@ -158,7 +158,17 @@ import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewa
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateReminderInjector } from "./session/date-reminder";
-import { renderWorkspacePolicyReminder, resolveWorkspacePolicyState } from "./session/workspace-policy";
+import {
+	renderWorkspacePolicyReminder,
+	resolveWorkspacePolicyState,
+	type WorkspacePolicyState,
+} from "./session/workspace-policy";
+import {
+	effectiveWorkspaceDirectories,
+	loadSharedContextFiles,
+	resolveRelatedWorkspace,
+	type RelatedWorkspace,
+} from "./session/related-workspace";
 import { CwdWorkspaceReminderInjector } from "./session/cwd-workspace-reminder";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
@@ -1762,6 +1772,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigsPromise,
 		]);
 	let contextFiles = initialContextFiles;
+	// Shared context files from `workspace.related`, loaded by the initial
+	// rebuildSystemPrompt below (which runs before `new AgentSession`) and
+	// refreshed on every later rebuild. Never merged into `contextFiles`:
+	// `options.contextFiles` overrides repository discovery only, while the map
+	// applies separately.
+	let relatedContextFiles: Array<{ path: string; content: string }> = [];
+	let relatedDirectories: string[] = [];
 
 	let agent: Agent;
 	const effectiveGetApiKey =
@@ -3200,6 +3217,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		// Single resolver for the live `workspace.related` entry, shared by the
+		// rebuild, both provider transforms, and the slash-command callback. Callers
+		// that already classified the cwd (the per-request transforms) pass their
+		// state in so Git discovery runs once per request.
+		const resolveSessionRelatedWorkspace = async (state?: WorkspacePolicyState): Promise<RelatedWorkspace> => {
+			const relatedCwd = sessionManager.getCwd();
+			const resolved = state ?? (await resolveWorkspacePolicyState(relatedCwd, options.isolatedTaskRoot));
+			return resolveRelatedWorkspace({
+				state: resolved,
+				cwd: relatedCwd,
+				related: settings.get("workspace.related"),
+			});
+		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3214,8 +3244,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...(settings.get("disabledExtensions") ?? []),
 				]);
 				toolSession.contextFiles = contextFiles;
-				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
+			// Map-supplied directories and shared context files reload on every rebuild
+			// (including the initial one before the session exists): the map is global
+			// config, so nothing is persisted into the session. `options.contextFiles`
+			// overrides repository discovery only; shared context applies regardless.
+			const related = await resolveSessionRelatedWorkspace();
+			relatedContextFiles = await loadSharedContextFiles(related.contextFiles);
+			relatedDirectories = effectiveWorkspaceDirectories(
+				promptCwd,
+				sessionManager.getAdditionalDirectories(),
+				related.directories,
+			);
+			if (hasSession)
+				session.setAdvisorContextPrompt(
+					formatAdvisorContextPrompt(contextFiles, relatedContextFiles, relatedDirectories),
+				);
 			// Re-discover rules from disk on every session-scoped rebuild, mirroring the
 			// context-file refresh above. The rule buckets are otherwise frozen at
 			// session creation, so a `RULES.md` (or any rule) created or edited while omp
@@ -3323,7 +3367,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
-				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
+				additionalWorkspaceRoots: relatedDirectories,
+				relatedContextFiles,
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: toolSession.xdev
 					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
@@ -3618,12 +3663,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// tool-schema prefix cache (#7404).
 				const rawCwd = sessionManager.getCwd();
 				const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+				const related = await resolveSessionRelatedWorkspace(workspaceState);
+				const workspaceRoots = effectiveWorkspaceDirectories(
+					rawCwd,
+					sessionManager.getAdditionalDirectories(),
+					related.directories,
+				);
 				const withDate = dateReminder.transform(transformed, formatLocalCalendarDate());
 				// Workspace policy runs last so its control lands at the tail,
 				// immediately before the next model response.
 				return workspaceReminder.transform(withDate, {
 					ownerId: sessionManager.getSessionId(),
-					text: renderWorkspacePolicyReminder(rawCwd, workspaceState),
+					text: renderWorkspacePolicyReminder(rawCwd, workspaceState, workspaceRoots.length > 0),
 				});
 			};
 		};
@@ -3878,10 +3929,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorWatchdogPrompts.push(formatActiveRepoWatchdogPrompt(initialActiveRepoContext));
 		}
 		const advisorWatchdogPrompt = advisorWatchdogPrompts.length > 0 ? advisorWatchdogPrompts.join("\n\n") : undefined;
-		// Hand the advisor the same project context files (AGENTS.md, etc.) the
-		// primary agent gets in its system prompt, so the read-only reviewer judges
-		// against the user's standing project rules instead of advising blind.
-		const advisorContextPrompt = formatAdvisorContextPrompt(contextFiles);
+		// Advisors receive repository rules, shared context, and related roots
+		// with the same precedence and read-only contract as the primary agent.
+		const advisorContextPrompt = formatAdvisorContextPrompt(contextFiles, relatedContextFiles, relatedDirectories);
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
@@ -3964,6 +4014,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
+			resolveRelatedWorkspace: () => resolveSessionRelatedWorkspace(),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
@@ -4391,10 +4442,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 						const rawCwd = sessionManager.getCwd();
 						const workspaceState = await resolveWorkspacePolicyState(rawCwd, options.isolatedTaskRoot);
+						const related = await resolveSessionRelatedWorkspace(workspaceState);
+						const workspaceRoots = effectiveWorkspaceDirectories(
+							rawCwd,
+							sessionManager.getAdditionalDirectories(),
+							related.directories,
+						);
 						const withDate = captureDateReminder.transform(transformed, formatLocalCalendarDate());
 						return captureWorkspaceReminder.transform(withDate, {
 							ownerId: captureSessionId,
-							text: renderWorkspacePolicyReminder(rawCwd, workspaceState),
+							text: renderWorkspacePolicyReminder(rawCwd, workspaceState, workspaceRoots.length > 0),
 						});
 					},
 					thinkingBudgets: agent.thinkingBudgets,

@@ -113,7 +113,27 @@ describe("advisor", () => {
 			expect(rendered).toContain("No `any` unless absolutely necessary.");
 		});
 
-		it("returns undefined when there are no context files", () => {
+		it("keeps repository instructions authoritative over shared related context", () => {
+			const rendered = formatAdvisorContextPrompt(
+				[{ path: "/repo/AGENTS.md", content: "Repo instruction" }],
+				[{ path: "/shared/context.md", content: "Shared instruction" }],
+				["/related/repo"],
+			);
+			expect(rendered).toContain("Repo instruction");
+			expect(rendered).toContain("Shared instruction");
+			expect(rendered!.indexOf("</project-context>")).toBeLessThan(rendered!.indexOf("<related-context>"));
+			expect(rendered).toContain("Repository instructions above win on conflict");
+			expect(rendered).toContain("<related-directories>");
+			expect(rendered).toContain("/related/repo");
+			expect(rendered).toContain("NEVER modify anything under these roots");
+		});
+
+		it("renders the related root list even without instruction files", () => {
+			const rendered = formatAdvisorContextPrompt([], [], ["/related/repo"]);
+			expect(rendered).toContain("/related/repo");
+		});
+
+		it("returns undefined when there are no context files or related roots", () => {
 			expect(formatAdvisorContextPrompt([])).toBeUndefined();
 		});
 	});

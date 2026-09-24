@@ -57,13 +57,18 @@ export async function resolveWorkspacePolicyState(
 }
 
 /** Render the workspace-policy system reminder for the given state. */
-export function renderWorkspacePolicyReminder(cwd: string, state: WorkspacePolicyState): string {
+export function renderWorkspacePolicyReminder(
+	cwd: string,
+	state: WorkspacePolicyState,
+	hasRelatedDirectories = false,
+): string {
 	return prompt
 		.render(workspacePolicyReminderTemplate, {
 			kind: state.kind,
 			cwd: normalizePromptPath(cwd),
 			root: state.kind === "unverified" ? undefined : normalizePromptPath(state.root),
 			primaryRoot: state.kind === "worktree" ? normalizePromptPath(state.primaryRoot) : undefined,
+			hasRelatedDirectories,
 		})
 		.trim();
 }

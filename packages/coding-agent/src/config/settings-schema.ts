@@ -224,6 +224,13 @@ export interface ModelTagDef {
 export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
+/** Related roots and shared context for a canonical checkout. */
+export interface RelatedWorkspaceEntry {
+	/** Absolute or `~`-prefixed; relative paths resolve against the canonical checkout. */
+	directories?: string[];
+	/** Rendered after the repository's context files; uses the same path rules. */
+	contextFiles?: string[];
+}
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
@@ -1477,7 +1484,19 @@ export const SETTINGS_SCHEMA = {
 			group: "General",
 			label: "Additional Workspace Dirs",
 			description:
-				"Extra workspace directories added to every session as additional roots (multi-root workspace). Managed live via /add-dir and /remove-dir. Paths resolve relative to cwd; absolute paths recommended. The agent is told these roots exist and can read/grep/glob them.",
+				"Extra workspace directories added to every session as read-only reference roots. Managed live via /add-dir and /remove-dir. Paths resolve relative to cwd; absolute paths recommended. Their context file paths are listed for on-demand reading, not injected into the prompt.",
+		},
+	},
+
+	"workspace.related": {
+		type: "record",
+		default: {} as Record<string, RelatedWorkspaceEntry>,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Related Directories",
+			description:
+				"Map of canonical checkout path (absolute or ~-prefixed) to { directories, contextFiles }. Applies inside that checkout or its linked worktrees: directories become read-only related roots and contextFiles render after the repository's own context files. Never persisted into sessions; recomputed on every system-prompt rebuild.",
 		},
 	},
 

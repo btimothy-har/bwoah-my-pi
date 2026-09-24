@@ -364,6 +364,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
+import { EMPTY_RELATED_WORKSPACE, type RelatedWorkspace } from "./related-workspace";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
@@ -572,6 +573,8 @@ export class AgentSession {
 	readonly memoryEnabled: boolean;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+	/** Live `workspace.related` resolution for the session cwd; empty when no map entry applies. */
+	readonly resolveRelatedWorkspace: () => Promise<RelatedWorkspace>;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
 
@@ -1651,6 +1654,7 @@ export class AgentSession {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.resolveRelatedWorkspace = config.resolveRelatedWorkspace ?? (async () => EMPTY_RELATED_WORKSPACE);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -8398,7 +8402,7 @@ export class AgentSession {
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
 			// discovery but would otherwise hit stale cached bytes (issue #9273).
-			// The workspace-roots block must also reflect the new session's
+			// The related-directories block must also reflect the new session's
 			// directory set, not the previous session's — refresh before the next
 			// turn goes out.
 			resetCapabilities();
@@ -9745,7 +9749,7 @@ export class AgentSession {
 					error: String(error),
 				});
 			}
-			// Refresh the workspace-roots block to match the resumed session's directory set.
+			// Refresh the related-directories block to match the resumed session's directory set.
 			// Wrapped so a rebuild failure (e.g. a gate that intentionally fails in tests)
 			// doesn't roll back an otherwise-successful session switch.
 			try {

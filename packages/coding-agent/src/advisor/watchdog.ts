@@ -26,9 +26,14 @@ export function formatActiveRepoWatchdogPrompt(activeRepoContext: ActiveRepoCont
  */
 export function formatAdvisorContextPrompt(
 	contextFiles: ReadonlyArray<{ path: string; content: string }>,
+	relatedContextFiles: ReadonlyArray<{ path: string; content: string }> = [],
+	relatedDirectories: readonly string[] = [],
 ): string | undefined {
-	if (contextFiles.length === 0) return undefined;
-	return prompt.render(contextFilesTemplate, { contextFiles }).trim() || undefined;
+	if (contextFiles.length === 0 && relatedContextFiles.length === 0 && relatedDirectories.length === 0)
+		return undefined;
+	return (
+		prompt.render(contextFilesTemplate, { contextFiles, relatedContextFiles, relatedDirectories }).trim() || undefined
+	);
 }
 
 /**
