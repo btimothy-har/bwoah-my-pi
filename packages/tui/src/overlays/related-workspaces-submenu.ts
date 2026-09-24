@@ -19,6 +19,7 @@ import type { RelatedWorkspaceEntryView, RelatedWorkspaceMapView, RelatedWorkspa
 const ADD_CHECKOUT = "__add";
 const ADD_DIRECTORY = "__add_dir";
 const ADD_CONTEXT_FILE = "__add_ctx";
+const ENTRY_MAX_VISIBLE = 12;
 
 type RelatedListKind = "directory" | "contextFile";
 type RelatedListField = "directories" | "contextFiles";
@@ -45,8 +46,8 @@ export class RelatedWorkspacesSubmenu extends Container {
 	/** Active list field; undefined while the text view is shown. */
 	#field: SelectFormField | undefined;
 	#textVariant: TextVariant | undefined;
-	/** Set for the duration of a text-view submit; a second Enter while set is ignored. */
-	#submitting = false;
+	#textGeneration = 0;
+	#submittingGeneration: number | undefined;
 	/** Generation counter so a stale availability pass never touches a newer entry view. */
 	#entryBuild = 0;
 	/** Generation counter for reload-driven list refreshes; stale results never touch the view. */
@@ -145,7 +146,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 						this.#showCheckouts();
 						return;
 					}
-					this.#field.selectList.setItems(this.#buildEntryItems(entry));
+					this.#replaceEntryItems(entry);
 					this.#scheduleAvailability(key, entry);
 				}
 				this.#requestRender?.();
@@ -183,6 +184,14 @@ export class RelatedWorkspacesSubmenu extends Container {
 		items.push({ value: ADD_CONTEXT_FILE, label: "Add context file…" });
 		return items;
 	}
+	#replaceEntryItems(entry: RelatedWorkspaceEntryView): void {
+		const list = this.#field?.selectList;
+		if (!list) return;
+		const items = this.#buildEntryItems(entry);
+		list.setItems(items);
+		// Overflow-only search stops accepting input once the list fits; clear a query that would trap the user.
+		if (items.length <= ENTRY_MAX_VISIBLE && list.getFilter()) list.setFilter("");
+	}
 
 	#showEntry(): void {
 		const key = this.#currentKey;
@@ -201,7 +210,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 			label: shortenPath(key),
 			description: "Directories are read-only reference; context files follow the repository's instructions.",
 			items,
-			maxVisible: 12,
+			maxVisible: ENTRY_MAX_VISIBLE,
 			selectTheme: getSelectListTheme(),
 			hint: "  Enter to edit · Delete to remove · Esc to go back",
 			onSubmit: value => this.#activateEntryRow(value),
@@ -263,7 +272,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 				// Rebuild from a fresh read so rows removed since the build stay removed.
 				const fresh = this.#host.readGlobal()[key];
 				if (!fresh) return;
-				this.#field.selectList.setItems(this.#buildEntryItems(fresh));
+				this.#replaceEntryItems(fresh);
 				this.#requestRender?.();
 			},
 			() => {},
@@ -276,6 +285,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 			this.#showCheckouts();
 			return;
 		}
+		const generation = ++this.#textGeneration;
 
 		let options: TextFormFieldOptions;
 		if (variant.kind === "checkout") {
@@ -286,8 +296,8 @@ export class RelatedWorkspacesSubmenu extends Container {
 				empty: "cancel",
 				hint: "  Enter to save · Esc to cancel",
 				onSubmit: value => {
-					if (this.#submitting) return;
-					return this.#submitText(value);
+					if (this.#submittingGeneration === generation) return;
+					return this.#submitText(value, generation);
 				},
 				onCancel: () => this.#cancelText(),
 				requestRender: this.#requestRender,
@@ -305,8 +315,8 @@ export class RelatedWorkspacesSubmenu extends Container {
 				description,
 				hint: "  Enter to save · Esc to cancel",
 				onSubmit: value => {
-					if (this.#submitting) return;
-					return this.#submitText(value);
+					if (this.#submittingGeneration === generation) return;
+					return this.#submitText(value, generation);
 				},
 				onCancel: () => this.#cancelText(),
 				requestRender: this.#requestRender,
@@ -336,11 +346,17 @@ export class RelatedWorkspacesSubmenu extends Container {
 	}
 
 	#cancelText(): void {
+		this.#textGeneration++;
+		this.#submittingGeneration = undefined;
 		if (this.#textVariant?.kind === "checkout") {
 			this.#showCheckouts();
 		} else {
 			this.#showEntry();
 		}
+	}
+
+	#textSubmissionActive(generation: number): boolean {
+		return this.#view === "text" && this.#textGeneration === generation;
 	}
 
 	/**
@@ -349,17 +365,20 @@ export class RelatedWorkspacesSubmenu extends Container {
 	 * await between readGlobal and write (avoids lost updates against a
 	 * concurrent hand edit or a double submit).
 	 */
-	async #submitText(value: string): Promise<void> {
-		this.#submitting = true;
+	async #submitText(value: string, generation: number): Promise<void> {
+		this.#submittingGeneration = generation;
 		try {
 			const variant = this.#textVariant;
 			if (!variant) return;
 
 			if (variant.kind === "checkout") {
 				const resolution = await this.#host.resolveCheckout(value, Object.keys(this.#host.readGlobal()));
+				if (!this.#textSubmissionActive(generation)) return;
 				if (!resolution.ok) throw new Error(resolution.error);
 				await this.#host.reload();
+				if (!this.#textSubmissionActive(generation)) return;
 				const fresh = await this.#host.resolveCheckout(value, Object.keys(this.#host.readGlobal()));
+				if (!this.#textSubmissionActive(generation)) return;
 				if (!fresh.ok) throw new Error(fresh.error);
 				const map = this.#host.readGlobal();
 				map[fresh.path] = { directories: [], contextFiles: [] };
@@ -392,8 +411,10 @@ export class RelatedWorkspacesSubmenu extends Container {
 			const existing = variant.kind === "edit" ? current.filter((_, i) => i !== variant.index) : current;
 
 			const resolution = await this.#host.resolvePath(variant.list, key, value, existing);
+			if (!this.#textSubmissionActive(generation)) return;
 			if (!resolution.ok) throw new Error(resolution.error);
 			await this.#host.reload();
+			if (!this.#textSubmissionActive(generation)) return;
 			const refreshed = this.#host.readGlobal()[key];
 			if (!refreshed) throw new Error("This checkout is no longer configured.");
 			if (variant.kind === "edit" && refreshed[field][variant.index] !== variant.original) {
@@ -406,6 +427,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 				value,
 				variant.kind === "edit" ? refreshed[field].filter((_, i) => i !== variant.index) : refreshed[field],
 			);
+			if (!this.#textSubmissionActive(generation)) return;
 			if (!validated.ok) throw new Error(validated.error);
 			const map = this.#host.readGlobal();
 			const entry = map[key];
@@ -423,7 +445,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 			this.#onChange(map);
 			this.#showEntry();
 		} finally {
-			this.#submitting = false;
+			if (this.#submittingGeneration === generation) this.#submittingGeneration = undefined;
 		}
 	}
 
@@ -490,11 +512,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 
 		// A path is cheap to re-add: no confirmation, just rebuild the rows in place.
 		if (this.#view !== "entry" || this.#currentKey !== key || !this.#field) return;
-		const items = this.#buildEntryItems(entry);
-		this.#field.selectList.setItems(items);
-		if (items.some(item => item.value === selectedValue)) {
-			this.#field.selectList.setSelectedValue(selectedValue);
-		}
+		this.#replaceEntryItems(entry);
 		this.#requestRender?.();
 	}
 

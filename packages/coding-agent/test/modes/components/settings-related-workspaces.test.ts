@@ -17,7 +17,11 @@ import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { RelatedWorkspacesSubmenu } from "@oh-my-pi/pi-tui/overlays/related-workspaces-submenu";
-import type { RelatedWorkspaceMapView, RelatedWorkspacesHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import type {
+	RelatedPathResolution,
+	RelatedWorkspaceMapView,
+	RelatedWorkspacesHost,
+} from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -461,6 +465,36 @@ function simulatedHost(initial: RelatedWorkspaceMapView) {
 	return { host, state };
 }
 
+/**
+ * Drain a released submit continuation. Once the deferred host call resolves,
+ * the rest of the chain is a bounded number of already-resolved promises
+ * (reload → re-resolve → write), so yielding the microtask queue a fixed
+ * number of times settles it deterministically — no wall-clock guessing.
+ */
+async function settleAsyncWork(): Promise<void> {
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+/**
+ * Wrap one host method so its first call stays pending until the returned
+ * `release` is invoked; later calls pass through. Holds a text submit in
+ * flight while the test navigates away with Esc.
+ */
+function holdFirstCall<A extends unknown[]>(
+	method: (...args: A) => Promise<RelatedPathResolution>,
+): { wrapped: (...args: A) => Promise<RelatedPathResolution>; release: (r: RelatedPathResolution) => void } {
+	let holding = true;
+	const pending = Promise.withResolvers<RelatedPathResolution>();
+	return {
+		wrapped: (...args: A) => {
+			if (!holding) return method(...args);
+			holding = false;
+			return pending.promise;
+		},
+		release: pending.resolve,
+	};
+}
+
 describe("related-workspace editor races", () => {
 	it("does not delete a hidden row when a search has no selected result", async () => {
 		const repo = "/repo";
@@ -541,5 +575,98 @@ describe("related-workspace editor races", () => {
 		);
 		expect(Object.keys(state.map)).toEqual(["/repo"]);
 		expect(state.writes).toBe(0);
+	});
+
+	it("drops a checkout submit canceled with Esc while resolution is in flight", async () => {
+		const { host, state } = simulatedHost({});
+		const held = holdFirstCall(host.resolveCheckout);
+		host.resolveCheckout = held.wrapped;
+		const changes: RelatedWorkspaceMapView[] = [];
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			map => changes.push(map),
+			() => {},
+		);
+		menu.handleInput(ENTER); // sole row is "Add checkout…"
+		for (const ch of "/slow-repo") menu.handleInput(ch);
+		menu.handleInput(ENTER);
+		menu.handleInput(ESC);
+		expect(Bun.stripANSI(menu.render(120).join("\n"))).toContain("Add checkout…");
+		menu.handleInput(ENTER);
+		for (const ch of "/new-repo") menu.handleInput(ch);
+
+		held.release({ ok: true, path: "/slow-repo" });
+		await settleAsyncWork();
+
+		expect(state.writes).toBe(0);
+		expect(changes).toHaveLength(0);
+		expect(Object.keys(state.map)).toEqual([]);
+		const view = Bun.stripANSI(menu.render(120).join("\n"));
+		expect(view).toContain("Add checkout");
+		expect(view).toContain("/new-repo");
+		expect(view).not.toContain("Add directory…");
+	});
+
+	it("drops an add-directory submit canceled with Esc while resolution is in flight", async () => {
+		const repo = "/repo";
+		const { host, state } = simulatedHost({ [repo]: { directories: [], contextFiles: [] } });
+		const held = holdFirstCall(host.resolvePath);
+		host.resolvePath = held.wrapped;
+		const changes: RelatedWorkspaceMapView[] = [];
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			map => changes.push(map),
+			() => {},
+		);
+		menu.handleInput(ENTER); // open the seeded checkout
+		await Promise.resolve();
+		menu.handleInput(ENTER); // first enabled row is "Add directory…"
+		for (const ch of "/new-dir") menu.handleInput(ch);
+		menu.handleInput(ENTER);
+		menu.handleInput(ESC);
+		const entryView = Bun.stripANSI(menu.render(120).join("\n"));
+		expect(entryView).toContain("Add directory…");
+		expect(entryView).not.toContain("Add directory ·");
+
+		held.release({ ok: true, path: "/new-dir" });
+		await settleAsyncWork();
+
+		expect(state.writes).toBe(0);
+		expect(changes).toHaveLength(0);
+		expect(state.map[repo]?.directories).toEqual([]);
+		expect(Bun.stripANSI(menu.render(120).join("\n"))).not.toContain("/new-dir");
+	});
+
+	it("clears the search when a deletion drops the entry list to the visible threshold", async () => {
+		const repo = "/repo";
+		const directories = Array.from({ length: 9 }, (_, i) => `/related-${i}`);
+		const { host, state } = simulatedHost({ [repo]: { directories, contextFiles: [] } });
+		const changes: RelatedWorkspaceMapView[] = [];
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			map => changes.push(map),
+			() => {},
+		);
+		menu.handleInput(ENTER);
+		await Promise.resolve();
+
+		// 13 rows (2 headings + 9 directories + 2 add rows) overflow maxVisible 12,
+		// so type-to-search is active; the query matches only the last directory.
+		for (const ch of "related-8") menu.handleInput(ch);
+		menu.handleInput(DELETE_KEY);
+		await waitFor(() => state.writes === 1, "directory removal to persist");
+		expect(state.map[repo]?.directories).toEqual(directories.slice(0, 8));
+
+		// Back at 12 rows the stale query must not strand the user on an empty
+		// result set: the remaining rows are visible and navigable again.
+		const list = Bun.stripANSI(menu.render(120).join("\n"));
+		expect(list).not.toContain("Search:");
+		expect(list).toContain("/related-0");
+		expect(list).toContain("Add directory…");
+		for (let i = 0; i < 8; i++) menu.handleInput(DOWN);
+		menu.handleInput(ENTER);
+		expect(Bun.stripANSI(menu.render(120).join("\n"))).toContain("Add directory · /repo");
+		expect(state.map[repo]?.directories).toEqual(directories.slice(0, 8));
+		expect(changes).toHaveLength(1);
 	});
 });
