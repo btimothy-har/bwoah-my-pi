@@ -16,6 +16,8 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { RelatedWorkspacesSubmenu } from "@oh-my-pi/pi-tui/overlays/related-workspaces-submenu";
+import type { RelatedWorkspaceMapView, RelatedWorkspacesHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -432,5 +434,112 @@ describe("workspace.related structured editor", () => {
 
 		expect(relatedMap()[fx.repoA]?.note).toBe("keep");
 		expect(relatedMap()[fx.repoA]?.directories).toEqual([fx.dirB]);
+	});
+});
+
+function simulatedHost(initial: RelatedWorkspaceMapView) {
+	const state = {
+		map: structuredClone(initial),
+		writes: 0,
+		onReload: async () => {},
+	};
+	const host: RelatedWorkspacesHost = {
+		reload: () => state.onReload(),
+		readGlobal: () => structuredClone(state.map),
+		write: map => {
+			state.map = structuredClone(map);
+			state.writes++;
+		},
+		resolveCheckout: async input =>
+			input === "/repo" && "/repo" in state.map
+				? { ok: false, error: "This checkout is already configured." }
+				: { ok: true, path: input === "/repo" ? "~/repo" : input },
+		resolvePath: async (_kind, _key, input, existing) =>
+			existing.includes(input) ? { ok: false, error: "Already listed." } : { ok: true, path: input },
+		pathAvailable: async () => true,
+	};
+	return { host, state };
+}
+
+describe("related-workspace editor races", () => {
+	it("does not delete a hidden row when a search has no selected result", async () => {
+		const repo = "/repo";
+		const directories = Array.from({ length: 15 }, (_, i) => `/related-${i}`);
+		const { host, state } = simulatedHost({ [repo]: { directories, contextFiles: [] } });
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			() => {},
+			() => {},
+		);
+		menu.handleInput(ENTER);
+		await Promise.resolve();
+		for (const ch of "unmatched-query") menu.handleInput(ch);
+		menu.handleInput(DELETE_KEY);
+		await Promise.resolve();
+		expect(state.map[repo]?.directories).toEqual(directories);
+		expect(state.writes).toBe(0);
+	});
+
+	it("surfaces a failed reload during Delete without an unhandled rejection", async () => {
+		const repo = "/repo";
+		const { host, state } = simulatedHost({ [repo]: { directories: ["/related"], contextFiles: [] } });
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			() => {},
+			() => {},
+		);
+		menu.handleInput(ENTER);
+		await Promise.resolve();
+		state.onReload = async () => {
+			throw new Error("Invalid configuration");
+		};
+		menu.handleInput(DELETE_KEY);
+		await waitFor(
+			() => Bun.stripANSI(menu.render(120).join("\n")).includes("Invalid configuration"),
+			"reload error to appear",
+		);
+		expect(state.map[repo]?.directories).toEqual(["/related"]);
+		expect(state.writes).toBe(0);
+	});
+
+	it("never overwrites another row after a disk edit reorders the entry", async () => {
+		const repo = "/repo";
+		const { host, state } = simulatedHost({
+			[repo]: { directories: ["/first", "/second"], contextFiles: [] },
+		});
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			() => {},
+			() => {},
+		);
+		menu.handleInput(ENTER);
+		menu.handleInput(ENTER);
+		state.map[repo]!.directories = ["/second", "/first"];
+		for (const ch of "/replacement") menu.handleInput(ch);
+		menu.handleInput(ENTER);
+		await Promise.resolve();
+		expect(state.map[repo]?.directories).toEqual(["/second", "/first"]);
+		expect(state.writes).toBe(0);
+	});
+
+	it("rejects a checkout added to YAML while its add field is open", async () => {
+		const { host, state } = simulatedHost({});
+		const menu = new RelatedWorkspacesSubmenu(
+			host,
+			() => {},
+			() => {},
+		);
+		menu.handleInput(ENTER);
+		state.onReload = async () => {
+			state.map["/repo"] = { directories: [], contextFiles: [] };
+		};
+		for (const ch of "/repo") menu.handleInput(ch);
+		menu.handleInput(ENTER);
+		await waitFor(
+			() => Bun.stripANSI(menu.render(120).join("\n")).includes("already configured"),
+			"canonical duplicate error",
+		);
+		expect(Object.keys(state.map)).toEqual(["/repo"]);
+		expect(state.writes).toBe(0);
 	});
 });

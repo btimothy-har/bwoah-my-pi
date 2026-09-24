@@ -26,7 +26,7 @@ type RelatedListField = "directories" | "contextFiles";
 type TextVariant =
 	| { kind: "checkout" }
 	| { kind: "add"; list: RelatedListKind }
-	| { kind: "edit"; list: RelatedListKind; index: number };
+	| { kind: "edit"; list: RelatedListKind; index: number; original: string };
 
 const FIELD_BY_KIND: Record<RelatedListKind, RelatedListField> = {
 	directory: "directories",
@@ -44,7 +44,6 @@ export class RelatedWorkspacesSubmenu extends Container {
 	#currentKey: string | undefined;
 	/** Active list field; undefined while the text view is shown. */
 	#field: SelectFormField | undefined;
-	#selectedValue: string | undefined;
 	#textVariant: TextVariant | undefined;
 	/** Set for the duration of a text-view submit; a second Enter while set is ignored. */
 	#submitting = false;
@@ -104,9 +103,6 @@ export class RelatedWorkspacesSubmenu extends Container {
 			maxVisible: 12,
 			selectTheme: getSelectListTheme(),
 			hint: "  Enter to edit · Delete to remove · Esc to go back",
-			onSelectionChange: value => {
-				this.#selectedValue = value;
-			},
 			onSubmit: value => {
 				if (value === ADD_CHECKOUT) {
 					this.#showText({ kind: "checkout" });
@@ -119,7 +115,6 @@ export class RelatedWorkspacesSubmenu extends Container {
 			requestRender: this.#requestRender,
 		});
 		this.#field = field;
-		this.#selectedValue = items.find(item => !item.disabled)?.value;
 		this.addChild(field);
 		this.#requestRender?.();
 		this.#scheduleReloadRefresh();
@@ -209,15 +204,11 @@ export class RelatedWorkspacesSubmenu extends Container {
 			maxVisible: 12,
 			selectTheme: getSelectListTheme(),
 			hint: "  Enter to edit · Delete to remove · Esc to go back",
-			onSelectionChange: value => {
-				this.#selectedValue = value;
-			},
 			onSubmit: value => this.#activateEntryRow(value),
 			onCancel: () => this.#showCheckouts(),
 			requestRender: this.#requestRender,
 		});
 		this.#field = field;
-		this.#selectedValue = items.find(item => !item.disabled)?.value;
 		this.addChild(field);
 		this.#requestRender?.();
 		this.#scheduleReloadRefresh();
@@ -243,7 +234,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 			this.#showEntry();
 			return;
 		}
-		this.#showText({ kind: "edit", list: row.list, index });
+		this.#showText({ kind: "edit", list: row.list, index, original: row.stored });
 	}
 
 	#scheduleAvailability(key: string, entry: RelatedWorkspaceEntryView): void {
@@ -321,14 +312,13 @@ export class RelatedWorkspacesSubmenu extends Container {
 				requestRender: this.#requestRender,
 			};
 			if (variant.kind === "edit") {
-				const stored = this.#host.readGlobal()[key!]?.[FIELD_BY_KIND[list]][variant.index];
-				if (stored === undefined) {
+				if (this.#host.readGlobal()[key!]?.[FIELD_BY_KIND[list]][variant.index] !== variant.original) {
 					this.#showEntry();
 					return;
 				}
 				options = {
 					...base,
-					initialValue: stored,
+					initialValue: variant.original,
 					empty: "reject",
 					emptyError: "Remove the row with Delete from the list.",
 				};
@@ -369,11 +359,13 @@ export class RelatedWorkspacesSubmenu extends Container {
 				const resolution = await this.#host.resolveCheckout(value, Object.keys(this.#host.readGlobal()));
 				if (!resolution.ok) throw new Error(resolution.error);
 				await this.#host.reload();
+				const fresh = await this.#host.resolveCheckout(value, Object.keys(this.#host.readGlobal()));
+				if (!fresh.ok) throw new Error(fresh.error);
 				const map = this.#host.readGlobal();
-				map[resolution.path] = map[resolution.path] ?? { directories: [], contextFiles: [] };
+				map[fresh.path] = { directories: [], contextFiles: [] };
 				this.#host.write(map);
 				this.#onChange(map);
-				this.#currentKey = resolution.path;
+				this.#currentKey = fresh.path;
 				this.#showEntry();
 				return;
 			}
@@ -386,38 +378,46 @@ export class RelatedWorkspacesSubmenu extends Container {
 			const field = FIELD_BY_KIND[variant.list];
 			const current = this.#host.readGlobal()[key]?.[field] ?? [];
 
-			let existing: readonly string[];
-			let replaced: string | undefined;
 			if (variant.kind === "edit") {
-				replaced = current[variant.index];
-				if (replaced === undefined) {
+				if (current[variant.index] !== variant.original) {
 					this.#showEntry();
 					return;
 				}
-				if (value === replaced) {
-					// Unchanged text: no write.
+				if (value === variant.original) {
 					this.#showEntry();
 					return;
 				}
-				existing = current.filter((_, i) => i !== variant.index);
-			} else {
-				existing = current;
 			}
+
+			const existing = variant.kind === "edit" ? current.filter((_, i) => i !== variant.index) : current;
 
 			const resolution = await this.#host.resolvePath(variant.list, key, value, existing);
 			if (!resolution.ok) throw new Error(resolution.error);
 			await this.#host.reload();
+			const refreshed = this.#host.readGlobal()[key];
+			if (!refreshed) throw new Error("This checkout is no longer configured.");
+			if (variant.kind === "edit" && refreshed[field][variant.index] !== variant.original) {
+				this.#showEntry();
+				return;
+			}
+			const validated = await this.#host.resolvePath(
+				variant.list,
+				key,
+				value,
+				variant.kind === "edit" ? refreshed[field].filter((_, i) => i !== variant.index) : refreshed[field],
+			);
+			if (!validated.ok) throw new Error(validated.error);
 			const map = this.#host.readGlobal();
-			const entry = map[key] ?? (map[key] = { directories: [], contextFiles: [] });
+			const entry = map[key];
+			if (!entry) throw new Error("This checkout is no longer configured.");
 			if (variant.kind === "edit") {
-				if (entry[field][variant.index] !== replaced) {
-					// The row moved under a concurrent edit; rebuild instead of writing blind.
+				if (entry[field][variant.index] !== variant.original) {
 					this.#showEntry();
 					return;
 				}
-				entry[field][variant.index] = resolution.path;
+				entry[field][variant.index] = validated.path;
 			} else {
-				entry[field].push(resolution.path);
+				entry[field].push(validated.path);
 			}
 			this.#host.write(map);
 			this.#onChange(map);
@@ -448,9 +448,6 @@ export class RelatedWorkspacesSubmenu extends Container {
 			currentValue: "keep",
 			selectTheme: getSelectListTheme(),
 			hint: "  Enter to choose · Esc to go back",
-			onSelectionChange: value => {
-				this.#selectedValue = value;
-			},
 			onSubmit: value => {
 				if (value !== "remove") {
 					this.#showCheckouts();
@@ -462,7 +459,6 @@ export class RelatedWorkspacesSubmenu extends Container {
 			requestRender: this.#requestRender,
 		});
 		this.#field = field;
-		this.#selectedValue = "keep";
 		this.addChild(field);
 		this.#requestRender?.();
 	}
@@ -503,7 +499,7 @@ export class RelatedWorkspacesSubmenu extends Container {
 	}
 
 	#handleRemovalKey(): void {
-		const selected = this.#selectedValue;
+		const selected = this.#field?.selectList.getSelectedItem()?.value;
 		if (selected === undefined) return;
 		if (this.#view === "checkouts") {
 			if (selected === ADD_CHECKOUT) return;
@@ -514,7 +510,11 @@ export class RelatedWorkspacesSubmenu extends Container {
 		const key = this.#currentKey;
 		const row = parseRowValue(selected);
 		if (key === undefined || row === undefined) return;
-		void this.#removeEntryRow(key, row.list, row.stored, selected);
+		void this.#removeEntryRow(key, row.list, row.stored, selected).catch(error => {
+			if (this.#view !== "entry" || this.#currentKey !== key) return;
+			this.#field?.setError(error instanceof Error ? error.message : String(error));
+			this.#requestRender?.();
+		});
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
