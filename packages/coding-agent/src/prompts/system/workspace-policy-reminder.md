@@ -10,4 +10,7 @@ You are operating in a worktree. All your work MUST occur within this worktree. 
 {{#when kind "==" "isolated"}}
 All your work MUST occur within the current working directory. Files in other checkouts are read-only reference material.
 {{/when}}
+{{#if hasRelatedDirectories}}
+Related read-only directories are listed in the system prompt under `<related-directories>`. Reference only; NEVER modify anything under them.
+{{/if}}
 </system-reminder>

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { logger, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -10,6 +10,7 @@ import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import { effectiveWorkspaceDirectories } from "../session/related-workspace";
 import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
@@ -78,11 +79,23 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	return { error: `Unknown /shake mode "${verb}". Use elide, images, or thinking.` };
 }
 
-/** Format the session's workspace directories (cwd + additional) for display. */
-function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string): string {
+/** Format the live workspace roots and their sources for display. */
+async function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string): Promise<string> {
 	const cwd = runtime.sessionManager.getCwd();
-	const additional = runtime.sessionManager.getAdditionalDirectories();
-	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
+	const session = runtime.sessionManager.getAdditionalDirectories();
+	const related = await runtime.session.resolveRelatedWorkspace();
+	const all = effectiveWorkspaceDirectories(cwd, session, related.directories);
+	const lines = [
+		"Workspace directories:",
+		`  ${cwd} (working directory)`,
+		...all.map(directory => {
+			const comparable = normalizePathForComparison(directory);
+			const inSession = session.some(entry => normalizePathForComparison(entry) === comparable);
+			const inMap = related.directories.some(entry => normalizePathForComparison(entry) === comparable);
+			const label = inSession && inMap ? "session, workspace.related" : inSession ? "session" : "workspace.related";
+			return `  ${directory} (${label})`;
+		}),
+	];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
 async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
@@ -855,13 +868,22 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot add a directory while streaming.", runtime);
-			if (!command.args) return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
+			if (!command.args) return usage(await formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
 			const resolved = resolveToCwd(command.args, runtime.cwd);
 			try {
 				const stat = await fs.stat(resolved);
 				if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
 			} catch {
 				return usage(`Directory does not exist: ${resolved}`, runtime);
+			}
+			const related = await runtime.session.resolveRelatedWorkspace();
+			if (
+				related.directories.some(
+					directory => normalizePathForComparison(directory) === normalizePathForComparison(resolved),
+				)
+			) {
+				await runtime.output(`Already provided by workspace.related: ${resolved}`);
+				return commandConsumed();
 			}
 			let added: string | null;
 			try {
@@ -874,7 +896,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runtime.session.refreshBaseSystemPrompt();
-			await runtime.output(formatWorkspaceDirectories(runtime, `Added ${added}.`));
+			await runtime.output(await formatWorkspaceDirectories(runtime, `Added ${added} as a read-only related root.`));
 			return commandConsumed();
 		},
 	},
@@ -892,9 +914,18 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			if (resolved === path.resolve(runtime.cwd)) {
 				return usage("Cannot remove the working directory; use /move to change it.", runtime);
 			}
+			const related = await runtime.session.resolveRelatedWorkspace();
+			const comparable = normalizePathForComparison(resolved);
+			const inMap = related.directories.some(directory => normalizePathForComparison(directory) === comparable);
+			const sessionEntry = runtime.sessionManager
+				.getAdditionalDirectories()
+				.find(directory => normalizePathForComparison(directory) === comparable);
+			if (inMap && !sessionEntry) {
+				return usage(`Configured in workspace.related; edit the global config to remove: ${resolved}`, runtime);
+			}
 			let removed: string | null;
 			try {
-				removed = await runtime.sessionManager.removeWorkspaceDirectory(resolved);
+				removed = await runtime.sessionManager.removeWorkspaceDirectory(sessionEntry ?? resolved);
 			} catch (err) {
 				return usage(errorMessage(err), runtime);
 			}
@@ -903,7 +934,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runtime.session.refreshBaseSystemPrompt();
-			await runtime.output(formatWorkspaceDirectories(runtime, `Removed ${removed}.`));
+			const note = inMap
+				? `Removed ${removed} from this session; it remains a related root via workspace.related.`
+				: `Removed ${removed}.`;
+			await runtime.output(await formatWorkspaceDirectories(runtime, note));
 			return commandConsumed();
 		},
 	},
@@ -912,7 +946,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		description: "List this session's workspace directories",
 		acpDescription: "List this session's workspace directories",
 		handle: async (_command, runtime) => {
-			await runtime.output(formatWorkspaceDirectories(runtime));
+			await runtime.output(await formatWorkspaceDirectories(runtime));
 			return commandConsumed();
 		},
 	},

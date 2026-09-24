@@ -34,6 +34,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import { listRelatedContextFiles, type RelatedDirectory } from "./session/related-workspace";
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -623,8 +624,10 @@ export interface BuildSystemPromptOptions {
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
-	/** Additional workspace directories beyond cwd (multi-root), absolute. Injected into the project prompt. */
+	/** Related read-only directories (session-added and workspace.related), absolute. */
 	additionalWorkspaceRoots?: string[];
+	/** Shared context from workspace.related, rendered after repository context. */
+	relatedContextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded context files (skips discovery if provided). */
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Skills provided directly to system prompt construction. */
@@ -747,6 +750,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		directToolNames,
 		cwd,
 		additionalWorkspaceRoots = [],
+		relatedContextFiles = [],
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		rules,
@@ -838,42 +842,29 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
 		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
-	const contextFilesPromise = (async () => {
-		const primary = providedContextFiles
-			? providedContextFiles
-			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
-		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
-		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
-		if (additionalRoots.length === 0) return primary;
-		const extra = await Promise.all(
-			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
-		);
-		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
-	})();
-	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
-	const workspaceTreePromise = (async () => {
-		const primary =
-			providedWorkspaceTree !== undefined
-				? await Promise.resolve(providedWorkspaceTree)
-				: includeWorkspaceTree
-					? await logger.time("buildWorkspaceTree", () =>
-							buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
-						)
-					: { rootPath: resolvedCwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
-		if (additionalRootsForTree.length === 0 || !includeWorkspaceTree) return primary;
-		const extraTrees = await Promise.all(
-			additionalRootsForTree.map(root =>
-				buildWorkspaceTree(root, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }).catch(() => ({
-					rootPath: root,
-					rendered: "",
-					truncated: false,
-					totalLines: 0,
-					agentsMdFiles: [],
-				})),
-			),
-		);
-		return { ...primary, agentsMdFiles: [...primary.agentsMdFiles, ...extraTrees.flatMap(t => t.agentsMdFiles)] };
-	})();
+	const contextFilesPromise = providedContextFiles
+		? Promise.resolve(providedContextFiles)
+		: logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+	const relatedRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+	const relatedDirectoriesPromise = listRelatedContextFiles(relatedRoots);
+	const relatedDirectoriesFallback: RelatedDirectory[] = relatedRoots.map(root => ({
+		path: normalizePromptPath(root),
+		contextFiles: [],
+	}));
+	const workspaceTreePromise =
+		providedWorkspaceTree !== undefined
+			? Promise.resolve(providedWorkspaceTree)
+			: includeWorkspaceTree
+				? logger.time("buildWorkspaceTree", () =>
+						buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
+					)
+				: Promise.resolve({
+						rootPath: resolvedCwd,
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						agentsMdFiles: [],
+					});
 	const skillsPromise: Promise<readonly Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
@@ -900,6 +891,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedAppendPrompt,
 		systemPromptCustomization,
 		contextFiles,
+		relatedDirectories,
 		skills,
 		workspaceTree,
 		activeRepoContext,
@@ -925,6 +917,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
 			dedupeContainedContextFiles,
 		),
+		withDeadline("listRelatedContextFiles", relatedDirectoriesPromise, relatedDirectoriesFallback),
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
@@ -1025,7 +1018,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt,
 		resolvedAppendPrompt,
 	]);
-	const contextPromptSources = contextFiles.map(file => file.content);
+	const contextPromptSources = [...contextFiles, ...relatedContextFiles].map(file => file.content);
 	const promptSources = [
 		effectiveSystemPromptCustomization,
 		resolvedCustomPrompt,
@@ -1047,6 +1040,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolRefs,
 		environment,
 		contextFiles,
+		relatedContextFiles,
+		relatedDirectories,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,
@@ -1054,7 +1049,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,
-		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
 		delegationBias,
 		personality: personalityBlock,

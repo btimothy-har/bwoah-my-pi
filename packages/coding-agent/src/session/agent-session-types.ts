@@ -41,6 +41,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { RelatedWorkspace } from "./related-workspace";
 import type { SessionManager } from "./session-manager";
 
 /** Provider request transform applied after message conversion. */
@@ -271,6 +272,8 @@ export interface AgentSessionConfig {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
+	/** Live `workspace.related` resolution for the session cwd, for slash commands. */
+	resolveRelatedWorkspace?: () => Promise<RelatedWorkspace>;
 	/** `xd://` presentation state backed by the canonical tool map. */
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
