@@ -358,7 +358,7 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("restores persisted usage, spend, and tool totals without a saved model role", async () => {
+	it("infers the current bundled role when absent and restores persisted telemetry", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-usage-");
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
@@ -425,6 +425,7 @@ describe("Agent hub Enter activation", () => {
 		await hub.persistedSubagentsReady;
 
 		const workerEntry = renderedRosterEntry(hub, "Worker", 120).replace(/\s+/g, " ");
+		expect(workerEntry).toContain("DEFAULT");
 		expect(workerEntry).toContain("$0.123");
 		expect(workerEntry).toContain("1m30s");
 		expect(workerEntry).toContain("1 req");
