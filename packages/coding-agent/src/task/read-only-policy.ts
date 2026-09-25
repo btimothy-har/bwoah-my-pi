@@ -18,6 +18,9 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"reflect",
 ]);
 
+// A spawn policy can inject `task` after the declared tool list is parsed.
 export function isReadOnlyAgent(agent: AgentDefinition): boolean {
-	return !!agent.tools?.length && agent.tools.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
+	return (
+		!!agent.tools?.length && agent.spawns === undefined && agent.tools.every(tool => READ_ONLY_TOOL_NAMES.has(tool))
+	);
 }
