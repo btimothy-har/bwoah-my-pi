@@ -72,7 +72,7 @@ export const CHALLENGE_OUTPUT = {
 	},
 } as const;
 
-const LENS_TOOLS = ["read", "grep", "glob", "bash", "lsp", "web_search", "ast_grep", "edit", "write"];
+const LENS_TOOLS = ["read", "grep", "glob", "bash", "lsp", "web_search", "ast_grep"];
 
 function lens(
 	fileName: string,

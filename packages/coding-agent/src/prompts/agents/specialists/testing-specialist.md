@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Identify changed behavior and find corresponding tests, fixtures, and mocks.
 2. Trace each assertion to a changed branch and ask what defective result it would reject.
 3. Check isolation, error boundaries, and whether a unit test can actually observe the risk.
-4. MAY execute the relevant test file or make scratch edits in this isolated copy to test a counterfactual; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened testing defect, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Read changed documentation and the implementation it describes, including consuming code and metadata.
 2. Verify claims against actual commands, fields, units, time semantics, and failure paths.
 3. Decide which canonical layer owns a fact before reporting missing, inaccurate, or redundant prose.
-4. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened documentation defect, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

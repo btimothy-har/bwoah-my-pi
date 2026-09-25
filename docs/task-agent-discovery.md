@@ -124,7 +124,9 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 
 `EMBEDDED_AGENT_DEFS` defines:
 
-- `scout`, `reviewer`, and `security-reviewer` from prompt files; the eight Bwoah specialists (`conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`, `data-model-specialist`, `devils-advocate`) from `src/task/specialist-agents.ts` with a shared review-lens output schema and discard isolation
+- `scout`, `reviewer`, and `security-reviewer` from prompt files
+- Seven Bwoah review lenses (`conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`, `data-model-specialist`) from `src/task/specialist-agents.ts` share a finding/verdict schema. Their file changes are discarded only when task isolation runs.
+- `devils-advocate` from the same module is a read-only consultation agent with a separate challenge schema.
 - `task` and `sonic` from the shared `task.md` body plus injected frontmatter, including `isolation: apply`; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
 
 Loading path:

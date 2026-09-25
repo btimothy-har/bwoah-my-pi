@@ -20,7 +20,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 2. Trace representative values and failure states from producer to consumer or operator outcome.
 3. Reconcile grain, identity, units, time, nullability, and terminal status; inspect remaining old consumers.
 4. Trace rollout, partial failure, retry, and recovery before claiming a defect.
-5. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened issue, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

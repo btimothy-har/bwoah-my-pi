@@ -19,6 +19,9 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 3. Give the best competing interpretation or direction and evidence that could weaken your objection.
 
 ## Output
-Use incremental `yield` sections matching the active schema: `target`, `verdict` (`defensible`, `fragile`, `likely_wrong`, `underspecified`), `objections` (each `claim` and `why_it_matters`), `bottom_line`, and when relevant `missing_evidence`, `alternative`, `failure_modes`, `open_questions`. If the caller supplies an `outputSchema`, follow that instead. No diff anchoring required. NEVER output JSON or code blocks; stop after the sections.
+- Incrementally `yield` scalar fields and nonempty array items under the active schema: `target`, `verdict`, `objections`, `bottom_line`, and relevant optional fields.
+- `verdict` MUST be `defensible`, `fragile`, `likely_wrong`, or `underspecified`; each objection has `claim` and `why_it_matters`.
+- `defensible` with no objections? Submit one terminal `yield` with `data: { target, verdict: "defensible", objections: [], bottom_line }` and no `type`. Empty arrays cannot be emitted as incremental items; NEVER invent objections.
+- Caller-supplied `outputSchema` replaces this contract. No diff anchoring. NEVER output JSON or code blocks; stop after submission.
 
 <critical>Every objection MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

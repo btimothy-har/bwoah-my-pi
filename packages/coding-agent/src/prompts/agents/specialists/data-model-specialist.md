@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Determine whether this is dbt (`dbt_project.yml`, `models/`, schema/source YAML) or standalone SQL; use only applicable checks.
 2. Trace upstream sources and consumers, compare actual columns/types/grain, then examine join cardinality and unique keys.
 3. Check materialization, incremental behavior, tests, docs, and dimensional structure against project conventions rather than universal mandates.
-4. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened data-model defect, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

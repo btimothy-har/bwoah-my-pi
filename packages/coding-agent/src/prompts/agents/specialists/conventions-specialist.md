@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Read applicable rules and analogous implementations before judging the patch.
 2. Locate the existing extension seam, then compare the changed behavior against the established convention.
 3. Report a deviation only when its consequence and applicability are concrete.
-4. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened issue, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

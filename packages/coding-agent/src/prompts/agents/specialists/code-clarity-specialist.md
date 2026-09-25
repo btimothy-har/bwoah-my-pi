@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Read changed code in context; identify the specific interpretation or maintenance burden.
 2. Show how a behavior-preserving change would reduce that burden without extra jumps or abstraction.
 3. Report only P2 (meaningful reader cost) or P3 (localized low-risk cost), never a pure naming preference.
-4. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened clarity defect, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.

@@ -18,7 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 1. Identify entry points, principals, credential sources, permissions, and trust levels at each boundary.
 2. Follow attacker-controlled values through processing to the backing operation; verify actual controls, including alternate and failure paths.
 3. Reject hypothetical sinks that are unreachable, mitigated, or unrelated to the change.
-4. MAY run targeted commands or scratch edits in this isolated copy to prove a point; the copy is discarded, so nothing written is a deliverable.
 
 ## Review mode
 - For every introduced, exposed, or worsened vulnerability, incrementally `yield` `type: ["findings"]` with `data: { title, body, priority, confidence, file_path, line_start, line_end, recommendation }`.
