@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -786,6 +787,37 @@ describe("structured subagent primitive", () => {
 		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
 		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("restricts read-only specialists before ambient tools reach the child", async () => {
+		const specialist = getBundledAgent("conventions-specialist");
+		if (!specialist) throw new Error("Missing bundled conventions specialist");
+		mockDiscovery(specialist);
+		const host = session();
+		Object.assign(host, {
+			mcpManager: {} as NonNullable<ToolSession["mcpManager"]>,
+			extensionPaths: ["/plugins/unsafe.ts"],
+			customToolPaths: [{ path: "/tools/unsafe.ts", source: "project" }] as unknown as NonNullable<
+				ToolSession["customToolPaths"]
+			>,
+		});
+		const options: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options.push(executorOptions);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ session: host, agent: specialist.name, retainArtifacts: true }),
+		);
+		expect(options[0]).toMatchObject({
+			restrictToolNames: true,
+			enableMCP: false,
+			preloadedExtensionPaths: [],
+			preloadedCustomToolPaths: [],
+		});
+		expect(options[0]?.mcpManager).toBeUndefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {

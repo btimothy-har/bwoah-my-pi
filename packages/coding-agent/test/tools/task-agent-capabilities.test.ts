@@ -44,6 +44,13 @@ describe("task agent capability descriptions", () => {
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
 	});
 
+	it("does not label state-changing memory or session tools read-only", () => {
+		const scout = agentByName(loadBundledAgents(), "scout");
+		for (const tool of ["retain", "memory_edit", "todo", "checkpoint", "rewind"]) {
+			expect(isReadOnlyAgent({ ...scout, tools: ["read", tool, "yield"] })).toBe(false);
+		}
+	});
+
 	it("disables read summarization for scout, leaves other agents summarizing", () => {
 		const agents = loadBundledAgents();
 
