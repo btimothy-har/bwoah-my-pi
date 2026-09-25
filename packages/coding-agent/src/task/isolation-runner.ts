@@ -59,7 +59,9 @@ export type IsolationSummaryKind =
 	| "not-applied"
 	| "branch-merge-failed"
 	| "branch-capture-failed"
-	| "merge-error";
+	| "merge-error"
+	| "discarded"
+	| "unavailable";
 
 /** Context for `isolation-summary.md`; unused fields are simply absent. */
 export interface IsolationSummaryContext {
@@ -129,21 +131,28 @@ async function rescueTaskBranch(repoRoot: string, branchName: string, baseSha: s
 	return undefined;
 }
 
-/** Resolved repo + baseline used by every isolated spawn in a single call. */
+/** Resolved repo and the baseline needed only for retained changes. */
 export interface IsolationContext {
 	repoRoot: string;
-	baseline: WorktreeBaseline;
+	baseline: WorktreeBaseline | null;
 }
 
-/**
- * Resolve the git repo root and capture the worktree baseline used to diff
- * each isolated spawn against. Throws when the cwd is not inside a git
- * repository; callers surface the error as a task-tool failure.
- */
-export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
+/** Resolve the Git root; discard runs skip the costly diff baseline. */
+export async function prepareIsolationContext(
+	cwd: string,
+	options: { baseline: boolean } = { baseline: true },
+): Promise<IsolationContext> {
 	const repoRoot = await getRepoRoot(cwd);
-	const baseline = await captureBaseline(repoRoot);
+	const baseline = options.baseline ? await captureBaseline(repoRoot) : null;
 	return { repoRoot, baseline };
+}
+/** Probe repo availability without turning an implicit isolated spawn into a failure. */
+export async function probeIsolationRepoRoot(cwd: string): Promise<{ repoRoot: string } | { unavailable: string }> {
+	try {
+		return { repoRoot: await getRepoRoot(cwd) };
+	} catch (error) {
+		return { unavailable: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
@@ -187,6 +196,8 @@ export interface IsolatedRunOptions {
 	agentId: string;
 	/** Merge mode driving how changes are captured ("branch" commits, "patch" diffs). */
 	mergeMode: "patch" | "branch";
+	/** Never persist changes made in this clone. */
+	discard: boolean;
 	/** Output dir for `${agentId}.patch` artifacts (patch mode and branch-mode commit failures). */
 	artifactsDir: string;
 	/** Human description carried onto the branch commit (branch mode). */
@@ -389,6 +400,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await releaseBase();
 				return;
 			}
+			if (opts.discard) {
+				await cleanupHandle();
+				return;
+			}
+			if (!taskBaseline) throw new Error("Isolation baseline is required to capture changes.");
 			try {
 				let patchResult: IsolationPatchArtifacts;
 				try {
@@ -428,11 +444,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	try {
+		if (!opts.discard && !taskBaseline) throw new Error("Isolation baseline is required to capture changes.");
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
 		const result = await runSubprocess({
 			...opts.baseOptions,
+			discardChanges: opts.discard,
+			parentRepoRoot: opts.context.repoRoot,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
 			preloadedPreparedExtensions: undefined,
@@ -455,12 +474,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		if (deferredCleanup && result.exitCode === 0) {
 			await deferredCleanup;
 		}
+		if (opts.discard) return rememberAgentArtifacts(result);
+		const baseline = taskBaseline as WorktreeBaseline;
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
 			try {
 				commitResult = await commitToBranch(
 					isolationDir,
-					taskBaseline,
+					baseline,
 					opts.agentId,
 					opts.description,
 					opts.buildCommitMessage?.(),
@@ -476,17 +497,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// below, so deleting the branch unconditionally turned a
 				// recoverable merge conflict into permanent loss of committed
 				// work (#8868). Delete only when nothing is at stake.
-				const baseSha = taskBaseline.root.headCommit;
+				const baseSha = baseline.root.headCommit;
 				const branchName = `omp/task/${opts.agentId}`;
 				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
-					const patchResult = await writeIsolationPatch(
-						isolationDir,
-						taskBaseline,
-						opts.artifactsDir,
-						opts.agentId,
-					);
+					const patchResult = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 					return rememberAgentArtifacts({
 						...result,
 						...patchResult,
@@ -542,7 +558,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (result.exitCode === 0) {
 			try {
-				const patchResult = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
+				const patchResult = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				return rememberAgentArtifacts({ ...result, ...patchResult });
 			} catch (patchErr) {
 				retainWorkspace = true;

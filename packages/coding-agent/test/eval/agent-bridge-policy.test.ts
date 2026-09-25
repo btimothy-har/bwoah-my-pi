@@ -32,6 +32,7 @@ const taskAgent = {
 	source: "bundled",
 	spawns: "*",
 	model: ["@task"],
+	isolation: "apply",
 } satisfies AgentDefinition;
 
 const reviewerAgent = {
@@ -40,6 +41,7 @@ const reviewerAgent = {
 	systemPrompt: "Review the task.",
 	source: "bundled",
 	model: ["@smol"],
+	isolation: "apply",
 } satisfies AgentDefinition;
 
 const jobManagers = new Set<AsyncJobManager>();
@@ -205,6 +207,23 @@ describe("runEvalAgent", () => {
 		expect(overrideResult.text).toBe("reviewer");
 		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("task");
 		expect(runSpy.mock.calls[1]?.[0].agent.name).toBe("reviewer");
+	});
+	it("returns a discard agent's result when isolation is disabled instead of treating its notice as a failed merge", async () => {
+		mockAgents([{ ...reviewerAgent, isolation: undefined }]);
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, { output: '{"status":"reviewed"}' }),
+		);
+
+		const result = await runEvalAgentAndWait(
+			{
+				prompt: "Review",
+				agent: "reviewer",
+				schema: { type: "object", properties: { status: { type: "string" } } },
+			},
+			{ session: makeSession() },
+		);
+		expect(result.data).toEqual({ status: "reviewed" });
+		expect(result.details.isolationSummary).toContain("ran in the parent checkout");
 	});
 
 	it("throws for an unknown agent", async () => {
@@ -1082,7 +1101,19 @@ describe("runEvalAgent isolation", () => {
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("stays non-isolated by default even when task isolation is enabled; isolated=true opts in", async () => {
+	it("rejects either explicit merge value for a discard agent before spawning", async () => {
+		mockAgents([{ ...reviewerAgent, isolation: undefined }]);
+		const runSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+		const session = makeSession();
+		for (const merge of [false, true]) {
+			await expect(runEvalAgentAndWait({ prompt: "Review", agent: "reviewer", merge }, { session })).rejects.toThrow(
+				"discards its file changes",
+			);
+		}
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("isolates by default when enabled and lets an apply agent opt out", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const isolatedSpy = vi
@@ -1098,20 +1129,20 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		// Default (no isolated arg) — stays non-isolated even when settings allow it.
 		const defaultResult = await runEvalAgentAndWait({ prompt: "default" }, { session: isolatedSession() });
-		expect(plainSpy).toHaveBeenCalledTimes(1);
-		expect(isolatedSpy).not.toHaveBeenCalled();
-		expect(defaultResult.details.isolated).toBeUndefined();
-		expect(defaultResult.details.changesApplied).toBeUndefined();
-		expect(mergeSpy).not.toHaveBeenCalled();
-
-		// Explicit isolated=true — opt-in turns it on and surfaces merge details.
-		const explicitOn = await runEvalAgentAndWait({ prompt: "on", isolated: true }, { session: isolatedSession() });
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
-		expect(plainSpy).toHaveBeenCalledTimes(1);
-		expect(explicitOn.details.isolated).toBe(true);
+		expect(plainSpy).not.toHaveBeenCalled();
+		expect(defaultResult.details.changesApplied).toBe(true);
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
+
+		const direct = await runEvalAgentAndWait({ prompt: "direct", isolated: false }, { session: isolatedSession() });
+		expect(plainSpy).toHaveBeenCalledTimes(1);
+		expect(direct.details.changesApplied).toBeUndefined();
+		expect(mergeSpy).toHaveBeenCalledTimes(1);
+
+		await runEvalAgentAndWait({ prompt: "on", isolated: true }, { session: isolatedSession() });
+		expect(isolatedSpy).toHaveBeenCalledTimes(2);
+		expect(mergeSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("preserves temp artifacts for non-isolated handle outputs", async () => {

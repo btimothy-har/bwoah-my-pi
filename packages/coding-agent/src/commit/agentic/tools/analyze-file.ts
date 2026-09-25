@@ -86,6 +86,8 @@ export function createAnalyzeFileTool(options: {
 						name: `AnalyzeFile${index + 1}`,
 						agent: "sonic",
 						task: assignment,
+						// Read-only per-file analysis; one isolated clone per file is pure overhead.
+						isolated: false,
 					};
 					return taskTool.execute(`${toolCallId}-${index + 1}`, taskParams, signal);
 				}),

@@ -1,3 +1,7 @@
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
@@ -8,6 +12,8 @@ import type { AgentSession } from "../../src/session/agent-session";
 import { HubTool } from "../../src/tools/hub";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
+import * as discoveryModule from "../../src/task/discovery";
+import * as isolationRunner from "../../src/task/isolation-runner";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
@@ -31,6 +37,7 @@ const POLICY = {
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
 	isIsolated: false,
+	discardChanges: false,
 	mergeMode: "patch",
 	applyChanges: true,
 	enableLsp: false,
@@ -402,6 +409,144 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.batches.map(batch => batch.agentId)).toEqual(["fresh-1", "fresh-2"]);
 		expect(workpool.batches.every(batch => batch.items.length === 1)).toBe(true);
 		expect(workpool.status().freshAgents).toBe(true);
+	});
+
+	it("uses fresh one-shot agents for isolated apply pools so every item is applied", async () => {
+		const session = makeSession([], 1);
+		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			return { ...execution(id), changesApplied: true, mergeSummary: "\n\nApplied isolated changes." };
+		});
+		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, {
+			name: "isolated-apply",
+			policy: { ...POLICY, isIsolated: true, discardChanges: false },
+		});
+		workpool.push(["one", "two"]);
+		await finishPool(session, workpool);
+
+		expect(workpool.status().freshAgents).toBe(true);
+		expect(runSpy).toHaveBeenCalledTimes(2);
+		expect(runSpy.mock.calls.every(([request]) => request.keepAlive === false)).toBe(true);
+		expect(followSpy).not.toHaveBeenCalled();
+		expect(workpool.batches.map(batch => batch.agentId)).toEqual(["isolated-apply-1", "isolated-apply-2"]);
+		expect(workpool.peek().batches.every(batch => batch.output?.includes("Applied isolated changes."))).toBe(true);
+	});
+
+	it("applies edits from every isolated workpool item to the parent checkout", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workpool-isolated-"));
+		try {
+			await $`git init -q ${repo}`.quiet();
+			await Bun.write(path.join(repo, "base.txt"), "base\n");
+			await $`git add base.txt`.cwd(repo).quiet();
+			await $`git -c commit.gpgsign=false -c user.name=Probe -c user.email=probe@example.test commit -qm init`
+				.cwd(repo)
+				.quiet();
+			const agent = { ...AGENT, name: "task", isolation: "apply" as const };
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+			vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
+				const file = options.assignment?.includes("first") ? "first.txt" : "second.txt";
+				await Bun.write(path.join(options.worktree!, file), file);
+				return singleResult(options.id, file);
+			});
+			const session = {
+				...makeSession([], 1),
+				cwd: repo,
+				getSessionFile: () => path.join(repo, "session.jsonl"),
+			};
+			session.settings.override("task.isolation.enabled", true);
+			const policy = await structured.resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "eval",
+				agent: "task",
+				assignment: "workpool",
+			});
+			const workpool = new WorkPool(session, { name: "real-isolated", policy });
+			workpool.push(["first", "second"]);
+			await finishPool(session, workpool);
+			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);
+			expect(await Bun.file(path.join(repo, "first.txt")).text()).toBe("first.txt");
+			expect(await Bun.file(path.join(repo, "second.txt")).text()).toBe("second.txt");
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the pool's reuse decision consistent when isolation is enabled after creation", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workpool-policy-"));
+		try {
+			await $`git init -q ${repo}`.quiet();
+			const agent = { ...AGENT, name: "task", isolation: "apply" as const };
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+			const session = { ...makeSession([], 1), cwd: repo };
+			const policy = await structured.resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "eval",
+				agent: "task",
+				assignment: "workpool",
+			});
+			expect(policy.isIsolated).toBe(false);
+			const workpool = new WorkPool(session, { name: "policy-snapshot", policy });
+			session.settings.override("task.isolation.enabled", true);
+			const direct = vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
+				markIdle(options.id);
+				return singleResult(options.id, "first");
+			});
+			const isolated = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
+				markIdle(options.agentId);
+				return { ...singleResult(options.agentId, "isolated"), isolated: true };
+			});
+			const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+				markIdle(options.id);
+				return singleResult(options.id, "second");
+			});
+			workpool.push(["first", "second"]);
+			await finishPool(session, workpool);
+
+			expect(direct).toHaveBeenCalledTimes(1);
+			expect(direct.mock.calls[0]?.[0].worktree).toBeUndefined();
+			expect(isolated).not.toHaveBeenCalled();
+			expect(follow).toHaveBeenCalledTimes(1);
+			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("marks isolated workpool items failed when root or nested changes did not apply", async () => {
+		const session = makeSession([], 1);
+		const failures = [
+			{
+				name: "root-failure",
+				applied: false,
+				summary: "<system-notification>Root patch conflict.</system-notification>",
+			},
+			{
+				name: "nested-failure",
+				applied: true,
+				summary: "<system-notification>Nested patch failed.</system-notification>",
+			},
+		] as const;
+		for (const failure of failures) {
+			vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+				const id = request.identity?.id ?? "missing";
+				return {
+					...execution(id),
+					result: { ...singleResult(id), patchPath: `/artifacts/${id}.patch` },
+					changesApplied: failure.applied,
+					mergeSummary: failure.summary,
+					artifactsDir: "/artifacts",
+				};
+			});
+			const workpool = new WorkPool(session, {
+				name: failure.name,
+				policy: { ...POLICY, isIsolated: true, discardChanges: false },
+			});
+			workpool.push(["change file"]);
+			await finishPool(session, workpool);
+			expect(workpool.peek().batches[0]?.status).toBe("failed");
+			expect(workpool.peek().batches[0]?.output).toContain(`/artifacts/${workpool.batches[0]?.agentId}.patch`);
+		}
 	});
 
 	it("close drops queued items but lets the in-flight turn finish", async () => {

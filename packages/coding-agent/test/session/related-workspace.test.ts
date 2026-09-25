@@ -109,6 +109,24 @@ describe("resolveRelatedWorkspace", () => {
 		expectSamePath(resolved.directories[0], sibling);
 	});
 
+	test("resolves an isolated child's related references against its parent's checkout", async () => {
+		const primary = mkdirp(path.join(tempDir, "primary"));
+		const isolated = mkdirp(path.join(tempDir, "clone"));
+		const sibling = mkdirp(path.join(tempDir, "sibling"));
+		const resolved = await resolveRelatedWorkspace({
+			state: { kind: "isolated", root: isolated, primaryRoot: primary },
+			cwd: isolated,
+			related: {
+				[primary]: { directories: ["../sibling", isolated], contextFiles: ["shared/notes.md"] },
+			},
+		});
+
+		expectSamePath(resolved.key, primary);
+		expect(resolved.directories).toHaveLength(1);
+		expectSamePath(resolved.directories[0], sibling);
+		expect(resolved.contextFiles).toEqual([path.join(primary, "shared", "notes.md")]);
+	});
+
 	test("returns the empty workspace for isolated, unverified, unmatched, and malformed inputs", async () => {
 		const repo = mkdirp(path.join(tempDir, "repo"));
 		const sibling = mkdirp(path.join(tempDir, "sibling"));

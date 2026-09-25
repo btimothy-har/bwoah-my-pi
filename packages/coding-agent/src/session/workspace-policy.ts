@@ -14,7 +14,7 @@ import workspacePolicyReminderTemplate from "../prompts/system/workspace-policy-
 export type WorkspacePolicyState =
 	| { kind: "primary"; root: string }
 	| { kind: "worktree"; root: string; primaryRoot: string }
-	| { kind: "isolated"; root: string }
+	| { kind: "isolated"; root: string; primaryRoot?: string }
 	| { kind: "unverified" };
 
 /**
@@ -29,6 +29,10 @@ export type WorkspacePolicyState =
 export async function resolveWorkspacePolicyState(
 	cwd: string,
 	isolatedTaskRoot?: string,
+	// The parent session's canonical checkout key, supplied by the spawner so an
+	// isolated child resolves the same workspace.related entry. Trusted like
+	// isolatedTaskRoot; never derived from the clone's own Git metadata.
+	parentWorkspaceKey?: string,
 ): Promise<WorkspacePolicyState> {
 	if (!(await directoryIsEnterable(cwd))) return { kind: "unverified" };
 	try {
@@ -40,7 +44,9 @@ export async function resolveWorkspacePolicyState(
 			isolatedTaskRoot !== undefined &&
 			normalizePathForComparison(root) === normalizePathForComparison(isolatedTaskRoot)
 		) {
-			return { kind: "isolated", root };
+			return parentWorkspaceKey !== undefined
+				? { kind: "isolated", root, primaryRoot: parentWorkspaceKey }
+				: { kind: "isolated", root };
 		}
 		const linked = repo.linkedWorktree();
 		if (linked) {

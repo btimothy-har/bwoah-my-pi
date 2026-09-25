@@ -33,6 +33,7 @@ import {
 	mergeIsolatedChanges,
 	persistNestedPatches,
 	prepareIsolationContext,
+	probeIsolationRepoRoot,
 	renderIsolationSummary,
 	runIsolatedSubprocess,
 } from "./isolation-runner";
@@ -144,6 +145,10 @@ export interface EffectiveSubagentPolicy {
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
+	/** Discard isolated file changes instead of capturing a patch or branch. */
+	discardChanges: boolean;
+	/** Reason default isolation could not run for a discard agent. */
+	isolationUnavailable?: string;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
 	enableLsp: boolean;
@@ -319,13 +324,38 @@ export async function resolveEffectiveSubagentPolicy(
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
-	const isIsolated = request.isolation?.requested === true;
-	if (isIsolated && !isolationEnabled) {
+	const applies = agent.isolation === "apply";
+	const requested = request.isolation?.requested;
+	if (
+		!applies &&
+		(requested === false || request.isolation?.apply !== undefined || request.isolation?.merge !== undefined)
+	) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" runs isolated and discards its file changes (agent frontmatter \`isolation\` is not \`apply\`); \`isolated: false\`, \`apply\`, and \`merge\` are unavailable for it.`,
+		);
+	}
+	if (requested === true && !isolationEnabled) {
 		throw new StructuredSubagentError(
 			"preflight",
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
+	let isIsolated: boolean;
+	let isolationUnavailable: string | undefined;
+	if (planMode || requested === false) {
+		isIsolated = false;
+	} else if (requested === true) {
+		isIsolated = true;
+	} else if (!isolationEnabled) {
+		isIsolated = false;
+		if (!applies) isolationUnavailable = "task.isolation.enabled is false";
+	} else {
+		const probe = await probeIsolationRepoRoot(request.session.cwd);
+		isIsolated = "repoRoot" in probe;
+		if (!applies && "unavailable" in probe) isolationUnavailable = probe.unavailable;
+	}
+	const discardChanges = isIsolated && !applies;
 	return {
 		discovery,
 		agentName,
@@ -338,10 +368,13 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
+		discardChanges,
+		isolationUnavailable,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
-			request.isolation?.apply ??
-			(request.invocationKind === "task" ? request.session.settings.get("task.isolation.apply") : true),
+			!discardChanges &&
+			(request.isolation?.apply ??
+				(request.invocationKind === "task" ? request.session.settings.get("task.isolation.apply") : true)),
 		enableLsp:
 			!planMode &&
 			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
@@ -452,7 +485,7 @@ function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
-		keepAlive: request.keepAlive,
+		keepAlive: policy.discardChanges && request.keepAlive === undefined ? false : request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
@@ -624,10 +657,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			deferredCleanup = completion;
 		};
 		baseOptions.planReference = await loadPlanReference(request, policy);
+		// The session resolver (not a fresh classification of the clone's cwd) so
+		// nested isolated spawns inherit the key: a clone's own git root would
+		// classify as primary and never match the workspace.related map.
+		if (policy.isIsolated) {
+			baseOptions.parentWorkspaceKey = (await request.session.resolveRelatedWorkspace?.())?.key ?? undefined;
+		}
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(request.session.cwd, { baseline: !policy.discardChanges });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
@@ -648,6 +687,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				preferredBackend: parseIsolationBackend(request.session.settings.get("isolation.backend")),
 				agentId: id,
 				mergeMode: policy.mergeMode,
+				discard: policy.discardChanges,
 				artifactsDir: lease.artifactsDir,
 				description: trimToUndefined(request.identity?.label),
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
@@ -662,7 +702,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&
 			(result.patchPath !== undefined || result.branchName !== undefined || (result.nestedPatches?.length ?? 0) > 0);
 
-		if (
+		if (policy.isIsolated && isolationContext && policy.discardChanges) {
+			mergeSummary = renderIsolationSummary({ kind: "discarded" });
+		} else if (
 			policy.isIsolated &&
 			isolationContext &&
 			policy.applyChanges &&
@@ -704,6 +746,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
 			mergeSummary = describeCapturedChanges(result);
 		}
+		if (policy.isolationUnavailable) {
+			mergeSummary = renderIsolationSummary({ kind: "unavailable", error: policy.isolationUnavailable });
+		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
 		return {
@@ -725,7 +770,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const shouldRetainArtifacts =
 			request.detached === true ||
 			(request.retainArtifacts && (completedSuccessfully || hasValidStructuredOutput)) ||
-			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+			(policy.isIsolated &&
+				!policy.discardChanges &&
+				(!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		const cleanupArtifacts = async (): Promise<void> => {
 			await fs.rm(lease.artifactsDir, { recursive: true, force: true });

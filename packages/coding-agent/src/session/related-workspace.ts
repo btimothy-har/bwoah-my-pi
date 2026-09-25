@@ -68,10 +68,11 @@ export interface RelatedDirectory {
 /**
  * Canonical checkout key for `workspace.related` lookup: the repository root
  * for a primary checkout, the primary root for a linked worktree. Isolated
- * task sandboxes and unverified directories never match. Callers MUST obtain
- * `state` from `resolveWorkspacePolicyState(cwd, isolatedTaskRoot)` with the
- * isolated root passed: isolated sandboxes sever Git metadata and would
- * otherwise classify as primary.
+ * task sandboxes match only through the parent key the spawner supplied;
+ * without it they never match, and unverified directories never match.
+ * Callers MUST obtain `state` from `resolveWorkspacePolicyState(cwd, isolatedTaskRoot)`
+ * with the isolated root passed: isolated sandboxes sever Git metadata and
+ * would otherwise classify as primary.
  */
 export function relatedWorkspaceKey(state: WorkspacePolicyState): string | null {
 	switch (state.kind) {
@@ -80,6 +81,7 @@ export function relatedWorkspaceKey(state: WorkspacePolicyState): string | null 
 		case "worktree":
 			return state.primaryRoot;
 		case "isolated":
+			return state.primaryRoot ?? null;
 		case "unverified":
 			return null;
 	}

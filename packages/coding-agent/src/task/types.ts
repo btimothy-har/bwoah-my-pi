@@ -225,6 +225,8 @@ export interface AgentDefinition {
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
+	/** Isolated file changes: apply via task isolation settings, or discard (the default). */
+	isolation?: "apply" | "discard";
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */

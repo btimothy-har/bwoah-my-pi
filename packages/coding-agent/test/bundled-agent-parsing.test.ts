@@ -1,3 +1,7 @@
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -7,7 +11,9 @@ import {
 	resolveModelOverride,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { runAgentsCommand } from "@oh-my-pi/pi-coding-agent/cli/agents-cli";
+import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { resolveEffectiveSubagentPolicy } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
@@ -18,6 +24,55 @@ describe("bundled agent parsing", () => {
 		expect(task).toBeDefined();
 		expect(task?.model).toEqual(["@task"]);
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
+	});
+
+	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {
+		expect(getBundledAgent("task")?.isolation).toBe("apply");
+		expect(getBundledAgent("sonic")?.isolation).toBe("apply");
+		expect(getBundledAgent("reviewer")?.isolation).toBeUndefined();
+		for (const [value, expected] of [
+			["apply", "apply"],
+			["discard", "discard"],
+			["typo", undefined],
+		] as const) {
+			const agent = parseAgent(
+				"custom.md",
+				`---\nname: custom\ndescription: Custom agent\nisolation: ${value}\n---\nReview the assignment.`,
+				"user",
+			);
+			expect(agent.isolation).toBe(expected);
+		}
+	});
+	it("keeps unpacked workers applying their edits under default isolation", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
+		try {
+			await $`git init -q ${repo}`.quiet();
+			await runAgentsCommand({
+				action: "unpack",
+				flags: { dir: path.join(repo, ".omp", "agents"), json: true },
+			});
+			const session = {
+				cwd: repo,
+				settings: Settings.isolated({ "task.isolation.enabled": true }),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			};
+			for (const name of ["task", "sonic"]) {
+				const policy = await resolveEffectiveSubagentPolicy({
+					session,
+					invocationKind: "task",
+					assignment: "Edit a file",
+					agent: name,
+				});
+				expect(policy.agent.source).toBe("project");
+				expect(policy.isIsolated).toBe(true);
+				expect(policy.discardChanges).toBe(false);
+				expect(policy.applyChanges).toBe(true);
+			}
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
 	});
 
 	it("accepts security-reviewer findings with optional remediation metadata", () => {

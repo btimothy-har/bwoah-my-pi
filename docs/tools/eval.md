@@ -158,13 +158,13 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of subagents bounded by the live `task.maxConcurrency`:
 
-- `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
+- `.push(*items)` returns item ids (`<pool>#<seq>`). Normally an item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees. When isolation is enabled and the agent declares `isolation: apply`, the pool also uses fresh one-shot clones regardless of that setting: every item captures and applies its own changes before completing. Failed application marks the item failed and exposes its recovery artifact. Apply-agent pools pin their isolation mode at creation; create another pool after changing `task.isolation.enabled` (turning it off for an already-isolated pool rejects the next launch). Discard agents may still reuse a clone; its file changes never reach the parent checkout.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
 - The pool name is both its aggregate async-job id and label. Its first full drain settles and closes the pool; create a new named pool for another phase. The aggregate result auto-delivers once, while internal batch jobs are consumed.
 - Completely blocked? Leave eval and call `hub` with `{ op: "wait", ids: [pool.name] }`; re-issue until settled. There is no `pool.wait()`, so the kernel remains free to serve `@tool` calls.
-- `.status()` reports worker/item counts and context usage; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local; after a restart their workers remain parked keep-alive agents reachable through `hub`.
+- `.status()` reports worker/item counts, context usage, and the effective `freshAgents` mode; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local. Non-isolated and reused discard workers may remain parked after a restart; fresh isolated apply workers are one-shot.
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 

@@ -32,6 +32,7 @@ const taskAgent: AgentDefinition = {
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
+	isolation: "apply",
 };
 
 const scoutAgent: AgentDefinition = {
@@ -200,6 +201,18 @@ describe("task.batch schema gating", () => {
 		}
 		expect(isolatedSchema.type).toBe("boolean");
 		expect(itemProperties.apply).toBeUndefined();
+	});
+
+	it("describes default discard isolation and identifies agents that apply changes", async () => {
+		mockDiscovery([taskAgent, scoutAgent]);
+		const enabled = await TaskTool.create(createSession({ settings: { "task.isolation.enabled": true } }));
+		expect(enabled.description).toContain("Every spawn runs in its own isolated worktree by default");
+		expect(enabled.description).toContain("### task (isolation: apply)");
+		expect(enabled.description).not.toContain("### scout (isolation: apply)");
+
+		const disabled = await TaskTool.create(createSession());
+		expect(disabled.description).not.toContain("`isolated`");
+		expect(disabled.description).not.toContain("(isolation: apply)");
 	});
 
 	it("hides isolation from the dynamic batch schema in plan mode", async () => {

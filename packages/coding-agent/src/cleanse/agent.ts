@@ -134,6 +134,9 @@ export async function createCleanseAgentRuntime(options: {
 				assignment: prompt.render(discoveryPrompt, { request }),
 				agent: "task",
 				model: modelSelector,
+				// Cleanse edits the user's tree concurrently by design, and its cwd is
+				// not guaranteed to be a git repo, so it never runs workers in clones.
+				isolation: { requested: false },
 				outputSchema: DISCOVERY_SCHEMA,
 				identity: { label: "CleanseDiscovery" },
 				enableLsp: true,
@@ -168,6 +171,8 @@ export async function createCleanseAgentRuntime(options: {
 					assignment: renderAssignment(assignment, context.peers, context.worker, context.checkers),
 					agent: "sonic",
 					model: modelSelector,
+					// Workers edit the user's tree directly; see the discovery spawn above.
+					isolation: { requested: false },
 					identity: { id: agentId, label: name },
 					index: assignment.index,
 					enableLsp: true,
