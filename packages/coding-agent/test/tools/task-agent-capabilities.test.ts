@@ -49,9 +49,9 @@ describe("task agent capability descriptions", () => {
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "yield"], spawns: ["task"] })).toBe(false);
 	});
 
-	it("does not label state-changing memory or session tools read-only", () => {
+	it("does not classify memory-dependent or state-mutating tools read-only", () => {
 		const scout = agentByName(loadBundledAgents(), "scout");
-		for (const tool of ["retain", "memory_edit", "todo", "checkpoint", "rewind"]) {
+		for (const tool of ["recall", "reflect", "retain", "memory_edit", "todo", "checkpoint", "rewind"]) {
 			expect(isReadOnlyAgent({ ...scout, tools: ["read", tool, "yield"] })).toBe(false);
 		}
 	});

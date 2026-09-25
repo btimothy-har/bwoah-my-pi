@@ -27,7 +27,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 3. Give the best competing interpretation or direction and evidence that could weaken your objection.
 
 ## Output
-- Follow the caller's `outputSchema` if supplied. Otherwise finish an assistant prose turn, then call terminal `yield` with `type: "result"` and no `data`; NEVER put prose in `data`.
+- Follow the effective `yield` output schema when present (caller-supplied or inherited). Without one, write prose and call terminal `yield` with `type: "result"` and no `data` in the SAME assistant response; NEVER yield in a later tool-only turn or put prose in `data`.
 - State decision-changing objections and competing interpretations with evidence, or explain why the target is defensible without inventing objections. Include missing evidence or unresolved questions when relevant.
 - No diff anchoring. NEVER output JSON or code blocks; stop after submission.
 

@@ -820,6 +820,27 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("keeps explicit memory readers on the backend-initializing path", async () => {
+		const reader = { ...AGENT, name: "memory-reader", isolation: undefined, tools: ["read", "recall", "yield"] };
+		mockDiscovery(reader);
+		const options: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options.push(executorOptions);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: session({ settings: Settings.isolated({ "memory.backend": "mnemopi" }) }),
+				agent: reader.name,
+				retainArtifacts: true,
+			}),
+		);
+		expect(options[0]?.restrictToolNames).toBe(false);
+		expect(options[0]?.agent.tools).toContain("recall");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();

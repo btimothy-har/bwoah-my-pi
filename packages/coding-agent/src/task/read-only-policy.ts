@@ -1,7 +1,7 @@
 import type { AgentDefinition } from "./types";
 
-// Tool names with no mutation-capable actions; this also guards restricted subagent sessions.
-// Memory and session mutators are excluded even when their approval tier is "read".
+// Only tools safe without ambient session setup may trigger a restricted child.
+// Memory-backed readers need backend state that restricted sessions do not initialize.
 // `hub` is deliberately absent: it declares `approval = hubApproval`, a
 // parameter-dependent function that returns "exec" for start/stop/restart,
 // process-stdin `send`, unrecognized ops and malformed params. Do not re-add it.
@@ -14,8 +14,6 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"ast_grep",
 	"yield",
 	"ask",
-	"recall",
-	"reflect",
 ]);
 
 // A spawn policy can inject `task` after the declared tool list is parsed.

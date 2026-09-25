@@ -25,8 +25,10 @@
 
 ### Fixed
 - Fixed Bwoah My Pi review specialists receiving executable or state-mutating ambient tools in supposedly read-only reviews; child sessions now restrict the effective tool set, including custom, MCP, and memory capabilities ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
-- Fixed review guidance to require strict finding schemas even for overridden specialists, and made no-objection advocate results submit a valid complete payload ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi review guidance to require strict finding schemas even for overridden specialists ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed Bwoah My Pi code reviews failing to dispatch the full specialist roster when `task.batch` is disabled; the chair now uses individual flat tasks in that mode ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi standalone specialist consultations returning quoted prose or failing a data-less yield; schema-free answers now submit text and the terminal yield in one response, while inherited schemas are respected ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed custom memory-reading subagents losing `recall` and `reflect` after read-only tool restrictions by retaining their backend initialization path ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed `/wt`, `/move`, and `/mcp reload` leaving MCP servers, task-agent choices, and cold-revived subagent discovery bound to the previous checkout; workspace discovery now follows the active execution directory while session history stays at its canonical home ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed edit and write LSP processing staying bound to the previous checkout after `/wt` or `/move` ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed rejected `/wt` execution bindings being revived when their old path later became valid; restore now clears the saved binding and keeps the conversation at its canonical home ([Bwoah My Pi #10](https://github.com/btimothy-har/bwoah-my-pi/pull/10) by [@btimothy-har](https://github.com/btimothy-har)).
