@@ -20,6 +20,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -204,11 +205,20 @@ describe("task.batch schema gating", () => {
 	});
 
 	it("describes default discard isolation and identifies agents that apply changes", async () => {
-		mockDiscovery([taskAgent, scoutAgent]);
+		mockDiscovery([
+			taskAgent,
+			scoutAgent,
+			getBundledAgent("conventions-specialist")!,
+			getBundledAgent("devils-advocate")!,
+		]);
 		const enabled = await TaskTool.create(createSession({ settings: { "task.isolation.enabled": true } }));
 		expect(enabled.description).toContain("Every spawn runs in its own isolated worktree by default");
 		expect(enabled.description).toContain("### task (isolation: apply)");
 		expect(enabled.description).not.toContain("### scout (isolation: apply)");
+		expect(enabled.description).toContain("### conventions-specialist");
+		expect(enabled.description).not.toContain("### conventions-specialist (isolation: apply)");
+		expect(enabled.description).not.toContain("### conventions-specialist (READ-ONLY)");
+		expect(enabled.description).toContain("### devils-advocate (READ-ONLY)");
 
 		const disabled = await TaskTool.create(createSession());
 		expect(disabled.description).not.toContain("`isolated`");

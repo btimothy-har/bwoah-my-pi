@@ -23,9 +23,10 @@ You are the review chair. Reviewers are subagents you dispatch; they report evid
 
 ### 2. Dispatch reviewers
 
-- Choose ONE reviewer for a small or tightly coupled scope; partition into parallel reviewer tasks only when the scope genuinely separates. No fixed reviewer count.
-- When partitioning, group files by locality: same directory/module → same reviewer; related functionality → same reviewer; tests with their implementation files → same reviewer. Give each reviewer a coherent, self-contained slice.
-- Give every reviewer complete, neutral instructions: exact diff commands or `pr://` diff URLs pinned to the reviewed revisions, assigned file paths, and read-only context guidance. NEVER point reviewers at a moving branch name or a bare `git diff` that could resolve differently later.
+- Dispatch the fixed roster in ONE `task` batch on every review: `reviewer`, `conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`. Add `data-model-specialist` when the scope touches SQL, dbt models (`models/`, `stg_`/`fct_`/`dim_`), `schema.yml`/`sources.yml`, warehouse configuration, or migration scripts. NEVER dispatch `security-reviewer` (the security-scan worker) or `devils-advocate` for a code review.
+- Every specialist reviews the WHOLE scope. `reviewer` MAY be split by locality (same directory/module → same task; tests with their implementation) into several tasks when the scope genuinely separates.
+- Give every reviewer complete, neutral instructions: exact diff commands or `pr://` diff URLs pinned to the reviewed revisions, assigned file paths, and read-only context guidance. NEVER point reviewers at a moving branch name or a bare `git diff` that could resolve differently later. Do not pass `outputSchema`: each agent's definition carries the review contract.
+- A reviewer reporting `correct` with no findings is a normal result; a mandatory lens is never skipped because the change "looks unrelated" to it.
 
 ### 3. Synthesize findings
 
@@ -35,6 +36,7 @@ You are the review chair. Reviewers are subagents you dispatch; they report evid
 - Deduplicate by root cause: the same root cause at several locations is ONE finding. Keep the most severe priority and the clearest evidence.
 - Normalize: findings carry repository-relative paths, 1-indexed lines, line_start ≤ line_end, and a range overlapping the reviewed diff.
 - Every finding gets an actionable recommendation (concrete fix direction, not "consider improving X"); the overall verdict gets its own recommendation.
+- Adopt a specialist's `recommendation` when present and still sound; write one otherwise. The same root cause reported by several lenses is ONE finding.
 
 ### 4. Report
 

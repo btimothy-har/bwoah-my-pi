@@ -13,6 +13,7 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runAgentsCommand } from "@oh-my-pi/pi-coding-agent/cli/agents-cli";
 import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { REVIEW_LENS_OUTPUT } from "@oh-my-pi/pi-coding-agent/task/specialist-agents";
 import { resolveEffectiveSubagentPolicy } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
@@ -24,6 +25,64 @@ describe("bundled agent parsing", () => {
 		expect(task).toBeDefined();
 		expect(task?.model).toEqual(["@task"]);
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
+	});
+
+	it("preserves specialist tool policy, model selection, and review schema through bundled frontmatter", () => {
+		const lenses = [
+			["conventions-specialist", "@slow", Effort.High],
+			["integration-specialist", "@slow", Effort.High],
+			["testing-specialist", "@task", Effort.Medium],
+			["code-clarity-specialist", "@task", Effort.Medium],
+			["docs-specialist", "@task", Effort.Low],
+			["security-specialist", "@slow", Effort.High],
+			["data-model-specialist", "@task", Effort.High],
+		] as const;
+
+		for (const [name, model, effort] of lenses) {
+			const agent = getBundledAgent(name);
+			expect(agent?.output).toEqual(REVIEW_LENS_OUTPUT);
+			expect(agent?.model).toEqual([model]);
+			expect(agent?.thinkingLevel).toBe(effort);
+			expect(agent?.isolation).toBeUndefined();
+			expect(agent?.spawns).toEqual(["scout"]);
+			for (const tool of ["read", "bash", "edit", "write", "yield"]) {
+				expect(agent?.tools).toContain(tool);
+			}
+		}
+	});
+
+	it("validates incremental specialist findings and rejects incomplete ones", () => {
+		const validator = buildOutputValidator(getBundledAgent("conventions-specialist")?.output);
+		expect(validator.error).toBeUndefined();
+		const findingValidator = validator.validator?.validateSection.get("findings");
+		expect(findingValidator).toBeDefined();
+		const finding = {
+			title: "Use the canonical helper",
+			body: "The change bypasses the shared helper and produces a divergent result.",
+			priority: 2,
+			confidence: 0.9,
+			file_path: "src/feature.ts",
+			line_start: 10,
+			line_end: 10,
+			recommendation: "Call the existing helper.",
+		};
+		expect(findingValidator?.(finding).success).toBe(true);
+		expect(findingValidator?.({ ...finding, title: undefined }).success).toBe(false);
+	});
+
+	it("keeps the devil's advocate read-only and rejects unrecognized verdicts", () => {
+		const agent = getBundledAgent("devils-advocate");
+		expect(agent?.isolation).toBeUndefined();
+		expect(agent?.tools).toEqual(["read", "grep", "glob", "web_search", "yield"]);
+		const validator = buildOutputValidator(agent?.output);
+		const response = {
+			target: "A migration plan",
+			verdict: "fragile",
+			objections: [{ claim: "Old consumers persist", why_it_matters: "They cannot parse the new field" }],
+			bottom_line: "Keep the compatibility window.",
+		};
+		expect(validator.validator?.validate(response).success).toBe(true);
+		expect(validator.validator?.validate({ ...response, verdict: "maybe" }).success).toBe(false);
 	});
 
 	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {

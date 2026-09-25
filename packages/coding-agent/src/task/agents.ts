@@ -13,24 +13,26 @@ import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { SPECIALIST_AGENT_DEFS } from "./specialist-agents";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
 
-interface AgentFrontmatter {
+export interface AgentFrontmatter {
 	name: string;
 	description: string;
 	tools?: string[];
 	spawns?: string;
 	model?: string | string[];
 	thinkingLevel?: string;
+	output?: unknown;
 	isolation?: "apply" | "discard";
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
 }
 
-interface EmbeddedAgentDef {
+export interface EmbeddedAgentDef {
 	fileName: string;
 	frontmatter?: AgentFrontmatter;
 	template: string;
@@ -73,6 +75,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		},
 		template: taskMd,
 	},
+	...SPECIALIST_AGENT_DEFS,
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.

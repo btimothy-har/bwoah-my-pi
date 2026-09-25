@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added eight bundled review and consultation specialists; Bwoah My Pi `/review` now dispatches a fixed reviewer roster with a data-model specialist for SQL and dbt changes ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added global `workspace.related` configuration for read-only related directories and shared context across linked worktrees; `/add-dir` roots now list their instructions for on-demand reading instead of loading them as repository rules ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added a structured `/settings` editor for related checkouts, directories, and shared context files, with live session updates and no JSON entry required ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added a built-in `pull-request` skill and `/pull-request` command that draft short, reviewer-focused pull requests: it follows the repository's PR template (or a default), interviews the author when the reason for a change is missing instead of inventing one, and reports only validation that actually ran. Publishing or editing a PR requires explicit confirmation of the exact target and content, marking it ready requires an interactive choice, review handling stays out of scope, and user or project copies still override the bundled versions ([Bwoah My Pi #19](https://github.com/btimothy-har/bwoah-my-pi/pull/19) by [@btimothy-har](https://github.com/btimothy-har)).
