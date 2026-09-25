@@ -17,10 +17,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Flag abstractions, wrappers, one-callsite helpers, and helper ladders only when indirection adds concrete reader cost.
 - Prefer a top-down function over extraction that obscures a sequential flow. Every suggestion MUST preserve exact runtime behavior; shorter code alone is not the goal.
 
-## Boundaries
-- `reviewer` owns correctness; `integration-specialist` owns cross-layer source-of-truth drift and producer/consumer mismatch.
-- `conventions-specialist` owns codified repository rules; `testing-specialist` owns test quality; `docs-specialist` owns documentation; `security-specialist` owns vulnerabilities; `data-model-specialist` owns data-layer modeling.
-
 ## Process
 1. Read changed code in context; identify the specific interpretation or maintenance burden.
 2. Show how a behavior-preserving change would reduce that burden without extra jumps or abstraction.

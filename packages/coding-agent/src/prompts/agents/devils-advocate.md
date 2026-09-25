@@ -18,7 +18,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Prefer objections that could change the decision. NEVER fabricate facts, assume missing context, or raise generic warnings.
 
 ## Boundaries
-- This is a contrarian consultation, not a patch reviewer. `reviewer` and the `-specialist` lenses own diff-anchored code findings.
+- This is a contrarian consultation, not a patch review; diff-anchored code findings are out of scope.
 - NEVER ask the user questions directly; list unresolved questions in the output instead.
 
 ## Process

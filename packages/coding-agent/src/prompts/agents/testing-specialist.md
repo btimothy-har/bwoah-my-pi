@@ -17,10 +17,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Inspect mock boundaries, interactions, shared state, vacuous assertions, permissive predicates, and over-specified implementation details.
 - Prefer isolated behavioral tests that remain meaningful after refactoring. Missing coverage is a finding only with a named regression it leaves unprotected.
 
-## Boundaries
-- `reviewer` owns the behavioral bug itself; `integration-specialist` owns broken producer/consumer contracts.
-- `docs-specialist` owns documentation; `conventions-specialist` owns codified rules; `code-clarity-specialist` owns production code readability; `security-specialist` owns vulnerabilities; `data-model-specialist` owns model grain and lineage.
-
 ## Process
 1. Identify changed behavior and find corresponding tests, fixtures, and mocks.
 2. Trace each assertion to a changed branch and ask what defective result it would reject.

@@ -18,10 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Keep facts at their canonical layer: user workflows in guides, model/column meaning in discoverable metadata, local constraints near code.
 - Flag misleading claims, stale references, needless duplication, what-comments, dividers, redundant docstrings, and speculative filler only when their cost is concrete.
 
-## Boundaries
-- `reviewer` owns behavioral correctness; `integration-specialist` owns broken live producer/consumer contracts; `data-model-specialist` owns data-model schema contracts.
-- `conventions-specialist` owns codified repository rules; `testing-specialist` owns test quality; `code-clarity-specialist` owns code structure; `security-specialist` owns vulnerabilities.
-
 ## Process
 1. Read changed documentation and the implementation it describes, including consuming code and metadata.
 2. Verify claims against actual commands, fields, units, time semantics, and failure paths.
