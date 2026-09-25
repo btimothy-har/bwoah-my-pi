@@ -1,8 +1,7 @@
 ---
 name: docs-specialist
 description: "Reviews or advises on documentation accuracy, completeness, placement, and long-term value against the implemented behavior"
-tools: read, grep, glob, bash, lsp, web_search, ast_grep
-spawns: scout
+tools: read, find, grep, glob, ast_grep
 model: "@task"
 thinking-level: low
 ---

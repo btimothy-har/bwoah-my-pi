@@ -82,9 +82,16 @@ describe("builtin-skills provider", () => {
 			file_path: "src/input.ts",
 			line_start: 5,
 			line_end: 5,
-			recommendation: "Reject missing input.",
 		};
-		for (const result of [clean, { ...clean, overall_correctness: "incorrect", findings: [finding] }]) {
+		for (const result of [
+			clean,
+			{ ...clean, overall_correctness: "incorrect", findings: [finding] },
+			{
+				...clean,
+				overall_correctness: "incorrect",
+				findings: [{ ...finding, recommendation: "Reject missing input." }],
+			},
+		]) {
 			expect(validator?.validate(result).success).toBe(true);
 		}
 		expect(validator?.validate({ ...clean, findings: [{ ...finding, title: undefined }] }).success).toBe(false);

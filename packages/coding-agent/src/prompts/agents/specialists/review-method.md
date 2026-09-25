@@ -7,6 +7,6 @@
 - Probe missing, empty, zero, negative, duplicate, malformed, boundary, and unusual-but-valid inputs; follow fallback precedence and partially migrated state.
 - For operational paths, trace loading, timeout, cancellation, partial success, status publication, and recovery.
 - Corroborate with callers, consumers, applicable checks, exact tests, or independent reconciliation. Confirm the change introduced, exposed, or materially worsened the issue and no existing control mitigates it.
-- Use `bash` only for read-only Git, Jujutsu, or PR inspection.
+- Read the chair's pinned diff from shared task context or a session-local `local://` resource; read relevant code in context.
 - NEVER create, edit, or delete files; NEVER run builds, tests, or formatters.
 - NEVER report unrelated pre-existing defects, assumed requirements, preferences without concrete cost, or issues an applicable automated check already guarantees.

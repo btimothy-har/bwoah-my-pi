@@ -215,9 +215,8 @@ describe("task.batch schema gating", () => {
 		expect(enabled.description).toContain("Every spawn runs in its own isolated worktree by default");
 		expect(enabled.description).toContain("### task (isolation: apply)");
 		expect(enabled.description).not.toContain("### scout (isolation: apply)");
-		expect(enabled.description).toContain("### conventions-specialist");
+		expect(enabled.description).toContain("### conventions-specialist (READ-ONLY)");
 		expect(enabled.description).not.toContain("### conventions-specialist (isolation: apply)");
-		expect(enabled.description).not.toContain("### conventions-specialist (READ-ONLY)");
 		expect(enabled.description).toContain("### devils-advocate (READ-ONLY)");
 
 		const disabled = await TaskTool.create(createSession());

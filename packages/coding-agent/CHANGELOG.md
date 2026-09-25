@@ -24,8 +24,9 @@
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
 
 ### Fixed
-- Fixed Bwoah My Pi review specialists inviting scratch edits when isolation is disabled; lenses now omit edit/write tools and restrict shell use to read-only inspection ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi review specialists having executable tools in supposedly read-only reviews; they now inspect the chair's pinned diff using read-only tools ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed review guidance to require strict finding schemas even for overridden specialists, and made no-objection advocate results submit a valid complete payload ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi code reviews failing to dispatch the full specialist roster when `task.batch` is disabled; the chair now uses individual flat tasks in that mode ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed `/wt`, `/move`, and `/mcp reload` leaving MCP servers, task-agent choices, and cold-revived subagent discovery bound to the previous checkout; workspace discovery now follows the active execution directory while session history stays at its canonical home ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed edit and write LSP processing staying bound to the previous checkout after `/wt` or `/move` ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed rejected `/wt` execution bindings being revived when their old path later became valid; restore now clears the saved binding and keeps the conversation at its canonical home ([Bwoah My Pi #10](https://github.com/btimothy-har/bwoah-my-pi/pull/10) by [@btimothy-har](https://github.com/btimothy-har)).

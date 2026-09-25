@@ -18,6 +18,7 @@ import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -221,13 +222,22 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
+		const specialist = getBundledAgent("conventions-specialist");
+		if (!specialist) throw new Error("Missing bundled conventions specialist");
+		const specialistResult = await runSubprocess({
+			...baseOptions,
+			id: "review-specialist-child",
+			agent: { ...specialist, model: undefined },
+		});
 
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
+		expect(specialistResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
 		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
+		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -237,6 +247,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyPrompt = promptText(0);
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
+		const specialistPrompt = promptText(3);
+		expect(specialistPrompt.includes("# Peers")).toBe(false);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
 		expect(writablePrompt.includes("# Peers")).toBe(true);
 		expect(spawningPrompt.includes("# Peers")).toBe(true);

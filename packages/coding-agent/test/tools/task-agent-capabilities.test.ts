@@ -10,17 +10,12 @@ function agentByName(agents: AgentDefinition[], name: string): AgentDefinition {
 }
 
 describe("task agent capability descriptions", () => {
-	it("classifies scout and devil's advocate as read-only but leaves review lenses writable", () => {
+	it("classifies bundled review lenses as read-only without executable or nested tools", () => {
 		const agents = loadBundledAgents();
 
-		for (const name of ["scout", "devils-advocate"]) {
-			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(true);
-		}
 		for (const name of [
-			"task",
-			"sonic",
-			"reviewer",
-			"security-reviewer",
+			"scout",
+			"devils-advocate",
 			"conventions-specialist",
 			"integration-specialist",
 			"testing-specialist",
@@ -29,6 +24,9 @@ describe("task agent capability descriptions", () => {
 			"security-specialist",
 			"data-model-specialist",
 		]) {
+			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(true);
+		}
+		for (const name of ["task", "sonic", "reviewer", "security-reviewer"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});

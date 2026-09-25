@@ -43,12 +43,8 @@ describe("bundled agent parsing", () => {
 			expect(agent?.model).toEqual([model]);
 			expect(agent?.thinkingLevel).toBe(effort);
 			expect(agent?.isolation).toBeUndefined();
-			expect(agent?.spawns).toEqual(["scout"]);
-			for (const tool of ["read", "bash", "yield"]) {
-				expect(agent?.tools).toContain(tool);
-			}
-			expect(agent?.tools).not.toContain("edit");
-			expect(agent?.tools).not.toContain("write");
+			expect(agent?.spawns).toBeUndefined();
+			expect(agent?.tools).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
 		}
 	});
 

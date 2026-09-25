@@ -1,8 +1,7 @@
 ---
 name: conventions-specialist
 description: "Reviews or advises on adherence to this repository's documented rules, established patterns, and canonical owners; cites where each convention is established"
-tools: read, grep, glob, bash, lsp, web_search, ast_grep
-spawns: scout
+tools: read, find, grep, glob, ast_grep
 model: "@slow"
 thinking-level: high
 ---

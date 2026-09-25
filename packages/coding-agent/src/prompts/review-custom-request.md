@@ -6,7 +6,7 @@ Mode: custom instructions.
 
 Invoke the `code-review` skill (`skill://code-review`) for the code review contract. If the skill is not available in this session, state that limitation and follow the `review_findings` tool's contract directly.
 
-Use the `task` tool with a `tasks` array to dispatch reviewers; every assignment MUST include the user instructions below.
+Use `task` in the batch or flat shape specified by the skill for the current `task.batch` setting; every assignment MUST include the user instructions below.
 
 ## Reviewer Instructions
 

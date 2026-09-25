@@ -1,8 +1,7 @@
 ---
 name: integration-specialist
 description: "Reviews or advises on cross-component contracts: producer/consumer parity, runtime wiring, migrations, rollout, and operational completion"
-tools: read, grep, glob, bash, lsp, web_search, ast_grep
-spawns: scout
+tools: read, find, grep, glob, ast_grep
 model: "@slow"
 thinking-level: high
 ---
