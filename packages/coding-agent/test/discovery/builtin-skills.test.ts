@@ -12,6 +12,7 @@ import * as path from "node:path";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -58,6 +59,42 @@ describe("builtin-skills provider", () => {
 		const handler = new SkillProtocolHandler();
 		const resource = await handler.resolve(parseInternalUrl("skill://code-review"));
 		expect(resource.sourcePath).toBe(builtinSkillPath("code-review"));
+	});
+
+	it("serves a review schema that validates clean and finding reports", async () => {
+		await isolateAgentDir();
+		const { skills } = await loadSkills();
+		setActiveSkills(skills);
+		const { content } = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://code-review"));
+		const fence = "```json\n";
+		const start = content.indexOf(fence);
+		const end = content.indexOf("\n```", start + fence.length);
+		expect(start).toBeGreaterThanOrEqual(0);
+		expect(end).toBeGreaterThan(start);
+		const schema: unknown = JSON.parse(content.slice(start + fence.length, end));
+		const validator = buildOutputValidator(schema).validator;
+		const clean = { overall_correctness: "correct", explanation: "No defects found.", confidence: 0.9 };
+		const finding = {
+			title: "Handle missing input",
+			body: "Missing input reaches an unsafe path.",
+			priority: 1,
+			confidence: 0.9,
+			file_path: "src/input.ts",
+			line_start: 5,
+			line_end: 5,
+		};
+		for (const result of [
+			clean,
+			{ ...clean, overall_correctness: "incorrect", findings: [finding] },
+			{
+				...clean,
+				overall_correctness: "incorrect",
+				findings: [{ ...finding, recommendation: "Reject missing input." }],
+			},
+		]) {
+			expect(validator?.validate(result).success).toBe(true);
+		}
+		expect(validator?.validate({ ...clean, findings: [{ ...finding, title: undefined }] }).success).toBe(false);
 	});
 
 	it("serves the builtin pull-request skill, yields to a user override, and respects disablement", async () => {

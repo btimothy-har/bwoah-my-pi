@@ -42,13 +42,17 @@ _No files to review._
 
 Invoke the `code-review` skill (`skill://code-review`) for the code review contract. If the skill is not available in this session, state that limitation and follow the `review_findings` tool's contract directly.
 
-Use the `task` tool with a `tasks` array to dispatch reviewers; the skill decides how the scope partitions.
+Use `task` to dispatch reviewers in the batch or flat shape specified by the skill for the current `task.batch` setting.
+
+### Chair Diff Capture
+
+{{#if skipDiff}}{{diffInstruction}}. Capture and share the COMPLETE diff before dispatch; the previews below are insufficient.{{else}}The complete diff below is the review input; share it with every reviewer.{{/if}}
 
 ### Reviewer Instructions
 
 Reviewer MUST:
 1. Focus ONLY on assigned files
-2. {{#if skipDiff}}{{diffInstruction}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
+2. MUST inspect the chair's complete pinned diff (inline or session-local `local://` reference); NEVER infer a verdict from previews or a moving branch
 3. {{contextInstruction}}
 4. Use incremental `yield` sections for findings and verdict fields; reviewers MUST NOT call `review_findings` — only the primary (as review chair) calls it after synthesis
 

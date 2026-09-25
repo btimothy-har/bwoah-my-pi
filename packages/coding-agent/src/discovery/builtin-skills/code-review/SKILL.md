@@ -23,9 +23,45 @@ You are the review chair. Reviewers are subagents you dispatch; they report evid
 
 ### 2. Dispatch reviewers
 
-- Choose ONE reviewer for a small or tightly coupled scope; partition into parallel reviewer tasks only when the scope genuinely separates. No fixed reviewer count.
-- When partitioning, group files by locality: same directory/module → same reviewer; related functionality → same reviewer; tests with their implementation files → same reviewer. Give each reviewer a coherent, self-contained slice.
-- Give every reviewer complete, neutral instructions: exact diff commands or `pr://` diff URLs pinned to the reviewed revisions, assigned file paths, and read-only context guidance. NEVER point reviewers at a moving branch name or a bare `git diff` that could resolve differently later.
+- Required roster: `reviewer`, `conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`; add `data-model-specialist` for SQL/dbt models, warehouse configuration, or migrations. NEVER use `security-reviewer` or `devils-advocate` for a code review.
+- With `task.batch=true`, dispatch the roster in ONE `tasks[]` call. With `task.batch=false`, dispatch the identical roster as separate flat `task` calls; include the same pinned scope and diff reference in every assignment. NEVER skip a lens because it looks unrelated.
+- The chair MUST capture the complete diff from pinned revisions or the selected working-tree snapshot before dispatch. An inline full diff is usable; previews are NOT. Share full content in batch `context`, or write a uniquely named session-local `local://review-diff-<scope>.md` and include its URI in every task; never overwrite a diff while reviewers may read it. The only direct write during scope preparation is that session-local artifact; NEVER edit repository files.
+- Specialists MUST inspect the chair's frozen diff and relevant code with read-only tools; they cannot run `git diff` themselves. The existing `reviewer` MAY confirm the pinned diff with read-only Git commands. Each specialist reviews the WHOLE scope; `reviewer` MAY be split by locality, keeping tests with implementations.
+- Give every reviewer complete neutral instructions: exact pinned revisions, assigned paths, full diff or `local://` reference, and context-reading guidance. NEVER use a moving branch name or a bare `git diff`. A `correct` verdict with no findings is normal.
+- Project/user/plugin agents can shadow bundled names. Before dispatch, require every specialist's `task` roster entry to be marked READ-ONLY; otherwise stop instead of granting an override execution access. Pass the review `outputSchema` below with `schemaMode: "strict"` on EVERY item or flat call; incompatible output fails rather than masquerading as coverage. The existing `reviewer` has a default schema; the new specialists do not.
+- Each specialist assignment requires introduced, exposed, or worsened defects only: cite concrete evidence, impact, and a fix direction. Anchor `file_path`/`line_start`/`line_end` to a changed range of at most 10 lines in the chair's pinned diff.
+- Rank `priority` 0–3 by user impact. Set `overall_correctness` to `incorrect` only for P0/P1; otherwise return `correct`, an explanation of examined scope, honest `confidence`, and `findings: []` when none survive.
+
+Review task `outputSchema` (JTD):
+
+```json
+{
+  "properties": {
+    "overall_correctness": { "enum": ["correct", "incorrect"] },
+    "explanation": { "type": "string" },
+    "confidence": { "type": "number" }
+  },
+  "optionalProperties": {
+    "findings": {
+      "elements": {
+        "properties": {
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "priority": { "type": "number" },
+          "confidence": { "type": "number" },
+          "file_path": { "type": "string" },
+          "line_start": { "type": "number" },
+          "line_end": { "type": "number" }
+        },
+        "optionalProperties": {
+          "recommendation": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+```
+
 
 ### 3. Synthesize findings
 
@@ -35,6 +71,7 @@ You are the review chair. Reviewers are subagents you dispatch; they report evid
 - Deduplicate by root cause: the same root cause at several locations is ONE finding. Keep the most severe priority and the clearest evidence.
 - Normalize: findings carry repository-relative paths, 1-indexed lines, line_start ≤ line_end, and a range overlapping the reviewed diff.
 - Every finding gets an actionable recommendation (concrete fix direction, not "consider improving X"); the overall verdict gets its own recommendation.
+- Adopt a specialist's `recommendation` when present and still sound; write one otherwise. The same root cause reported by several lenses is ONE finding.
 
 ### 4. Report
 

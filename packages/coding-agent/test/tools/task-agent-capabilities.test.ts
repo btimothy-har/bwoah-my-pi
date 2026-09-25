@@ -10,11 +10,23 @@ function agentByName(agents: AgentDefinition[], name: string): AgentDefinition {
 }
 
 describe("task agent capability descriptions", () => {
-	it("classifies bundled scout as the only read-only delegated agent", () => {
+	it("classifies bundled review lenses as read-only without executable or nested tools", () => {
 		const agents = loadBundledAgents();
 
-		expect(isReadOnlyAgent(agentByName(agents, "scout"))).toBe(true);
-		for (const name of ["task", "sonic", "reviewer"]) {
+		for (const name of [
+			"scout",
+			"devils-advocate",
+			"conventions-specialist",
+			"integration-specialist",
+			"testing-specialist",
+			"code-clarity-specialist",
+			"docs-specialist",
+			"security-specialist",
+			"data-model-specialist",
+		]) {
+			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(true);
+		}
+		for (const name of ["task", "sonic", "reviewer", "security-reviewer"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
@@ -32,6 +44,18 @@ describe("task agent capability descriptions", () => {
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
 	});
 
+	it("does not label a nested-spawning agent read-only when its listed tools are reads", () => {
+		const scout = agentByName(loadBundledAgents(), "scout");
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "yield"], spawns: ["task"] })).toBe(false);
+	});
+
+	it("does not classify memory-dependent or state-mutating tools read-only", () => {
+		const scout = agentByName(loadBundledAgents(), "scout");
+		for (const tool of ["recall", "reflect", "retain", "memory_edit", "todo", "checkpoint", "rewind"]) {
+			expect(isReadOnlyAgent({ ...scout, tools: ["read", tool, "yield"] })).toBe(false);
+		}
+	});
+
 	it("disables read summarization for scout, leaves other agents summarizing", () => {
 		const agents = loadBundledAgents();
 
@@ -40,10 +64,39 @@ describe("task agent capability descriptions", () => {
 			expect(agentByName(agents, name).readSummarize).toBeUndefined();
 		}
 	});
+	it("keeps bundled agent bodies distinguishable for persisted transcript attribution", () => {
+		const agents = loadBundledAgents();
+		for (const a of agents) {
+			for (const b of agents) {
+				if (
+					a.name === b.name ||
+					(a.name === "task" && b.name === "sonic") ||
+					(a.name === "sonic" && b.name === "task")
+				)
+					continue;
+				expect(b.systemPrompt.includes(a.systemPrompt.trim())).toBe(false);
+			}
+		}
+	});
+
 	it("ships every bundled agent without prewalk; hand-off is opt-in via task.agentPrewalk", () => {
 		const agents = loadBundledAgents();
 
-		for (const name of ["task", "scout", "sonic", "reviewer", "security-reviewer"]) {
+		for (const name of [
+			"task",
+			"scout",
+			"sonic",
+			"reviewer",
+			"security-reviewer",
+			"conventions-specialist",
+			"integration-specialist",
+			"testing-specialist",
+			"code-clarity-specialist",
+			"docs-specialist",
+			"security-specialist",
+			"data-model-specialist",
+			"devils-advocate",
+		]) {
 			expect(agentByName(agents, name).prewalk).toBeUndefined();
 		}
 	});

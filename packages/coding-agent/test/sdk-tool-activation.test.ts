@@ -2066,9 +2066,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			});
 		};
 
+		const restrictedSettings = configuredSettings();
+		restrictedSettings.override("memory.backend", "mnemopi");
 		const { session: restricted } = await createAgentSession({
 			...baseOptions(restrictedDir),
-			settings: configuredSettings(),
+			settings: restrictedSettings,
 			extensions: [toolActivationExtension, restrictedLateExtension],
 			customTools: [sdkCustomTool],
 			toolNames: ["read", "lsp", "hub"],
@@ -2096,6 +2098,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"learn",
 				"manage_skill",
 				"default_active_tool",
+				"memory_edit",
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",

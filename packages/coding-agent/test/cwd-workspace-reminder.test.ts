@@ -47,24 +47,19 @@ describe("CwdWorkspaceReminderInjector", () => {
 		const firstUser: Message = { role: "user", content: "first", timestamp: 1 };
 		const result = toolResult("c1", 2);
 		const secondUser: Message = { role: "user", content: "second", timestamp: 1 };
+		const request: Message[] = [firstUser, createAssistantMessage("done"), result, secondUser];
 
 		const first = injector.transform({ systemPrompt: ["system"], messages: [firstUser] }, policy("A"));
 		expect(controlText(first.messages)).toEqual([policyText("A")]);
 		expect(first.messages.at(-1)?.role).toBe("developer");
 
 		// Identical content and timestamps at a new position: still a new request.
-		const second = injector.transform(
-			{ systemPrompt: ["system"], messages: [firstUser, createAssistantMessage("done"), result, secondUser] },
-			policy("A"),
-		);
+		const second = injector.transform({ systemPrompt: ["system"], messages: request }, policy("A"));
 		expect(controlText(second.messages)).toEqual([policyText("A"), policyText("A")]);
 		expect(second.messages.at(-1)?.role).toBe("developer");
 
 		// Replay of the same request adds nothing and preserves bytes.
-		const replay = injector.transform(
-			{ systemPrompt: ["system"], messages: [firstUser, createAssistantMessage("done"), result, secondUser] },
-			policy("A"),
-		);
+		const replay = injector.transform({ systemPrompt: ["system"], messages: request }, policy("A"));
 		expect(controlText(replay.messages)).toHaveLength(2);
 		expect(replay.messages).toEqual(second.messages);
 

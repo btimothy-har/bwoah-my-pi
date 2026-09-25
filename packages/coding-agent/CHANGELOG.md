@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added eight bundled review and consultation specialists; Bwoah My Pi `/review` now dispatches a fixed reviewer roster with a data-model specialist for SQL and dbt changes ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added global `workspace.related` configuration for read-only related directories and shared context across linked worktrees; `/add-dir` roots now list their instructions for on-demand reading instead of loading them as repository rules ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added a structured `/settings` editor for related checkouts, directories, and shared context files, with live session updates and no JSON entry required ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Added a built-in `pull-request` skill and `/pull-request` command that draft short, reviewer-focused pull requests: it follows the repository's PR template (or a default), interviews the author when the reason for a change is missing instead of inventing one, and reports only validation that actually ran. Publishing or editing a PR requires explicit confirmation of the exact target and content, marking it ready requires an interactive choice, review handling stays out of scope, and user or project copies still override the bundled versions ([Bwoah My Pi #19](https://github.com/btimothy-har/bwoah-my-pi/pull/19) by [@btimothy-har](https://github.com/btimothy-har)).
@@ -14,6 +15,8 @@
 - Added bundled always-on engineering rules to the system prompt: `code-comments` for every agent, plus `ownership` and `commit-checkpoints` (local checkpoint commits via `omp commit`, never pushed) for the main agent only. Override one with a same-named user or project rule, or drop it via `ttsr.disabledRules` ([Bwoah My Pi #20](https://github.com/btimothy-har/bwoah-my-pi/pull/20) by [@btimothy-har](https://github.com/btimothy-har)).
 
 ### Changed
+- Changed Bwoah My Pi bundled non-worker agents to inherit the active session model by default; `task` and `sonic` retain their dedicated model roles ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Changed Bwoah My Pi specialist agents to self-contained Markdown frontmatter files; standalone consultations can return prose while `/review` still enforces a strict finding schema ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed `/review` branch and commit scopes to pin the resolved base/head SHAs (and merge base) at selection time, so moving branch tips during dispatch cannot alter the reviewed diff, and replaced mandatory diff-size reviewer counts with review-chair judgment of coherent scope ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed fork builds to skip the upstream release check at startup, and `omp update` now refuses app updates on `+bwoah` builds — pointing at the fork installer or source checkout instead of replacing the install with upstream artifacts ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed the per-request date/cwd reminder to date-only (`date-reminder`); the current working directory now rides in the workspace-policy reminder (`cwd-workspace-reminder`) ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
@@ -22,6 +25,11 @@
 - Changed human-facing version output to append `+bwoah`, identifying source installations of this fork without changing upstream version precedence ([Bwoah My Pi #5](https://github.com/btimothy-har/bwoah-my-pi/pull/5) by [@btimothy-har](https://github.com/btimothy-har)).
 
 ### Fixed
+- Fixed Bwoah My Pi review specialists receiving executable or state-mutating ambient tools in supposedly read-only reviews; child sessions now restrict the effective tool set, including custom, MCP, and memory capabilities ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi review guidance to require strict finding schemas even for overridden specialists ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi code reviews failing to dispatch the full specialist roster when `task.batch` is disabled; the chair now uses individual flat tasks in that mode ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed Bwoah My Pi standalone specialist consultations returning quoted prose or failing a data-less yield; schema-free answers now submit text and the terminal yield in one response, while inherited schemas are respected ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Fixed custom memory-reading subagents losing `recall` and `reflect` after read-only tool restrictions by retaining their backend initialization path ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed `/wt`, `/move`, and `/mcp reload` leaving MCP servers, task-agent choices, and cold-revived subagent discovery bound to the previous checkout; workspace discovery now follows the active execution directory while session history stays at its canonical home ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed edit and write LSP processing staying bound to the previous checkout after `/wt` or `/move` ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Fixed rejected `/wt` execution bindings being revived when their old path later became valid; restore now clears the saved binding and keeps the conversation at its canonical home ([Bwoah My Pi #10](https://github.com/btimothy-har/bwoah-my-pi/pull/10) by [@btimothy-har](https://github.com/btimothy-har)).
