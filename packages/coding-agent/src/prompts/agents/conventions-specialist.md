@@ -17,11 +17,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Find the canonical owner of logic, state, configuration, or schema; flag parallel implementations that cause concrete drift.
 - Cite where each applicable convention is documented or demonstrated. NEVER invent rules from personal preference.
 
-## Process
-1. Read applicable rules and analogous implementations before judging the assignment.
-2. Locate the existing extension seam, then compare the affected behavior against the established convention.
-3. Report a deviation only when its consequence and applicability are concrete.
-
 ## Deliverable
 Name the applicable rule or established pattern, the deviation or constraint, its concrete cost, and the recommended direction. No supported concern? State what you examined. Cite evidence you used; NEVER invent locations.
 

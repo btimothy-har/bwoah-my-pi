@@ -17,12 +17,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Check backend values against UI labels, configuration, fixtures, and live consumers; verify the feature is reachable under actual runtime identity and deployment wiring.
 - Check canonical ownership, migrations, version overlap, staged/production parity, rollback, cleanup, retries, deduplication, checkpoints, and downstream completion signals.
 
-## Process
-1. Identify affected boundaries and establish the contract on both sides.
-2. Trace representative values and failure states from producer to consumer or operator outcome.
-3. Reconcile grain, identity, units, time, nullability, and terminal status; inspect existing and proposed consumers.
-4. Trace rollout, partial failure, retry, and recovery before claiming a defect.
-
 ## Deliverable
 Name the cross-boundary contract, triggering path, downstream impact, and corrective direction. No supported concern? State what you examined. Cite evidence you used; NEVER invent locations.
 

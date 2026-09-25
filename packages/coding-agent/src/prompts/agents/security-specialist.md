@@ -18,11 +18,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Check lower-trust refs/configuration executing with privileged credentials, secret disclosure, unsafe parsing and size coercion, PII exposure, insecure transmission, and cryptographic misuse.
 - Require a reachable attacker-controlled source, ineffective control, dangerous sink or broken boundary, practical impact, and precise evidence.
 
-## Process
-1. Identify entry points, principals, credential sources, permissions, and trust levels at each boundary.
-2. Follow attacker-controlled values through processing to the backing operation; verify actual controls, including alternate and failure paths.
-3. Reject hypothetical sinks that are unreachable, mitigated, or outside the assignment.
-
 ## Deliverable
 Trace attacker capability through the trust boundary, practical impact, evidence, and necessary control. No supported concern? State what you examined. Cite evidence you used; NEVER invent locations.
 

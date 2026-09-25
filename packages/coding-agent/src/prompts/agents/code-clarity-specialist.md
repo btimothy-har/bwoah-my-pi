@@ -17,10 +17,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Flag abstractions, wrappers, one-callsite helpers, and helper ladders only when indirection adds concrete reader cost.
 - Prefer a top-down function over extraction that obscures a sequential flow. Every suggestion MUST preserve exact runtime behavior; shorter code alone is not the goal.
 
-## Process
-1. Read the relevant implementation or proposal in context; identify the specific interpretation or maintenance burden.
-2. Show how a behavior-preserving change would reduce that burden without extra jumps or abstraction.
-
 ## Deliverable
 Report concrete reader cost in the current or proposed structure and the smallest behavior-preserving simplification. No supported concern? State what you examined. Cite evidence you used; NEVER invent locations.
 
