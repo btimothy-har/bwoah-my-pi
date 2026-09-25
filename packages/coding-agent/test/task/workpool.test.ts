@@ -13,6 +13,7 @@ import { HubTool } from "../../src/tools/hub";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
 import * as discoveryModule from "../../src/task/discovery";
+import * as isolationRunner from "../../src/task/isolation-runner";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
@@ -466,6 +467,47 @@ describe("WorkPool dispatch", () => {
 			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);
 			expect(await Bun.file(path.join(repo, "first.txt")).text()).toBe("first.txt");
 			expect(await Bun.file(path.join(repo, "second.txt")).text()).toBe("second.txt");
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the pool's reuse decision consistent when isolation is enabled after creation", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workpool-policy-"));
+		try {
+			await $`git init -q ${repo}`.quiet();
+			const agent = { ...AGENT, name: "task", isolation: "apply" as const };
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+			const session = { ...makeSession([], 1), cwd: repo };
+			const policy = await structured.resolveEffectiveSubagentPolicy({
+				session,
+				invocationKind: "eval",
+				agent: "task",
+				assignment: "workpool",
+			});
+			expect(policy.isIsolated).toBe(false);
+			const workpool = new WorkPool(session, { name: "policy-snapshot", policy });
+			session.settings.override("task.isolation.enabled", true);
+			const direct = vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
+				markIdle(options.id);
+				return singleResult(options.id, "first");
+			});
+			const isolated = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
+				markIdle(options.agentId);
+				return { ...singleResult(options.agentId, "isolated"), isolated: true };
+			});
+			const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+				markIdle(options.id);
+				return singleResult(options.id, "second");
+			});
+			workpool.push(["first", "second"]);
+			await finishPool(session, workpool);
+
+			expect(direct).toHaveBeenCalledTimes(1);
+			expect(direct.mock.calls[0]?.[0].worktree).toBeUndefined();
+			expect(isolated).not.toHaveBeenCalled();
+			expect(follow).toHaveBeenCalledTimes(1);
+			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);
 		} finally {
 			await fs.rm(repo, { recursive: true, force: true });
 		}

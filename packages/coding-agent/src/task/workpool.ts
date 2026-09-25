@@ -388,6 +388,14 @@ export class WorkPool {
 							outputSchema,
 							schemaMode: "strict",
 							workPoolYieldItems,
+							// Pin the creation-time isolation mode: the pool's fresh/reuse/keepAlive
+							// decision was made from this policy, and the launch re-resolves live
+							// settings. Only apply agents may request an explicit mode; discard
+							// agents always re-resolve (explicit controls are rejected for them).
+							// Plan mode forbids explicit isolation controls entirely.
+							...(this.policy.agent.isolation === "apply" && !this.policy.planMode
+								? { isolation: { requested: this.policy.isIsolated } }
+								: {}),
 							keepAlive: !(this.freshAgents && this.policy.isIsolated),
 							retainArtifacts: true,
 							shareEvalSession: false,
