@@ -16,7 +16,7 @@
 
 ### Changed
 - Changed Bwoah My Pi bundled non-worker agents to inherit the active session model by default; `task` and `sonic` retain their dedicated model roles ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
-- Changed Bwoah My Pi specialist agents to Markdown frontmatter in each file, with shared review guidance expanded at bundle time; standalone consultations can return prose while `/review` still enforces a strict finding schema ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
+- Changed Bwoah My Pi specialist agents to self-contained Markdown frontmatter files; standalone consultations can return prose while `/review` still enforces a strict finding schema ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed `/review` branch and commit scopes to pin the resolved base/head SHAs (and merge base) at selection time, so moving branch tips during dispatch cannot alter the reviewed diff, and replaced mandatory diff-size reviewer counts with review-chair judgment of coherent scope ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed fork builds to skip the upstream release check at startup, and `omp update` now refuses app updates on `+bwoah` builds — pointing at the fork installer or source checkout instead of replacing the install with upstream artifacts ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).
 - Changed the per-request date/cwd reminder to date-only (`date-reminder`); the current working directory now rides in the workspace-policy reminder (`cwd-workspace-reminder`) ([Bwoah My Pi](https://github.com/btimothy-har/bwoah-my-pi)).

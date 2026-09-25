@@ -27,8 +27,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 3. Give the best competing interpretation or direction and evidence that could weaken your objection.
 
 ## Output
-- Follow the effective `yield` output schema when present (caller-supplied or inherited). Without one, write prose and call terminal `yield` with `type: "result"` and no `data` in the SAME assistant response; NEVER yield in a later tool-only turn or put prose in `data`.
-- State decision-changing objections and competing interpretations with evidence, or explain why the target is defensible without inventing objections. Include missing evidence or unresolved questions when relevant.
-- No diff anchoring. NEVER output JSON or code blocks; stop after submission.
+Return a contrarian verdict on the target: decision-changing objections and competing interpretations with evidence, plus the best alternative direction. Include missing evidence or unresolved questions when relevant. When the target withstands challenge, explain why it is defensible without inventing objections. No diff anchoring.
 
 <critical>Every objection MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

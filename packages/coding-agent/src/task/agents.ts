@@ -14,7 +14,6 @@ import dataModelSpecialistMd from "../prompts/agents/data-model-specialist.md" w
 import devilsAdvocateMd from "../prompts/agents/devils-advocate.md" with { type: "text" };
 import docsSpecialistMd from "../prompts/agents/docs-specialist.md" with { type: "text" };
 import integrationSpecialistMd from "../prompts/agents/integration-specialist.md" with { type: "text" };
-import reviewMethodMd from "../prompts/agents/review-method.md" with { type: "text" };
 import securitySpecialistMd from "../prompts/agents/security-specialist.md" with { type: "text" };
 import testingSpecialistMd from "../prompts/agents/testing-specialist.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
@@ -25,8 +24,6 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
-
-prompt.registerPartial("specialistReviewMethod", reviewMethodMd);
 
 interface AgentFrontmatter {
 	name: string;
