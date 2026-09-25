@@ -105,6 +105,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.dryBalanceHelp,
 	},
 	{
+		name: "find",
+		load: () => import("./commands/find").then(m => m.default),
+		help: commandHelp.findHelp,
+	},
+	{
 		name: "gc",
 		load: () => import("./commands/gc").then(m => m.default),
 		help: commandHelp.gcHelp,
@@ -172,6 +177,16 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.sayHelp,
 	},
 	{
+		name: "clip",
+		load: () => import("./commands/clip").then(m => m.default),
+		help: commandHelp.clipHelp,
+	},
+	{
+		name: "play",
+		load: () => import("./commands/play").then(m => m.default),
+		help: commandHelp.playHelp,
+	},
+	{
 		name: "share",
 		load: () => import("./commands/share").then(m => m.default),
 		help: commandHelp.shareHelp,
@@ -195,6 +210,12 @@ export const commands: CommandEntry[] = [
 		name: "render",
 		load: () => import("./commands/render").then(m => m.default),
 		help: commandHelp.renderHelp,
+	},
+	{
+		name: "skill",
+		load: () => import("./commands/skill").then(m => m.default),
+		aliases: ["skills"],
+		help: commandHelp.skillHelp,
 	},
 	{
 		name: "ssh",
@@ -245,7 +266,7 @@ export const commands: CommandEntry[] = [
 	{
 		name: "search",
 		load: () => import("./commands/web-search").then(m => m.default),
-		aliases: ["q"],
+		aliases: ["q", "web-search"],
 		help: commandHelp.searchHelp,
 	},
 ];

@@ -975,7 +975,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					content: [
 						{
 							type: "text",
-							text: `Spawned agent \`${agentId}\` (job \`${jobId}\`). Its result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first. ${coordinationHint}`,
+							text: `Spawned agent \`${agentId}\` (job \`${jobId}\`). Its result auto-delivers on yield; \`hub jobs\` only summarizes it, while \`hub wait\` can consume it first. ${coordinationHint}`,
 						},
 					],
 					details: buildAsyncDetails(),
@@ -990,7 +990,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				content: [
 					{
 						type: "text",
-						text: `Spawned ${started.length} background agents using ${agentLabel}.${scheduleFailureSummary} Each result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first.\n${startedListing}\n${coordinationHint}`,
+						text: `Spawned ${started.length} background agents using ${agentLabel}.${scheduleFailureSummary} Each result auto-delivers on yield; \`hub jobs\` only summarizes it, while \`hub wait\` can consume it first.\n${startedListing}\n${coordinationHint}`,
 					},
 				],
 				details: buildAsyncDetails(),
@@ -1054,7 +1054,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const spawnedSummary =
 			started.length > 0
-				? `Spawned ${started.length} background agent${started.length === 1 ? "" : "s"}.${scheduleFailureSummary} Each result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first.\n${started.map(({ agentId, jobId }) => `- \`${agentId}\` (job \`${jobId}\`)`).join("\n")}\n${coordinationHint}`
+				? `Spawned ${started.length} background agent${started.length === 1 ? "" : "s"}.${scheduleFailureSummary} Each result auto-delivers on yield; \`hub jobs\` only summarizes it, while \`hub wait\` can consume it first.\n${started.map(({ agentId, jobId }) => `- \`${agentId}\` (job \`${jobId}\`)`).join("\n")}\n${coordinationHint}`
 				: scheduleFailureSummary.trim();
 		const text = [merged.contentParts.join("\n\n"), spawnedSummary]
 			.filter(section => section.trim().length > 0)
@@ -1152,6 +1152,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 								? nextProgress.resolvedModelIsFallback
 								: undefined;
 							progress.advisor = nextProgress.advisor ?? progress.advisor;
+							progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
 							progress.tokens = nextProgress.tokens;
 							progress.requests = nextProgress.requests;
 							progress.contextTokens = nextProgress.contextTokens;
@@ -1216,6 +1217,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.retryState = undefined;
 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
 					progress.advisor = singleResult?.advisor ?? progress.advisor;
+					progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
 					if (singleResult?.resolvedModel) {
 						progress.resolvedModel = singleResult.resolvedModel;
 						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;

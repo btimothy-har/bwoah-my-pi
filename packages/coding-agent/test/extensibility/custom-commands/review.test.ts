@@ -260,6 +260,30 @@ describe("ReviewCommand", () => {
 		}
 	});
 
+	it("uses the live session cwd instead of the load-time cwd (issue #12501)", async () => {
+		const staleDir = path.join(tmpDir, "stale-checkout");
+		const liveDir = path.join(tmpDir, "live-worktree");
+		const requireSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "git",
+			uncommittedDiff: async () => "diff --git a/f.txt b/f.txt",
+		} as unknown as VcsRepo);
+		try {
+			const command = new ReviewCommand({ cwd: staleDir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectedMode: "2. Review uncommitted changes",
+				sessionCwd: liveDir,
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeDefined();
+			expect(requireSpy).toHaveBeenCalledWith(liveDir);
+			expect(requireSpy).not.toHaveBeenCalledWith(staleDir);
+		} finally {
+			requireSpy.mockRestore();
+		}
+	});
+
 	it("parses supported explicit PR URL formats", async () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));

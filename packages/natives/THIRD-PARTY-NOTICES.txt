@@ -336,21 +336,20 @@ commercially, as long as it is attributed to Poppy Works. The font is bundled
 here (crates/pi-natives/src/fonts/Silver.ttf) as a CJK/Unicode bitmap fallback.
 
 -------------------------------------------------------------------------------
-packages/utils/src/vendor/mermaid-ascii/NOTICE
+crates/pi-natives/src/mermaid/NOTICE
 
-This directory contains an in-house Mermaid-diagram-to-ASCII renderer adapted
-from beautiful-mermaid (https://github.com/lukilabs/beautiful-mermaid), used
-under the MIT License.
+This directory contains a Rust port of the in-house Mermaid-diagram-to-ASCII
+renderer formerly vendored at packages/utils/src/vendor/mermaid-ascii, which was
+adapted from beautiful-mermaid (https://github.com/lukilabs/beautiful-mermaid),
+used under the MIT License.
 
   Copyright (c) 2026 Craft Docs
 
 Only the ASCII rendering pipeline is ported (flowchart/state, sequence, class,
 ER, and xychart diagrams); the SVG renderer and its `elkjs` graph-layout
 dependency, the browser entry point, and the SVG theme/style modules were
-dropped. Terminal display width is reimplemented on `Bun.stringWidth`, and
-inline label formatting (HTML tags, markdown emphasis) is reduced to plain text
-for ASCII output. Layout and edge-routing logic is preserved faithfully so
-ASCII output matches the upstream package.
+dropped. Inline label formatting (HTML tags, markdown emphasis) is reduced to
+plain text for ASCII output.
 
 MIT License
 
