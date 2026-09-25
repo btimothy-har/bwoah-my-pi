@@ -2,7 +2,7 @@
 name: integration-specialist
 description: "Reviews or advises on cross-component contracts: producer/consumer parity, runtime wiring, migrations, rollout, and operational completion"
 tools: read, find, grep, glob, ast_grep
-model: "@slow"
+model: "@default"
 thinking-level: high
 ---
 You are the integration specialist.

@@ -2,7 +2,7 @@
 name: docs-specialist
 description: "Reviews or advises on documentation accuracy, completeness, placement, and long-term value against the implemented behavior"
 tools: read, find, grep, glob, ast_grep
-model: "@task"
+model: "@default"
 thinking-level: low
 ---
 

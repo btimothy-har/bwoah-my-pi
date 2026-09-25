@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runAgentsCommand } from "@oh-my-pi/pi-coding-agent/cli/agents-cli";
-import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { getBundledAgent, loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { resolveEffectiveSubagentPolicy } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
@@ -28,19 +28,18 @@ describe("bundled agent parsing", () => {
 
 	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
-			["conventions-specialist", "@slow", Effort.High],
-			["integration-specialist", "@slow", Effort.High],
-			["testing-specialist", "@task", Effort.Medium],
-			["code-clarity-specialist", "@task", Effort.Medium],
-			["docs-specialist", "@task", Effort.Low],
-			["security-specialist", "@slow", Effort.High],
-			["data-model-specialist", "@task", Effort.High],
+			["conventions-specialist", Effort.High],
+			["integration-specialist", Effort.High],
+			["testing-specialist", Effort.Medium],
+			["code-clarity-specialist", Effort.Medium],
+			["docs-specialist", Effort.Low],
+			["security-specialist", Effort.High],
+			["data-model-specialist", Effort.High],
 		] as const;
 
-		for (const [name, model, effort] of lenses) {
+		for (const [name, effort] of lenses) {
 			const agent = getBundledAgent(name);
 			expect(agent?.output).toBeUndefined();
-			expect(agent?.model).toEqual([model]);
 			expect(agent?.thinkingLevel).toBe(effort);
 			expect(agent?.isolation).toBeUndefined();
 			expect(agent?.spawns).toBeUndefined();
@@ -52,7 +51,6 @@ describe("bundled agent parsing", () => {
 		const agent = getBundledAgent("devils-advocate");
 		expect(agent?.isolation).toBeUndefined();
 		expect(agent?.tools).toEqual(["read", "grep", "glob", "web_search", "yield"]);
-		expect(agent?.model).toEqual(["@slow"]);
 		expect(agent?.thinkingLevel).toBe(Effort.High);
 		expect(agent?.output).toBeUndefined();
 	});
@@ -159,12 +157,7 @@ describe("bundled agent parsing", () => {
 		).toBe(true);
 	});
 
-	// Issue #4761: with `modelRoles.slow: ...:xhigh`, the role's explicit effort
-	// suffix must survive agent-pattern expansion and model resolution for the
-	// bundled agents routed at that role. The executor prefers an explicit
-	// resolved suffix over the agent-definition default (task/executor.ts), so
-	// the resolved level below is what the subagent runs at.
-	it("resolves the configured slow-role effort suffix for reviewer", () => {
+	it("inherits an explicit parent effort suffix for reviewer", () => {
 		const gpt55 = buildModel({
 			id: "gpt-5.5",
 			name: "GPT-5.5 Codex",
@@ -178,14 +171,15 @@ describe("bundled agent parsing", () => {
 			contextWindow: 272000,
 			maxTokens: 128000,
 		});
-		const settings = Settings.isolated({
-			modelRoles: { slow: "openai-codex/gpt-5.5:xhigh" },
-		});
+		const settings = Settings.isolated({ modelRoles: { default: "openai-codex/gpt-5.5:low" } });
 		const registry = { getAvailable: () => [gpt55] } as Parameters<typeof resolveModelOverride>[1];
 
 		const agent = getBundledAgent("reviewer");
-		expect(agent?.thinkingLevel).toBeUndefined();
-		const patterns = resolveAgentModelPatterns({ agentModel: agent?.model, settings });
+		const patterns = resolveAgentModelPatterns({
+			agentModel: agent?.model,
+			settings,
+			activeModelPattern: "openai-codex/gpt-5.5:xhigh",
+		});
 		const resolved = resolveModelOverride(patterns, registry, settings);
 		expect(resolved.model?.provider).toBe("openai-codex");
 		expect(resolved.model?.id).toBe("gpt-5.5");
@@ -193,31 +187,36 @@ describe("bundled agent parsing", () => {
 		expect(resolved.explicitThinkingLevel).toBe(true);
 	});
 
-	// The alias is expanded before it reaches the executor, so the role identity
-	// only survives as the `role` half of the selection. A subagent's inherited
-	// `retry.fallbackChains` entry is keyed off it — lose it and every bundled
-	// agent silently retries on the `default` role's chain.
-	it("keeps the role identity of every alias-routed bundled agent through expansion", () => {
+	it("routes non-worker agents to the active model without changing worker roles", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
 				default: "anthropic/opus",
 				task: "anthropic/sonnet",
 				smol: "fast/hy3",
-				slow: "codex/sol",
 			},
 		});
+		const activeModelPattern = "codex/sol:medium";
 
 		for (const [name, role, model] of [
 			["task", "task", "anthropic/sonnet"],
 			["sonic", "smol", "fast/hy3"],
-			["scout", "smol", "fast/hy3"],
-			["reviewer", "slow", "codex/sol"],
 		] as const) {
 			const agent = getBundledAgent(name);
-			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings })).toEqual({
+			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings, activeModelPattern })).toEqual({
 				patterns: [model],
 				role,
 			});
 		}
+		for (const agent of loadBundledAgents().filter(agent => !["task", "sonic"].includes(agent.name))) {
+			expect(resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern })).toEqual({
+				patterns: [activeModelPattern],
+				role: undefined,
+			});
+		}
+		const reviewer = getBundledAgent("reviewer");
+		expect(resolveAgentModelSelection({ agentModel: reviewer?.model, settings })).toEqual({
+			patterns: ["anthropic/opus"],
+			role: undefined,
+		});
 	});
 });

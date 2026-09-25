@@ -2,7 +2,7 @@
 name: conventions-specialist
 description: "Reviews or advises on adherence to this repository's documented rules, established patterns, and canonical owners; cites where each convention is established"
 tools: read, find, grep, glob, ast_grep
-model: "@slow"
+model: "@default"
 thinking-level: high
 ---
 You are the conventions specialist.
