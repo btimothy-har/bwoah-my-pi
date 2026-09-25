@@ -12,7 +12,6 @@ import * as path from "node:path";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -74,7 +73,6 @@ describe("builtin-skills provider", () => {
 		expect(end).toBeGreaterThan(start);
 		const schema: unknown = JSON.parse(content.slice(start + fence.length, end));
 		const validator = buildOutputValidator(schema).validator;
-		const bundled = buildOutputValidator(getBundledAgent("docs-specialist")?.output).validator;
 		const clean = { overall_correctness: "correct", explanation: "No defects found.", confidence: 0.9 };
 		const finding = {
 			title: "Handle missing input",
@@ -88,7 +86,6 @@ describe("builtin-skills provider", () => {
 		};
 		for (const result of [clean, { ...clean, overall_correctness: "incorrect", findings: [finding] }]) {
 			expect(validator?.validate(result).success).toBe(true);
-			expect(bundled?.validate(result).success).toBe(true);
 		}
 		expect(validator?.validate({ ...clean, findings: [{ ...finding, title: undefined }] }).success).toBe(false);
 	});

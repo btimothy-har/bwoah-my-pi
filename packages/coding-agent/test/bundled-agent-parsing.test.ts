@@ -13,7 +13,6 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runAgentsCommand } from "@oh-my-pi/pi-coding-agent/cli/agents-cli";
 import { getBundledAgent, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { REVIEW_LENS_OUTPUT } from "@oh-my-pi/pi-coding-agent/task/specialist-agents";
 import { resolveEffectiveSubagentPolicy } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
@@ -27,7 +26,7 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
-	it("preserves specialist tool policy, model selection, and review schema through bundled frontmatter", () => {
+	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
 			["conventions-specialist", "@slow", Effort.High],
 			["integration-specialist", "@slow", Effort.High],
@@ -40,7 +39,7 @@ describe("bundled agent parsing", () => {
 
 		for (const [name, model, effort] of lenses) {
 			const agent = getBundledAgent(name);
-			expect(agent?.output).toEqual(REVIEW_LENS_OUTPUT);
+			expect(agent?.output).toBeUndefined();
 			expect(agent?.model).toEqual([model]);
 			expect(agent?.thinkingLevel).toBe(effort);
 			expect(agent?.isolation).toBeUndefined();
@@ -53,38 +52,13 @@ describe("bundled agent parsing", () => {
 		}
 	});
 
-	it("validates incremental specialist findings and rejects incomplete ones", () => {
-		const validator = buildOutputValidator(getBundledAgent("conventions-specialist")?.output);
-		expect(validator.error).toBeUndefined();
-		const findingValidator = validator.validator?.validateSection.get("findings");
-		expect(findingValidator).toBeDefined();
-		const finding = {
-			title: "Use the canonical helper",
-			body: "The change bypasses the shared helper and produces a divergent result.",
-			priority: 2,
-			confidence: 0.9,
-			file_path: "src/feature.ts",
-			line_start: 10,
-			line_end: 10,
-			recommendation: "Call the existing helper.",
-		};
-		expect(findingValidator?.(finding).success).toBe(true);
-		expect(findingValidator?.({ ...finding, title: undefined }).success).toBe(false);
-	});
-
-	it("keeps the devil's advocate read-only and rejects unrecognized verdicts", () => {
+	it("keeps the devil's advocate read-only and unschematized by default", () => {
 		const agent = getBundledAgent("devils-advocate");
 		expect(agent?.isolation).toBeUndefined();
 		expect(agent?.tools).toEqual(["read", "grep", "glob", "web_search", "yield"]);
-		const validator = buildOutputValidator(agent?.output);
-		const response = {
-			target: "A migration plan",
-			verdict: "fragile",
-			objections: [{ claim: "Old consumers persist", why_it_matters: "They cannot parse the new field" }],
-			bottom_line: "Keep the compatibility window.",
-		};
-		expect(validator.validator?.validate(response).success).toBe(true);
-		expect(validator.validator?.validate({ ...response, verdict: "maybe" }).success).toBe(false);
+		expect(agent?.model).toEqual(["@slow"]);
+		expect(agent?.thinkingLevel).toBe(Effort.High);
+		expect(agent?.output).toBeUndefined();
 	});
 
 	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {
@@ -104,7 +78,8 @@ describe("bundled agent parsing", () => {
 			expect(agent.isolation).toBe(expected);
 		}
 	});
-	it("keeps unpacked workers applying their edits under default isolation", async () => {
+
+	it("keeps unpacked workers applying edits and specialists reporting without a default schema", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
@@ -130,6 +105,20 @@ describe("bundled agent parsing", () => {
 				expect(policy.isIsolated).toBe(true);
 				expect(policy.discardChanges).toBe(false);
 				expect(policy.applyChanges).toBe(true);
+			}
+
+			for (const name of ["conventions-specialist", "devils-advocate"]) {
+				const policy = await resolveEffectiveSubagentPolicy({
+					session,
+					invocationKind: "task",
+					assignment: "Review the change",
+					agent: name,
+				});
+				expect(policy.agent.source).toBe("project");
+				expect(policy.isIsolated).toBe(true);
+				expect(policy.discardChanges).toBe(true);
+				expect(policy.applyChanges).toBe(false);
+				expect(policy.schema.source).toBe("none");
 			}
 		} finally {
 			await fs.rm(repo, { recursive: true, force: true });

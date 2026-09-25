@@ -8,31 +8,39 @@ import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
+import claritySpecialistMd from "../prompts/agents/specialists/code-clarity-specialist.md" with { type: "text" };
+import conventionsSpecialistMd from "../prompts/agents/specialists/conventions-specialist.md" with { type: "text" };
+import dataModelSpecialistMd from "../prompts/agents/specialists/data-model-specialist.md" with { type: "text" };
+import devilsAdvocateMd from "../prompts/agents/specialists/devils-advocate.md" with { type: "text" };
+import docsSpecialistMd from "../prompts/agents/specialists/docs-specialist.md" with { type: "text" };
+import integrationSpecialistMd from "../prompts/agents/specialists/integration-specialist.md" with { type: "text" };
+import reviewMethodMd from "../prompts/agents/specialists/review-method.md" with { type: "text" };
+import securitySpecialistMd from "../prompts/agents/specialists/security-specialist.md" with { type: "text" };
+import testingSpecialistMd from "../prompts/agents/specialists/testing-specialist.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
-import { SPECIALIST_AGENT_DEFS } from "./specialist-agents";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
 
-export interface AgentFrontmatter {
+prompt.registerPartial("specialistReviewMethod", reviewMethodMd);
+
+interface AgentFrontmatter {
 	name: string;
 	description: string;
-	tools?: string[];
 	spawns?: string;
 	model?: string | string[];
 	thinkingLevel?: string;
-	output?: unknown;
 	isolation?: "apply" | "discard";
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
 }
 
-export interface EmbeddedAgentDef {
+interface EmbeddedAgentDef {
 	fileName: string;
 	frontmatter?: AgentFrontmatter;
 	template: string;
@@ -75,7 +83,14 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		},
 		template: taskMd,
 	},
-	...SPECIALIST_AGENT_DEFS,
+	{ fileName: "conventions-specialist.md", template: conventionsSpecialistMd },
+	{ fileName: "integration-specialist.md", template: integrationSpecialistMd },
+	{ fileName: "testing-specialist.md", template: testingSpecialistMd },
+	{ fileName: "code-clarity-specialist.md", template: claritySpecialistMd },
+	{ fileName: "docs-specialist.md", template: docsSpecialistMd },
+	{ fileName: "security-specialist.md", template: securitySpecialistMd },
+	{ fileName: "data-model-specialist.md", template: dataModelSpecialistMd },
+	{ fileName: "devils-advocate.md", template: devilsAdvocateMd },
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
