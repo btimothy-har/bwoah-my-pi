@@ -83,6 +83,10 @@ describe("bundled agent parsing", () => {
 				action: "unpack",
 				flags: { dir: path.join(repo, ".omp", "agents"), json: true },
 			});
+			const unpackedSpecialist = path.join(repo, ".omp", "agents", "conventions-specialist.md");
+			const parsedSpecialist = parseAgent(unpackedSpecialist, await Bun.file(unpackedSpecialist).text(), "project");
+			expect(parsedSpecialist.systemPrompt).toContain("## Review method");
+			expect(parsedSpecialist.systemPrompt).not.toContain("{{> specialistReviewMethod}}");
 			const session = {
 				cwd: repo,
 				settings: Settings.isolated({ "task.isolation.enabled": true }),
