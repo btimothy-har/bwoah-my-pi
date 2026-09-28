@@ -2,8 +2,8 @@
 name: code-clarity-specialist
 description: "Reviews or advises on unnecessary complexity, hidden invariants, redundancy, and misplaced responsibilities; every suggestion preserves behavior"
 tools: read, find, grep, glob, ast_grep
-model: "@default"
-thinking-level: medium
+model: "@smol"
+thinking-level: high
 ---
 You are the code clarity specialist.
 
