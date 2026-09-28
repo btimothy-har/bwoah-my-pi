@@ -243,9 +243,7 @@ describe("ACP lazy startup", () => {
 		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 
 		const explicit = {
-			"task.isolation.enabled": true,
 			"isolation.backend": "rcopy",
-			"task.isolation.apply": false,
 			"task.isolation.merge": "branch",
 			"task.isolation.commits": "ai",
 			"task.eager": "always",

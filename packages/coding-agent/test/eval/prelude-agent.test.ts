@@ -6,8 +6,8 @@ import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
  * The eval `agent()` helper always returns an `AgentHandle` — spawning is
  * asynchronous, so callers get a recoverable `agent://<id>` handle and
  * resolve results through `wait()`/`output()` instead of a bare string.
- * These lock the bridge call shape, the handle surface, the positional-arg
- * order, the missing-id error contract, and schema-aware `wait()` parsing.
+ * These lock the bridge call shape, the handle surface, options-object
+ * transport, the missing-id error contract, and schema-aware `wait()` parsing.
  *
  * The prelude source is executed verbatim in a throwaway VM context with only
  * the host bridge (`__omp_call_tool__`) stubbed — no worker, no kernel — so the
@@ -42,32 +42,48 @@ describe("eval js agent() handle", () => {
 		expect(handle.handle).toBe("agent://abc123");
 	});
 
-	it("maps positional args onto named options in order", async () => {
+	it("forwards the trailing options object to the bridge", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {
 			seenArgs = args as Record<string, unknown>;
 			return { id: "legacy", agent: "reviewer" };
 		});
-		const positionalAgent = sandbox.agent as (
-			prompt: string,
-			options?: unknown,
-			...rest: unknown[]
-		) => Promise<unknown>;
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 
-		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict", ["read"]);
+		await (sandbox.agent as AgentHelper)("scout", {
+			agent: "reviewer",
+			label: "Legacy",
+			schema,
+			readOnly: false,
+			schemaMode: "strict",
+			tools: ["read"],
+		});
 
 		expect(seenArgs).toEqual({
 			prompt: "scout",
 			agent: "reviewer",
 			label: "Legacy",
 			schema,
-			isolated: true,
-			apply: false,
-			merge: true,
+			readOnly: false,
 			schemaMode: "strict",
 			tools: ["read"],
 		});
+	});
+
+	it("rejects positional spawn options instead of reinterpreting them", async () => {
+		const sandbox = loadPrelude(async () => ({ id: "unused", agent: "task" }));
+		const positionalAgent = sandbox.agent as (
+			prompt: string,
+			options?: unknown,
+			...rest: unknown[]
+		) => Promise<unknown>;
+
+		await expect(Promise.resolve(positionalAgent("scout", "reviewer"))).rejects.toThrow(
+			"agent() requires a trailing options object; positional spawn options are no longer supported.",
+		);
+		await expect(Promise.resolve(positionalAgent("scout", { agent: "reviewer" }, true))).rejects.toThrow(
+			"agent() takes a single trailing options object",
+		);
 	});
 
 	it("throws when the bridge omits the handle id", async () => {

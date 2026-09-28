@@ -164,13 +164,13 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
-- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails the call synchronously; execution failures surface from `.wait()`.
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, readOnly?, tools? })` — one trailing options object; Python uses keyword arguments (`schema_mode`, `read_only`).
+- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode restrictions, unknown `tools` names) fails the call synchronously; execution failures surface from `.wait()`.
 - `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
-- `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
-- `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
+- Every spawn runs in an isolated clone of the checkout. `readOnly`/`read_only` selects the disposition: omitted/true discards the clone's file changes on release (the result is the deliverable); `false` applies the initial assignment's successful changes back. Obsolete `isolated`/`apply`/`merge` options throw. Plan mode rejects `readOnly: false`.
+- `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel, not the child's. Child agents never get MCP tools.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
-- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and `wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (addressable through `hub`/`history://`) and **do not share the caller's eval executor** (`shareEvalSession=false`).
+- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and `wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (addressable through `hub`/`history://`) and **do not share the caller's eval executor** (`shareEvalSession=false`). Retained agents can receive `hub` follow-ups, but follow-up edits do not auto-merge — `readOnly: false` applies only to the initial assignment.
 
 ### `wait()`
 
@@ -178,13 +178,13 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, read_only=None, tools=None)` (JS: `workpool(agent?, { name, context, readOnly, tools })`) creates a pool of subagents bounded by the live `task.maxConcurrency`:
 
-- `.push(*items)` returns item ids (`<pool>#<seq>`). Normally an item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees. When isolation is enabled and the agent declares `isolation: apply`, the pool also uses fresh one-shot clones regardless of that setting: every item captures and applies its own changes before completing. Failed application marks the item failed and exposes its recovery artifact. Apply-agent pools pin their isolation mode at creation; create another pool after changing `task.isolation.enabled` (turning it off for an already-isolated pool rejects the next launch). Discard agents may still reuse a clone; its file changes never reach the parent checkout.
+- `.push(*items)` returns item ids (`<pool>#<seq>`). Normally an item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees. A pool created with `readOnly: false` uses fresh one-shot workers per batch regardless of that setting: every batch's changes are captured and applied before completing. Failed application marks the item failed and exposes its recovery artifact. Pools pin their disposition at creation. Discard pools (omitted/true) may reuse a worker's clone; its file changes never reach the parent checkout.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
 - The pool name is both its aggregate async-job id and label. Its first full drain settles and closes the pool; create a new named pool for another phase. The aggregate result auto-delivers once, while internal batch jobs are consumed.
 - Completely blocked? Leave eval and call `hub` with `{ op: "wait", ids: [pool.name] }`; re-issue until settled. There is no `pool.wait()`, so the kernel remains free to serve `@tool` calls.
-- `.status()` reports worker/item counts, context usage, and the effective `freshAgents` mode; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local. Non-isolated and reused discard workers may remain parked after a restart; fresh isolated apply workers are one-shot.
+- `.status()` reports worker/item counts, context usage, and the effective `freshAgents` mode; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local. Reused discard workers may remain parked after a restart; isolated agents are transcript-only after a process restart (no cold revival), and fresh merge workers are one-shot.
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 

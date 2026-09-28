@@ -29,6 +29,9 @@ const AGENT: AgentDefinition = {
 	source: "bundled",
 };
 
+// The default pool policy is an ordinary discard clone: workers are retained
+// and reused across batches. Merge (readOnly: false) pools override this with
+// `discardChanges: false`, which flips the pool to fresh one-shot workers.
 const POLICY = {
 	discovery: { agents: [AGENT], projectAgentsDir: null },
 	agentName: "scout",
@@ -36,12 +39,39 @@ const POLICY = {
 	effectiveAgent: AGENT,
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
-	isIsolated: false,
-	discardChanges: false,
+	isIsolated: true,
+	discardChanges: true,
+	cloneDisposition: "discard",
 	mergeMode: "patch",
-	applyChanges: true,
+	applyChanges: false,
 	enableLsp: false,
 	enableIrc: true,
+} satisfies EffectiveSubagentPolicy;
+
+/** Policy for a caller that spawned the pool with readOnly: false. */
+const MERGE_POLICY = {
+	...POLICY,
+	discardChanges: false,
+	cloneDisposition: "merge",
+	applyChanges: true,
+} satisfies EffectiveSubagentPolicy;
+
+/** Plan-mode policy: no clone, no caller disposition to forward. */
+const PLAN_MODE_POLICY = {
+	...POLICY,
+	planMode: true,
+	isIsolated: false,
+	discardChanges: false,
+	cloneDisposition: undefined,
+} satisfies EffectiveSubagentPolicy;
+
+/** Host-managed pool policy: no clone; carries the workflow's own contract. */
+const MANAGED_MODE_POLICY = {
+	...POLICY,
+	isIsolated: false,
+	discardChanges: false,
+	cloneDisposition: undefined,
+	managedSubagentExecution: { spawns: [] },
 } satisfies EffectiveSubagentPolicy;
 
 const managers = new Set<AsyncJobManager>();
@@ -411,7 +441,7 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.status().freshAgents).toBe(true);
 	});
 
-	it("uses fresh one-shot agents for isolated apply pools so every item is applied", async () => {
+	it("uses fresh one-shot agents for merge pools so every item is applied", async () => {
 		const session = makeSession([], 1);
 		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			const id = request.identity?.id ?? "missing";
@@ -420,7 +450,7 @@ describe("WorkPool dispatch", () => {
 		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn");
 		const workpool = new WorkPool(session, {
 			name: "isolated-apply",
-			policy: { ...POLICY, isIsolated: true, discardChanges: false },
+			policy: MERGE_POLICY,
 		});
 		workpool.push(["one", "two"]);
 		await finishPool(session, workpool);
@@ -428,9 +458,40 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.status().freshAgents).toBe(true);
 		expect(runSpy).toHaveBeenCalledTimes(2);
 		expect(runSpy.mock.calls.every(([request]) => request.keepAlive === false)).toBe(true);
+		expect(runSpy.mock.calls.every(([request]) => request.readOnly === false)).toBe(true);
 		expect(followSpy).not.toHaveBeenCalled();
 		expect(workpool.batches.map(batch => batch.agentId)).toEqual(["isolated-apply-1", "isolated-apply-2"]);
 		expect(workpool.peek().batches.every(batch => batch.output?.includes("Applied isolated changes."))).toBe(true);
+	});
+
+	it("omits readOnly for plan-mode workers instead of manufacturing an explicit false", async () => {
+		const session = makeSession([], 1);
+		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			return execution(request.identity?.id ?? "missing");
+		});
+		const workpool = new WorkPool(session, { name: "plan-pool", policy: PLAN_MODE_POLICY });
+		workpool.push(["one"]);
+		await finishPool(session, workpool);
+
+		// Plan mode rejects an explicit readOnly: false at dispatch; the pool must
+		// forward nothing rather than derive one from its non-isolated policy.
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(runSpy.mock.calls[0]![0], "readOnly")).toBe(false);
+	});
+
+	it("forwards the managed execution contract without a clone disposition", async () => {
+		const session = makeSession([], 1);
+		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			return execution(request.identity?.id ?? "missing");
+		});
+		const workpool = new WorkPool(session, { name: "managed-pool", policy: MANAGED_MODE_POLICY });
+		workpool.push(["one"]);
+		await finishPool(session, workpool);
+
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		const [request] = runSpy.mock.calls[0]!;
+		expect(Object.hasOwn(request, "readOnly")).toBe(false);
+		expect(request.managedSubagentExecution).toEqual({ spawns: [] });
 	});
 
 	it("applies edits from every isolated workpool item to the parent checkout", async () => {
@@ -442,7 +503,7 @@ describe("WorkPool dispatch", () => {
 			await $`git -c commit.gpgsign=false -c user.name=Probe -c user.email=probe@example.test commit -qm init`
 				.cwd(repo)
 				.quiet();
-			const agent = { ...AGENT, name: "task", isolation: "apply" as const };
+			const agent = { ...AGENT, name: "task" };
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 			vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
 				const file = options.assignment?.includes("first") ? "first.txt" : "second.txt";
@@ -454,12 +515,12 @@ describe("WorkPool dispatch", () => {
 				cwd: repo,
 				getSessionFile: () => path.join(repo, "session.jsonl"),
 			};
-			session.settings.override("task.isolation.enabled", true);
 			const policy = await structured.resolveEffectiveSubagentPolicy({
 				session,
 				invocationKind: "eval",
 				agent: "task",
 				assignment: "workpool",
+				readOnly: false,
 			});
 			const workpool = new WorkPool(session, { name: "real-isolated", policy });
 			workpool.push(["first", "second"]);
@@ -472,11 +533,11 @@ describe("WorkPool dispatch", () => {
 		}
 	});
 
-	it("keeps the pool's reuse decision consistent when isolation is enabled after creation", async () => {
+	it("pins the pool's discard reuse policy at creation time despite later settings changes", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workpool-policy-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
-			const agent = { ...AGENT, name: "task", isolation: "apply" as const };
+			const agent = { ...AGENT, name: "task" };
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 			const session = { ...makeSession([], 1), cwd: repo };
 			const policy = await structured.resolveEffectiveSubagentPolicy({
@@ -485,13 +546,11 @@ describe("WorkPool dispatch", () => {
 				agent: "task",
 				assignment: "workpool",
 			});
-			expect(policy.isIsolated).toBe(false);
+			expect(policy.cloneDisposition).toBe("discard");
 			const workpool = new WorkPool(session, { name: "policy-snapshot", policy });
-			session.settings.override("task.isolation.enabled", true);
-			const direct = vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
-				markIdle(options.id);
-				return singleResult(options.id, "first");
-			});
+			// A later merge-strategy settings change must not drift the pinned disposition.
+			session.settings.override("task.isolation.merge", "branch");
+			const runSpy = vi.spyOn(structured, "runStructuredSubagent");
 			const isolated = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
 				markIdle(options.agentId);
 				return { ...singleResult(options.agentId, "isolated"), isolated: true };
@@ -503,9 +562,10 @@ describe("WorkPool dispatch", () => {
 			workpool.push(["first", "second"]);
 			await finishPool(session, workpool);
 
-			expect(direct).toHaveBeenCalledTimes(1);
-			expect(direct.mock.calls[0]?.[0].worktree).toBeUndefined();
-			expect(isolated).not.toHaveBeenCalled();
+			// Discard pools reuse their worker: one spawn (readOnly: true), one follow-up turn.
+			expect(isolated).toHaveBeenCalledTimes(1);
+			expect(runSpy.mock.calls[0]?.[0].readOnly).toBe(true);
+			expect(runSpy.mock.calls[0]?.[0].keepAlive).toBe(true);
 			expect(follow).toHaveBeenCalledTimes(1);
 			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);
 		} finally {
@@ -540,7 +600,7 @@ describe("WorkPool dispatch", () => {
 			});
 			const workpool = new WorkPool(session, {
 				name: failure.name,
-				policy: { ...POLICY, isIsolated: true, discardChanges: false },
+				policy: MERGE_POLICY,
 			});
 			workpool.push(["change file"]);
 			await finishPool(session, workpool);

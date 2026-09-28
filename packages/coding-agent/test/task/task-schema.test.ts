@@ -31,20 +31,17 @@ describe("task schema (single-spawn)", () => {
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it("removes eval tool names from the wire shape when eval.tools.enabled is off", () => {
+	it("rejects eval tool names from the wire shape when eval.tools.enabled is off", () => {
 		const schema = getTaskSchema({
-			isolationEnabled: false,
 			batchEnabled: false,
 			evalToolsEnabled: false,
 		});
+		// `"+": "reject"`: an unadvertised `tools` key errors instead of being stripped.
 		const parsed = schema({ agent: "scout", task: "Map the auth module.", tools: ["word_count"] });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
-			expect("tools" in parsed).toBe(false);
-		}
+		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it("retains caller outputSchema, schemaMode, and eval tool names while stripping stale keys", () => {
+	it("retains caller outputSchema, schemaMode, readOnly, and eval tool names", () => {
 		const outputSchema = { type: "object", properties: { answer: { type: "string" } } };
 		const parsed = taskSchema({
 			agent: "scout",
@@ -52,18 +49,28 @@ describe("task schema (single-spawn)", () => {
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],
-			context: "shared background",
-			tasks: [{ name: "A", task: "..." }],
-			schema: '{"properties":{}}',
+			readOnly: false,
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.outputSchema).toEqual(outputSchema);
 			expect(parsed.schemaMode).toBe("strict");
 			expect(parsed.tools).toEqual(["word_count"]);
-			expect("tasks" in parsed).toBe(false);
-			expect("context" in parsed).toBe(false);
-			expect("schema" in parsed).toBe(false);
+			expect(parsed.readOnly).toBe(false);
+		}
+	});
+
+	it("rejects stale caller keys instead of stripping them", () => {
+		for (const stale of [
+			{ context: "shared background" },
+			{ tasks: [{ name: "A", task: "..." }] },
+			{ schema: '{"properties":{}}' },
+			{ isolated: true },
+			{ apply: false },
+			{ merge: false },
+		]) {
+			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", ...stale });
+			expect(parsed instanceof type.errors).toBe(true);
 		}
 	});
 });
@@ -77,7 +84,7 @@ describe("task spawn validation", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": false }),
+			settings: Settings.isolated({ "task.batch": false }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;

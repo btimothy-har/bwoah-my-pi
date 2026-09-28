@@ -17,17 +17,41 @@
  * 4. Async schedule failure in a mixed call still returns the inline results
  *    and reports the failed spawn.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import type * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+
+// Ordinary spawns always run in an isolated clone now, so preflight probes
+// the session cwd for a supported Git checkout even with execution stubbed.
+let repoDir: string;
+
+beforeAll(async () => {
+	repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-blocking-split-repo-"));
+	await $`git init -q -b main ${repoDir}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(repoDir, { recursive: true, force: true });
+});
+
+/** Stub the clone boundary and observe the executor options handed to the runner. */
+function mockIsolatedDispatch(impl: (options: executorModule.ExecutorOptions) => Promise<SingleResult>): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: repoDir, baseline: null });
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => impl(opts.baseOptions));
+}
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -46,7 +70,7 @@ const scoutAgent: AgentDefinition = {
 
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> } = {}): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: repoDir,
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? { "async.enabled": true, "task.batch": true }),
 		getSessionFile: () => null,
@@ -114,7 +138,7 @@ describe("task per-item blocking split", () => {
 		mockDiscovery();
 		const gates = new Map<string, PromiseWithResolvers<void>>();
 		const started: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = Promise.withResolvers<void>();
@@ -172,7 +196,7 @@ describe("task per-item blocking split", () => {
 		mockDiscovery();
 		const gates = new Map<string, PromiseWithResolvers<void>>();
 		const started: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = Promise.withResolvers<void>();
@@ -225,7 +249,7 @@ describe("task per-item blocking split", () => {
 	it("keeps an all-blocking batch fully synchronous", async () => {
 		mockDiscovery();
 		const executed: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			executed.push(options.id ?? "?");
 			return makeResult(options.id ?? "?", options.agent.name);
 		});
@@ -249,9 +273,7 @@ describe("task per-item blocking split", () => {
 
 	it("returns inline results and reports the failure when async scheduling fails", async () => {
 		mockDiscovery();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
-			makeResult(options.id ?? "?", options.agent.name),
-		);
+		mockIsolatedDispatch(async options => makeResult(options.id ?? "?", options.agent.name));
 
 		// A running non-queued filler job exhausts maxRunningJobs, so the
 		// worker spawn's registration throws while the scout still runs inline.

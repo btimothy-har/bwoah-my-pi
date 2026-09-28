@@ -11,7 +11,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
-import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
+import { oneLineLabel, type SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 export { MAIN_AGENT_ID };
@@ -57,6 +57,8 @@ export interface AgentHistorySummary {
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
 	readOnly?: boolean;
+	/** Resolved clone disposition for ordinary cloned runs; absent for historical and host-managed executions. */
+	cloneDisposition?: SubagentCloneDisposition;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
 	/** Captured isolated-worktree patch, when patch capture succeeded. */

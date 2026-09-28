@@ -50,6 +50,7 @@ export interface AgentRecordLike {
 		resolvedModelIsFallback?: boolean;
 		metrics?: AgentMetricsSummary;
 		readOnly?: boolean;
+		cloneDisposition?: "discard" | "merge";
 		outputPath?: string;
 		patchPath?: string;
 		branchName?: string;

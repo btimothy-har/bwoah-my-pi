@@ -5,7 +5,11 @@
  * model it resolves to, and when the hand-off is skipped (override off,
  * target identical to the starting model).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -20,11 +24,25 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+// The plan-mode guard's non-plan case spawns an ordinary agent, which always
+// runs in an isolated clone now: preflight probes the cwd for a Git checkout.
+let repoDir: string;
+
+beforeAll(async () => {
+	repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prewalk-guard-repo-"));
+	await $`git init -q -b main ${repoDir}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(repoDir, { recursive: true, force: true });
+});
 
 function yieldEmittingSession(
 	initialTools: string[] = ["read", "yield"],
@@ -372,9 +390,9 @@ describe("task tool plan-mode prewalk guard", () => {
 
 	function toolSession(planMode: boolean): ToolSession {
 		return {
-			cwd: "/tmp",
+			cwd: repoDir,
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false }),
+			settings: Settings.isolated(),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),
@@ -387,7 +405,7 @@ describe("task tool plan-mode prewalk guard", () => {
 			projectAgentsDir: null,
 		});
 		let forwarded: AgentDefinition | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => {
+		const answer = (options: executorModule.ExecutorOptions): SingleResult => {
 			forwarded = options.agent;
 			return {
 				index: options.index ?? 0,
@@ -404,7 +422,16 @@ describe("task tool plan-mode prewalk guard", () => {
 				tokens: 0,
 				requests: 1,
 			};
-		});
+		};
+		if (planMode) {
+			// Plan-mode spawns run directly, never in a clone.
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => answer(options));
+		} else {
+			// Ordinary spawns dispatch through the isolation runner; stub the
+			// clone boundary and observe the executor options it received.
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: repoDir, baseline: null });
+			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => answer(opts.baseOptions));
+		}
 		const tool = await TaskTool.create(toolSession(planMode));
 		await tool.execute("tc", { task: "explore the thing" });
 		expect(forwarded).toBeDefined();

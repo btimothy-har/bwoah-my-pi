@@ -26,6 +26,7 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { ManagedSubagentExecution } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -132,7 +133,13 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; agent?: string; isolated?: boolean },
+	contract?: {
+		tools?: string[];
+		readOnly?: boolean;
+		agent?: string;
+		isolated?: boolean;
+		managedSubagentExecution?: ManagedSubagentExecution;
+	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -148,6 +155,7 @@ async function createPersistedSession(
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
+		managedSubagentExecution: contract?.managedSubagentExecution,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -184,6 +192,8 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
 		},
+		getHindsightSessionState: () => undefined,
+		getMnemopiSessionState: () => undefined,
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
@@ -723,11 +733,49 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
-	it("preserves normal revival capability wiring for contracts without the marker", async () => {
+	it("replays a persisted managed execution contract through cold revival", async () => {
+		const cwd = makeTempDir("@pi-managed-revive-");
+		const managed: ManagedSubagentExecution = { toolNames: ["read", "grep", "yield"], spawns: [] };
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["read", "grep", "yield"],
+			managedSubagentExecution: managed,
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The host-managed contract survives process restart so the revived
+		// session's descendants keep direct-cwd managed execution.
+		expect(capturedOptions?.managedSubagentExecution).toEqual(managed);
+	});
+
+	it("rejects a malformed persisted managed execution contract", async () => {
+		const cwd = makeTempDir("@pi-managed-malformed-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			managedSubagentExecution: { toolNames: "read" } as unknown as ManagedSubagentExecution,
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([]).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow("Invalid persisted managed subagent execution policy.");
+	});
+
+	it("keeps ambient MCP out of cold revival even for unrestricted contracts", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
 		const sessionFile = await createPersistedSession(cwd);
 		const hostileMcp = {
-			getTools: () => [{ name: "mcp__server_read", label: "server/read" }],
+			getTools: vi.fn(() => [{ name: "mcp__server_read", label: "server/read" }]),
 		} as unknown as MCPManager;
 		MCPManager.setInstance(hostileMcp);
 		let capturedOptions: CreateAgentSessionOptions | undefined;
@@ -743,8 +791,11 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.restrictToolNames).toBeUndefined();
 		expect(capturedOptions?.enableLsp).toBe(true);
-		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
-		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+		// Revived children never reconsult ambient MCP: no manager, no proxies.
+		expect(capturedOptions?.enableMCP).toBe(false);
+		expect(capturedOptions?.mcpManager).toBeUndefined();
+		expect(capturedOptions?.customTools).toBeUndefined();
+		expect(hostileMcp.getTools).not.toHaveBeenCalled();
 	});
 
 	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {

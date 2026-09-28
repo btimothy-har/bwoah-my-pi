@@ -2191,9 +2191,10 @@ export class Settings {
 			}
 			delete raw["features.unexpectedStopDetection"];
 		}
-		// Split the legacy combined isolation setting into enablement and backend.
-		// Handle both nested YAML and quoted dotted keys. Explicit enabled and
-		// backend values win; legacy backend names are normalized everywhere.
+		// Subagent clones are always on with a per-spawn `readOnly` disposition, so
+		// legacy enablement/apply keys are dropped rather than migrated. The legacy
+		// combined `task.isolation.mode` still normalizes backend names; its
+		// enablement half is discarded. Handles nested YAML and quoted dotted keys.
 		const legacyIsolationBackends: Record<string, string> = {
 			worktree: "rcopy",
 			"fuse-overlay": "overlayfs",
@@ -2206,23 +2207,14 @@ export class Settings {
 				: typeof raw[legacyIsolationModePath] === "string"
 					? (raw[legacyIsolationModePath] as string)
 					: undefined;
-		const flatIsolationEnabled = raw["task.isolation.enabled"];
-		const explicitIsolationEnabled =
-			typeof isolationObj?.enabled === "boolean"
-				? isolationObj.enabled
-				: typeof flatIsolationEnabled === "boolean"
-					? flatIsolationEnabled
-					: undefined;
-		if (legacyIsolationMode !== undefined || explicitIsolationEnabled !== undefined) {
-			if (!isRecord(raw.task)) raw.task = {};
-			const targetTask = raw.task as Record<string, unknown>;
-			if (!isRecord(targetTask.isolation)) targetTask.isolation = {};
-			const targetIsolation = targetTask.isolation as Record<string, unknown>;
-			targetIsolation.enabled = explicitIsolationEnabled ?? legacyIsolationMode !== "none";
-			delete targetIsolation.mode;
+		if (isolationObj) {
+			delete isolationObj.mode;
+			delete isolationObj.enabled;
+			delete isolationObj.apply;
 		}
 		delete raw[legacyIsolationModePath];
 		delete raw["task.isolation.enabled"];
+		delete raw["task.isolation.apply"];
 
 		const rootIsolation = isRecord(raw.isolation) ? (raw.isolation as Record<string, unknown>) : undefined;
 		const configuredBackend =

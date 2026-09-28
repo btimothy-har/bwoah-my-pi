@@ -453,8 +453,10 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			discardChanges: opts.discard,
 			parentRepoRoot: opts.context.repoRoot,
 			worktree: isolationDir,
+			// Source-path preloads are parent-bound: the clone rediscovers or drops
+			// them. Prepared factories are rebound to the clone cwd/eventBus by the
+			// SDK, so owner policy hooks/provider registrations survive isolation.
 			preloadedExtensionPaths: undefined,
-			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;

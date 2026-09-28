@@ -10,49 +10,34 @@ function agentByName(agents: AgentDefinition[], name: string): AgentDefinition {
 }
 
 describe("task agent capability descriptions", () => {
-	it("classifies bundled review lenses as read-only without executable or nested tools", () => {
-		const agents = loadBundledAgents();
-
-		for (const name of [
-			"scout",
-			"devils-advocate",
-			"conventions-specialist",
-			"integration-specialist",
-			"testing-specialist",
-			"code-clarity-specialist",
-			"docs-specialist",
-			"security-specialist",
-			"data-model-specialist",
-		]) {
-			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(true);
-		}
-		for (const name of ["task", "sonic", "reviewer", "security-reviewer"]) {
-			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
-		}
-	});
+	// The classifier now only interprets managed/historical tool-restricted
+	// contracts, so these probes use standalone fixtures rather than bundled
+	// definitions (whose `spawns` authority is no longer a read-only signal).
+	const probe: AgentDefinition = {
+		name: "probe",
+		description: "Classifier probe",
+		systemPrompt: "Probe.",
+		source: "bundled",
+	};
 
 	it("does not classify an agent declaring `hub` as read-only", () => {
 		// `hub` resolves to exec approval for start/stop/restart, process-stdin
 		// `send`, unrecognized ops and malformed params, so declaring it must
 		// disqualify an agent from the read-only label surfaced to the model.
-		const scout = agentByName(loadBundledAgents(), "scout");
-
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "hub", "yield"] })).toBe(false);
-		expect(isReadOnlyAgent({ ...scout, tools: ["hub"] })).toBe(false);
+		expect(isReadOnlyAgent({ ...probe, tools: ["read", "grep", "hub", "yield"] })).toBe(false);
+		expect(isReadOnlyAgent({ ...probe, tools: ["hub"] })).toBe(false);
 
 		// Guard against over-correcting: the positive case must still hold.
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
+		expect(isReadOnlyAgent({ ...probe, tools: ["read", "grep", "yield"] })).toBe(true);
 	});
 
 	it("does not label a nested-spawning agent read-only when its listed tools are reads", () => {
-		const scout = agentByName(loadBundledAgents(), "scout");
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "yield"], spawns: ["task"] })).toBe(false);
+		expect(isReadOnlyAgent({ ...probe, tools: ["read", "yield"], spawns: ["task"] })).toBe(false);
 	});
 
 	it("does not classify memory-dependent or state-mutating tools read-only", () => {
-		const scout = agentByName(loadBundledAgents(), "scout");
 		for (const tool of ["recall", "reflect", "retain", "memory_edit", "todo", "checkpoint", "rewind"]) {
-			expect(isReadOnlyAgent({ ...scout, tools: ["read", tool, "yield"] })).toBe(false);
+			expect(isReadOnlyAgent({ ...probe, tools: ["read", tool, "yield"] })).toBe(false);
 		}
 	});
 

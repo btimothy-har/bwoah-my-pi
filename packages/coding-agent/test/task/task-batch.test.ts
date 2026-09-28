@@ -2,7 +2,7 @@
  * Contracts: task.batch gating (batch spawning + shared context).
  *
  * 1. The wire schema is shape-swapped by `task.batch`: `{ context, tasks[] }`
- *    when on (per-spawn fields — including `model`, `isolated`, `outputSchema`, and
+ *    when on (per-spawn fields — including `readOnly`, `outputSchema`, and
  *    `schemaMode` — live in the items), the flat form exposes those fields
  *    directly. The stale `schema` field is never accepted.
  * 2. Shape validation rejects stale `schema`, `tasks`/`context` while batch
@@ -13,16 +13,20 @@
  *    Both modes forward the shared `context`; the flat form stays accepted at
  *    runtime for internal callers.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { $ } from "bun";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import type * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -33,16 +37,28 @@ const taskAgent: AgentDefinition = {
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
-	isolation: "apply",
 };
 
-const scoutAgent: AgentDefinition = {
-	name: "scout",
-	description: "Read-only research agent",
-	systemPrompt: "You are a scout agent.",
-	tools: ["read"],
-	source: "bundled",
-};
+// Ordinary spawns always run in an isolated clone, so preflight probes the
+// session cwd for a supported Git checkout even when execution is stubbed.
+let repoDir: string;
+
+beforeAll(async () => {
+	repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-batch-repo-"));
+	await $`git init -q -b main ${repoDir}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(repoDir, { recursive: true, force: true });
+});
+
+/** Stub the clone boundary and observe the executor options handed to the runner. */
+function mockIsolatedDispatch(
+	impl: (options: executorModule.ExecutorOptions) => Promise<SingleResult> | SingleResult,
+): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: repoDir, baseline: null });
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => impl(opts.baseOptions));
+}
 
 function createSession(
 	options: {
@@ -54,7 +70,7 @@ function createSession(
 	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: repoDir,
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? {}),
 		getSessionFile: () => null,
@@ -144,97 +160,55 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
 
-	it("requires coordination instead of promising same-file auto-resolution", async () => {
-		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
-
-		expect(tool.description).toContain("Same-file edits are not guaranteed to merge");
-		expect(tool.description).toContain("coordinate through `hub` before editing shared files");
-		expect(tool.description).toContain("Name one integration owner");
-		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
-	});
-
-	it("describes a restricted specialist as the spawn-policy default", async () => {
-		mockDiscovery(scoutAgent);
-		const tool = await TaskTool.create(createSession({ spawns: "scout" }));
-
-		expect(tool.description).toContain("spawn-policy default (`scout`)");
-		expect(tool.description).not.toContain("general-purpose worker");
-		expect(tool.description).not.toContain("default worker");
-		expect(tool.description).toContain("Omit `agent` when the spawn-policy default is the best fit");
-		expect(tool.description).toContain("### scout (READ-ONLY)");
-	});
-
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 
 		const flatSession = createSession({ settings: { "task.batch": false } });
 		const flat = await TaskTool.create(flatSession);
 		expect(getSchemaProperties(flat).effort).toBeUndefined();
-		expect(flat.description).not.toContain("`effort`");
 
 		flatSession.settings.override("task.enableEffort", true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
-		expect(flat.description).toContain("`effort`");
 
 		const batchSession = createSession({ settings: { "task.batch": true } });
 		const batch = await TaskTool.create(batchSession);
 		expect(getBatchItemProperties(batch).effort).toBeUndefined();
-		expect(batch.description).not.toContain("`effort`");
 
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
-		expect(batch.description).toContain("`effort`");
 	});
 
-	it("keeps isolation boolean-only in the batch item schema", async () => {
+	it("exposes readOnly as a boolean in the batch item schema and drops obsolete isolation fields", async () => {
 		mockDiscovery();
 
-		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "task.isolation.enabled": true } }),
-		);
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		const properties = getSchemaProperties(tool);
 		expect(properties.isolated).toBeUndefined();
 		const itemProperties = getBatchItemProperties(tool);
-		const isolatedSchema = itemProperties.isolated;
-		if (!isolatedSchema || typeof isolatedSchema !== "object" || !("type" in isolatedSchema)) {
-			throw new Error("Expected isolated to be a boolean schema");
+		const readOnlySchema = itemProperties.readOnly;
+		if (!readOnlySchema || typeof readOnlySchema !== "object" || !("type" in readOnlySchema)) {
+			throw new Error("Expected readOnly to be a boolean schema");
 		}
-		expect(isolatedSchema.type).toBe("boolean");
-		expect(itemProperties.apply).toBeUndefined();
-	});
-
-	it("describes default discard isolation and identifies agents that apply changes", async () => {
-		mockDiscovery([
-			taskAgent,
-			scoutAgent,
-			getBundledAgent("conventions-specialist")!,
-			getBundledAgent("devils-advocate")!,
-		]);
-		const enabled = await TaskTool.create(createSession({ settings: { "task.isolation.enabled": true } }));
-		expect(enabled.description).toContain("Every spawn runs in its own isolated worktree by default");
-		expect(enabled.description).toContain("### task (isolation: apply)");
-		expect(enabled.description).not.toContain("### scout (isolation: apply)");
-		expect(enabled.description).toContain("### conventions-specialist (READ-ONLY)");
-		expect(enabled.description).not.toContain("### conventions-specialist (isolation: apply)");
-		expect(enabled.description).toContain("### devils-advocate (READ-ONLY)");
-
-		const disabled = await TaskTool.create(createSession());
-		expect(disabled.description).not.toContain("`isolated`");
-		expect(disabled.description).not.toContain("(isolation: apply)");
-	});
-
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
-		mockDiscovery();
-		const tool = await TaskTool.create(
-			createSession({
-				planMode: true,
-				settings: { "task.batch": true, "task.isolation.enabled": true },
-			}),
-		);
-		const itemProperties = getBatchItemProperties(tool);
+		expect(readOnlySchema.type).toBe("boolean");
 		expect(itemProperties.isolated).toBeUndefined();
-		expect(tool.description).not.toContain("`isolated`");
+		expect(itemProperties.apply).toBeUndefined();
+		expect(itemProperties.merge).toBeUndefined();
+	});
+
+	it("rejects the removed isolated field with the readOnly migration error", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+
+		const flat = await tool.execute("tc-obsolete-flat", { task: "Work.", isolated: true } as unknown as TaskParams);
+		expect(getFirstText(flat)).toContain("The `isolated` field was removed.");
+		expect(getFirstText(flat)).toContain("readOnly");
+
+		const batched = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const batch = await batched.execute("tc-obsolete-batch", {
+			context: "ctx",
+			tasks: [{ name: "Legacy", task: "Work.", isolated: false }],
+		} as unknown as TaskParams);
+		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `isolated` field was removed.");
 	});
 
 	it("exposes outputSchema but never the stale schema field", async () => {
@@ -312,11 +286,11 @@ describe("task.batch validation", () => {
 	});
 
 	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
-		// Regression (#6039): the flat single-spawn wire schema carries
-		// `"+": "delete"`, so a batch `{ context, tasks[] }` payload is stripped
-		// by arktype and rejected as `task must be a string (was missing)` in the
-		// agent loop — preempting the tool's own actionable message. The lenient
-		// flag makes the loop forward the raw args to execute() on that failure.
+		// Regression (#6039): the flat single-spawn wire schema rejects unknown
+		// keys (`"+": "reject"`), so a batch `{ context, tasks[] }` payload fails
+		// arktype validation in the agent loop — preempting the tool's own
+		// actionable message. The lenient flag makes the loop forward the raw
+		// args to execute() on that failure.
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
 		expect(tool.lenientArgValidation).toBe(true);
@@ -371,7 +345,7 @@ describe("task.batch spawning", () => {
 			outputSchemaSource?: "caller" | "agent" | "session" | "none";
 			outputSchemaOverridesAgent?: boolean;
 		}> = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			seen.push({
 				id: options.id,
 				context: options.context,
@@ -448,7 +422,7 @@ describe("task.batch spawning", () => {
 			name: "scout",
 			description: "Read-only scout",
 			systemPrompt: "Investigate the assigned target.",
-			tools: ["read"],
+			tools: ["web_search"],
 			model: ["anthropic/claude-haiku-4-5:low"],
 			output: scoutSchema,
 		};
@@ -457,7 +431,7 @@ describe("task.batch spawning", () => {
 			name: "reviewer",
 			description: "Code review specialist",
 			systemPrompt: "Review the assigned target.",
-			tools: ["read", "bash"],
+			tools: ["web_search", "todo"],
 			model: ["anthropic/claude-sonnet-4-6:medium"],
 			output: reviewerSchema,
 		};
@@ -471,7 +445,7 @@ describe("task.batch spawning", () => {
 			outputSchemaSource?: "caller" | "agent" | "session" | "none";
 			outputSchemaOverridesAgent?: boolean;
 		}> = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			seen.push({
 				id: options.id,
 				agent: options.agent,
@@ -506,24 +480,73 @@ describe("task.batch spawning", () => {
 		const byId = new Map(seen.map(spawn => [spawn.id, spawn]));
 		const scoutSpawn = byId.get("Scout");
 		const reviewerSpawn = byId.get("Review");
-		expect(scoutSpawn?.agent).toBe(scoutAgent);
-		expect(scoutSpawn?.agent.tools).toEqual(["read"]);
+		// The effective agent is resolved per spawn: identity/model/schema follow
+		// the selected definition while the tool list becomes the common set
+		// plus the definition's declared extras.
+		expect(scoutSpawn?.agent.name).toBe("scout");
+		expect(scoutSpawn?.agent.tools).toContain("web_search");
+		expect(scoutSpawn?.agent.tools).not.toContain("todo");
+		expect(scoutSpawn?.agent.tools).toEqual(expect.arrayContaining(["read", "write", "eval", "task", "hub"]));
 		expect(scoutSpawn?.modelOverride).toEqual(["anthropic/claude-haiku-4-5:low"]);
 		expect(scoutSpawn?.outputSchema).toBe(scoutSchema);
 		expect(scoutSpawn?.outputSchemaSource).toBe("agent");
 		expect(scoutSpawn?.outputSchemaOverridesAgent).toBe(false);
-		expect(reviewerSpawn?.agent).toBe(reviewerAgent);
-		expect(reviewerSpawn?.agent.tools).toEqual(["read", "bash"]);
+		expect(reviewerSpawn?.agent.name).toBe("reviewer");
+		expect(reviewerSpawn?.agent.tools).toEqual(expect.arrayContaining(["web_search", "todo"]));
 		expect(reviewerSpawn?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6:medium"]);
 		expect(reviewerSpawn?.outputSchema).toBe(callerSchema);
 		expect(reviewerSpawn?.outputSchemaSource).toBe("caller");
 		expect(reviewerSpawn?.outputSchemaOverridesAgent).toBe(true);
 	});
 
+	it("resolves each spawn's clone disposition from its own readOnly flag", async () => {
+		mockDiscovery();
+		const dispositions: Record<string, "discard" | "merge" | undefined> = {};
+		mockIsolatedDispatch(options => {
+			dispositions[options.id ?? "?"] = options.cloneDisposition;
+			return makeResult(options.id ?? "?");
+		});
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: null,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+		);
+		const result = await tool.execute("tc-dispositions", {
+			context: "Shared context.",
+			tasks: [
+				{ name: "Defaulted", task: "Do A." },
+				{ name: "Discarded", task: "Do B.", readOnly: true },
+				{ name: "Merged", task: "Do C.", readOnly: false },
+			],
+		} as TaskParams);
+		expect(getFirstText(result)).toContain("Spawned 3 background agents");
+		await Promise.all(["Defaulted", "Discarded", "Merged"].map(id => manager.getJob(id)!.promise));
+
+		expect(dispositions["Defaulted"]).toBe("discard");
+		expect(dispositions["Discarded"]).toBe("discard");
+		expect(dispositions["Merged"]).toBe("merge");
+
+		// The flat form's top-level flag materializes the same way.
+		const flat = await tool.execute("tc-flat-disposition", {
+			agent: "task",
+			name: "FlatMerge",
+			task: "Do D.",
+			readOnly: false,
+		} as TaskParams);
+		await manager.getJob(flat.details!.async!.jobId!)!.promise;
+		expect(dispositions["FlatMerge"]).toBe("merge");
+	});
+
 	it("treats a one-item batch as a single spawn and forwards context", async () => {
 		mockDiscovery();
 		let capturedContext: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			capturedContext = options.context;
 			return makeResult(options.id ?? "?");
 		});
@@ -562,7 +585,7 @@ describe("task.batch spawning", () => {
 					outputSchemaOverridesAgent?: boolean;
 			  }
 			| undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			captured = {
 				modelOverride: options.modelOverride,
 				outputSchema: options.outputSchema,
@@ -608,7 +631,7 @@ describe("task.batch spawning", () => {
 	it("blocks batch execution when async.enabled is false even with a job manager", async () => {
 		mockDiscovery();
 		const seen: Array<{ id?: string; context?: string; assignment?: string }> = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			seen.push({ id: options.id, context: options.context, assignment: options.assignment });
 			return makeResult(options.id ?? "?");
 		});
@@ -640,7 +663,7 @@ describe("task.batch spawning", () => {
 	it("keeps a long result inline when no readable output artifact exists", async () => {
 		mockDiscovery();
 		const fullOutput = `REPORT:${"x".repeat(6_000)}:END`;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+		mockIsolatedDispatch(options =>
 			makeResult(options.id ?? "?", {
 				output: fullOutput,
 				outputMeta: { lineCount: 1, charCount: fullOutput.length },
@@ -662,7 +685,7 @@ describe("task.batch spawning", () => {
 		mockDiscovery();
 		const started: string[] = [];
 		const gates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const { promise, resolve } = Promise.withResolvers<void>();

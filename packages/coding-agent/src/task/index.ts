@@ -30,7 +30,6 @@ import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { typ
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
-import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
@@ -115,10 +114,8 @@ export {
 } from "./types";
 
 interface TaskDescriptionOptions {
-	agents: AgentDefinition[];
+	agents: readonly AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
-	isolationEnabled: boolean;
-	applyIsolatedChanges: boolean;
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
@@ -144,8 +141,6 @@ function renderDescription(options: TaskDescriptionOptions): string {
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
-		readOnly: isReadOnlyAgent(agent),
-		appliesChanges: options.isolationEnabled && agent.isolation === "apply",
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -154,8 +149,6 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
-		isolationEnabled: options.isolationEnabled,
-		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
@@ -176,11 +169,27 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 /**
  * Reject legacy fields and shape/configuration combinations the current tool
  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
- * `schema` remains an eval-only alias and is rejected.
+ * `schema` remains an eval-only alias and is rejected. The removed `isolated`
+ * flag must fail loudly rather than silently default to discard.
  */
+const OBSOLETE_ISOLATION_MESSAGE =
+	"The `isolated` field was removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
+	}
+	if (Object.hasOwn(params, "isolated")) {
+		return OBSOLETE_ISOLATION_MESSAGE;
+	}
+	const readOnlyError = validateReadOnly(params.readOnly, "The call");
+	if (readOnlyError) return readOnlyError;
+	for (const [index, item] of (params.tasks ?? []).entries()) {
+		if (Object.hasOwn(item, "isolated")) {
+			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_ISOLATION_MESSAGE}`;
+		}
+		const itemError = validateReadOnly(item.readOnly, `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+		if (itemError) return itemError;
 	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
@@ -189,6 +198,12 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		}
 	}
 	return undefined;
+}
+
+/** Reject a non-boolean `readOnly` on internal/stale-transcript calls that bypass the wire schema. */
+function validateReadOnly(readOnly: boolean | undefined, label: string): string | undefined {
+	if (readOnly === undefined || typeof readOnly === "boolean") return undefined;
+	return `${label} has an invalid \`readOnly\` value ${JSON.stringify(readOnly)}. Use true (discard clone changes) or false (apply them).`;
 }
 
 /**
@@ -252,7 +267,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 
 /**
  * Normalize a validated call into its spawn list: the `tasks[]` batch when
- * provided, otherwise the single top-level spawn. The flat form's `isolated`
+ * provided, otherwise the single top-level spawn. The flat form's `readOnly`
  * flag is only materialized when the caller sent one — `#runSpawn`
  * distinguishes an absent key from an explicit value.
  */
@@ -265,7 +280,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
+	if ("readOnly" in params) item.readOnly = params.readOnly;
 	return [item];
 }
 
@@ -275,8 +290,8 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * the item's own value, else `defaultAgent` from the session spawn policy.
  * `tasks` never leaks into a spawn; the shared `context` rides along
  * unchanged. Keys are only materialized when present — `#runSpawn`
- * distinguishes an absent `isolated` from an explicit one. The item's
- * `isolated` (batch form) wins over the top-level flag (flat form).
+ * distinguishes an absent `readOnly` from an explicit one. The item's
+ * `readOnly` (batch form) wins over the top-level flag (flat form).
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
@@ -287,10 +302,10 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
-	if (item.isolated !== undefined) {
-		spawn.isolated = item.isolated;
-	} else if ("isolated" in params) {
-		spawn.isolated = params.isolated;
+	if (item.readOnly !== undefined) {
+		spawn.readOnly = item.readOnly;
+	} else if ("readOnly" in params) {
+		spawn.readOnly = params.readOnly;
 	}
 	return spawn;
 }
@@ -373,7 +388,7 @@ export function buildSpecializationAdvisory(
 	const generics = agentNames.filter(name => GENERIC_SPAWN_AGENTS.has(name));
 	if (generics.length < 2) return undefined;
 	const specialist = scoutAvailable
-		? `Check the agent list for a closer specialist type — e.g. read-only research belongs on ` +
+		? `Check the agent list for a closer specialist type — e.g. exploratory research belongs on ` +
 			`\`agent: "scout"\`, which runs on a faster model.`
 		: `Check the agent list for a closer specialist type.`;
 	return `Tip: this call spawned ${generics.length} generic \`${generics[0]}\` workers. ${specialist}`;
@@ -574,11 +589,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#spawnSemaphore: Semaphore | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
-		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.enabled");
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
-			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -593,15 +605,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
-		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
 			sessionAgents: this.session.getSessionAgents?.() ?? [],
-			isolationEnabled: !planMode && isolationEnabled,
-			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
@@ -653,7 +661,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(Object.hasOwn(params, "readOnly") ? { readOnly: params.readOnly } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -1499,7 +1507,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...(Object.hasOwn(params, "readOnly") ? { readOnly: params.readOnly } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

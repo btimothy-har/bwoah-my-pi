@@ -2087,8 +2087,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				reportSendError: vi.fn(),
 				reportRuntimeError: vi.fn(),
 			});
-			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "yield"]);
-			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "yield"]);
+			// Explicitly named hub is admitted under restriction because the caller
+			// enabled IRC; the rest of the ambient capabilities stay excluded.
+			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
+			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
 			for (const name of [
 				"generate_image",
 				"tts",
@@ -2102,7 +2104,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}
@@ -2166,6 +2167,29 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			expect(session.getAllToolNames()).toEqual(["read", "sdk_custom_tool"]);
 			expect(session.getActiveToolNames()).toEqual(["read", "sdk_custom_tool"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("bootstraps memory only for explicitly requested backend tools in restricted sessions", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "memory.backend": "mnemopi" }),
+			toolNames: ["read", "recall"],
+			requireYieldTool: true,
+			restrictToolNames: true,
+		});
+
+		try {
+			// The declared extra is admitted with its backend state; undeclared
+			// sibling memory tools stay out of the restricted registry.
+			expect(session.getActiveToolNames()).toEqual(["read", "recall", "yield"]);
+			expect(session.getToolByName("recall")).toBeDefined();
+			for (const name of ["retain", "reflect", "memory_edit", "learn"]) {
+				expect(session.getToolByName(name)).toBeUndefined();
+			}
 		} finally {
 			await session.dispose();
 		}

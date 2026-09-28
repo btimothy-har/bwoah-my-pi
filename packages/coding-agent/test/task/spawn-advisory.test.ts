@@ -1,13 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { buildSpecializationAdvisory, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+
+// Ordinary spawns always run in an isolated clone now, so preflight probes
+// the session cwd for a supported Git checkout even with execution stubbed.
+let repoDir: string;
+
+beforeAll(async () => {
+	repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-spawn-advisory-repo-"));
+	await $`git init -q -b main ${repoDir}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(repoDir, { recursive: true, force: true });
+});
 
 // Contract: the task tool appends an advisory (never a rejection) steering the
 // spawner toward more specific agent types when one call resolves ≥2 items to
@@ -70,10 +87,10 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 
 	function session(suppress: boolean): ToolSession {
 		return {
-			cwd: "/tmp",
+			cwd: repoDir,
 			hasUI: false,
 			suppressSpawnAdvisory: suppress,
-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
+			settings: Settings.isolated({ "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;
@@ -81,12 +98,11 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 
 	function sessionWithScoutDisabled(): ToolSession {
 		return {
-			cwd: "/tmp",
+			cwd: repoDir,
 			hasUI: false,
 			// `task.disabledAgents` is what the task tool reads to drop scout from
 			// the rendered description and the appended specialization advisory.
 			settings: Settings.isolated({
-				"task.isolation.enabled": false,
 				"task.batch": true,
 				"task.disabledAgents": ["scout"],
 			}),
@@ -97,9 +113,12 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 
 	async function spawnTextFor(s: ToolSession): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => ({
-			index: options.index ?? 0,
-			id: options.id ?? "X",
+		// Ordinary spawns dispatch through the isolation runner; stub the clone
+		// boundary and answer with the executor options the runner received.
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: repoDir, baseline: null });
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async (run): Promise<SingleResult> => ({
+			index: run.baseOptions.index ?? 0,
+			id: run.baseOptions.id ?? "X",
 			agent: "task",
 			agentSource: "bundled",
 			task: "t",

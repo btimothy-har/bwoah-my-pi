@@ -9,6 +9,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import * as sdkModule from "../../src/sdk";
+import type { CreateAgentSessionOptions } from "../../src/sdk";
 import {
 	createNativeSecurityProvenance,
 	DEFAULT_SECURITY_GIT_ADAPTER,
@@ -172,6 +174,44 @@ describe("native security coordinator", () => {
 			initialCwd: repositoryRoot,
 		});
 		expect(reopened.getSessionId()).toBeTruthy();
+	});
+
+	test("configures scan reviewers as host-managed with a read-only tool ceiling", async () => {
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		let captured: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			captured = options;
+			throw new Error("stop after capturing session options");
+		});
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings,
+				authStorage,
+				modelRegistry,
+				activeModel: mock.model,
+				sessionId: "parent-session",
+				agentId: "Main",
+			},
+			{ openStore: storeFactory, gitAdapter },
+		);
+		const createdPlan = await coordinator.preflight({ credentialId, model: mock.model });
+		const started = await coordinator.start({ planId: createdPlan.id });
+		const terminal = await coordinator.wait(started.operationId);
+		expect(terminal.phase).toBe("failed");
+
+		if (!captured) throw new Error("expected createAgentSession to be called");
+		// Reviewers run host-managed in the scan's own execution root — never
+		// re-cloned per spawn — with the historical read-only ceiling, no
+		// descendants, no MCP, and read-only LSP.
+		expect(captured.managedSubagentExecution).toEqual({
+			toolNames: ["read", "find", "grep", "glob", "lsp", "ast_grep", "yield"],
+			spawns: [],
+		});
+		expect(captured.toolNames).toEqual(["read", "grep", "glob", "lsp", "ast_grep", "task", "security_publish"]);
+		expect(captured.restrictToolNames).toBe(true);
+		expect(captured.lspReadOnly).toBe(true);
+		expect(captured.enableMCP).toBe(false);
 	});
 
 	test("records a terminal failure when initial scan persistence fails", async () => {

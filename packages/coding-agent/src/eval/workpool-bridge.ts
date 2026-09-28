@@ -55,6 +55,34 @@ function optionalTools(args: Record<string, unknown>): string[] | undefined {
 	return args.tools;
 }
 
+/** Create-time keys; unknown keys must fail loudly rather than drop the caller's disposition. */
+const WORKPOOL_CREATE_KEYS: Record<string, true> = {
+	op: true,
+	agent: true,
+	name: true,
+	context: true,
+	tools: true,
+	readOnly: true,
+};
+
+function validateCreateKeys(args: Record<string, unknown>): void {
+	for (const key of Object.keys(args)) {
+		if (!Object.hasOwn(WORKPOOL_CREATE_KEYS, key)) {
+			throw new ToolError(
+				`workpool create does not accept "${key}". Use readOnly: true to discard clone changes or readOnly: false to apply them; isolated/apply/merge are no longer spawn arguments.`,
+			);
+		}
+	}
+}
+
+function optionalReadOnly(args: Record<string, unknown>): boolean | undefined {
+	if (args.readOnly === undefined) return undefined;
+	if (typeof args.readOnly !== "boolean") {
+		throw new ToolError("workpool readOnly must be a boolean: true discards clone changes, false applies them");
+	}
+	return args.readOnly;
+}
+
 function getPool(options: EvalWorkpoolBridgeOptions, name: string) {
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const pool = WorkPoolRegistry.global().get(ownerId, name);
@@ -69,10 +97,12 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 	if (typeof op !== "string") throw new ToolError("workpool() requires an op");
 
 	if (op === "create") {
+		validateCreateKeys(record);
 		const agent = optionalString(record, "agent");
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
+		const readOnly = optionalReadOnly(record);
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -81,6 +111,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
+			...(readOnly !== undefined ? { readOnly } : {}),
 		});
 		const customTools = tools?.length
 			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))

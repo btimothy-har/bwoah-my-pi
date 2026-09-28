@@ -13,7 +13,6 @@ import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides 
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
-import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -21,6 +20,7 @@ import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-h
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
+import { normalizeToolNames } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -41,13 +41,15 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import { resolveSubagentToolNames, SubagentToolPolicyError } from "./tool-policy";
+import { type AgentDefinition, canSpawnAtDepth, type ManagedSubagentExecution } from "./types";
 import type {
 	AgentProgress,
 	SingleResult,
 	StructuredSubagentOutput,
 	StructuredSubagentSchemaMode,
 	StructuredSubagentSchemaSource,
+	SubagentCloneDisposition,
 } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
@@ -64,13 +66,6 @@ export interface StructuredSubagentSchemaResolution {
 	source: StructuredSubagentSchemaSource;
 	mode: StructuredSubagentSchemaMode;
 	outputSchemaOverridesAgent: boolean;
-}
-
-/** Isolation controls shared by the task and eval surfaces. */
-export interface StructuredSubagentIsolationControls {
-	requested?: boolean;
-	merge?: "patch" | "branch";
-	apply?: boolean;
 }
 
 /** Identity and presentation metadata supplied by the calling surface. */
@@ -100,7 +95,14 @@ export interface StructuredSubagentRequest {
 	detached?: boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
-	isolation?: StructuredSubagentIsolationControls;
+	/**
+	 * Clone disposition for ordinary spawns: omitted/true = isolated clone,
+	 * changes discarded; false = isolated clone, successful initial changes
+	 * applied back. Definitions never select this. Rejected in plan mode.
+	 */
+	readOnly?: boolean;
+	/** Host-managed execution contract for product-owned workflows; never parsed from task/eval arguments. */
+	managedSubagentExecution?: ManagedSubagentExecution;
 	/** The parent agent name forbidden from recursively spawning itself. */
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
@@ -148,12 +150,16 @@ export interface EffectiveSubagentPolicy {
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
+	/** Resolved clone disposition for ordinary cloned runs; absent for plan-mode and host-managed execution. */
+	cloneDisposition?: SubagentCloneDisposition;
 	/** Discard isolated file changes instead of capturing a patch or branch. */
 	discardChanges: boolean;
-	/** Reason default isolation could not run for a discard agent. */
-	isolationUnavailable?: string;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
+	/** Effective host-managed contract, when this run uses direct host-managed execution. */
+	managedSubagentExecution?: ManagedSubagentExecution;
+	/** LSP mutation policy forwarded to child session construction. */
+	lspReadOnly?: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
 }
@@ -226,15 +232,8 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	if (request.customTools?.length) {
 		throw new StructuredSubagentError("preflight", "Eval-defined tools are unavailable in plan mode.");
 	}
-	const isolation = request.isolation;
-	if (
-		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
-	) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolation, apply, and merge controls are unavailable in plan mode.",
-		);
+	if (request.readOnly === false) {
+		throw new StructuredSubagentError("preflight", "readOnly: false is unavailable in plan mode.");
 	}
 }
 
@@ -296,7 +295,29 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// Plan-mode attenuation wins over every other execution contract.
+	const managed = planMode
+		? undefined
+		: (request.managedSubagentExecution ?? request.session.managedSubagentExecution);
+	let effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	if (!planMode && managed === undefined) {
+		// Ordinary spawns share one coding toolset; the definition's tools are
+		// additive built-in extras, and its `isolation` frontmatter is gone.
+		try {
+			effectiveAgent = { ...agent, tools: resolveSubagentToolNames(agent, request.customTools ?? []) };
+		} catch (error) {
+			if (error instanceof SubagentToolPolicyError) {
+				throw new StructuredSubagentError("preflight", error.message, { cause: error });
+			}
+			throw error;
+		}
+	} else if (managed !== undefined) {
+		effectiveAgent = {
+			...agent,
+			...(managed.toolNames !== undefined ? { tools: normalizeToolNames(managed.toolNames) } : {}),
+			...(managed.spawns !== undefined ? { spawns: managed.spawns } : {}),
+		};
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -326,39 +347,24 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
-	const applies = agent.isolation === "apply";
-	const requested = request.isolation?.requested;
-	if (
-		!applies &&
-		(requested === false || request.isolation?.apply !== undefined || request.isolation?.merge !== undefined)
-	) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Agent "${agentName}" runs isolated and discards its file changes (agent frontmatter \`isolation\` is not \`apply\`); \`isolated: false\`, \`apply\`, and \`merge\` are unavailable for it.`,
-		);
-	}
-	if (requested === true && !isolationEnabled) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
-		);
-	}
-	let isIsolated: boolean;
-	let isolationUnavailable: string | undefined;
-	if (planMode || requested === false) {
-		isIsolated = false;
-	} else if (requested === true) {
-		isIsolated = true;
-	} else if (!isolationEnabled) {
-		isIsolated = false;
-		if (!applies) isolationUnavailable = "task.isolation.enabled is false";
-	} else {
+	let isIsolated = false;
+	let discardChanges = false;
+	let applyChanges = false;
+	let cloneDisposition: SubagentCloneDisposition | undefined;
+	if (!planMode && managed === undefined) {
+		const readOnly = request.readOnly ?? true;
 		const probe = await probeIsolationRepoRoot(request.session.cwd);
-		isIsolated = "repoRoot" in probe;
-		if (!applies && "unavailable" in probe) isolationUnavailable = probe.unavailable;
+		if (!("repoRoot" in probe)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Subagent execution requires an isolated clone, but this workspace cannot provide one: ${probe.unavailable}`,
+			);
+		}
+		isIsolated = true;
+		discardChanges = readOnly;
+		applyChanges = !readOnly;
+		cloneDisposition = readOnly ? "discard" : "merge";
 	}
-	const discardChanges = isIsolated && !applies;
 	return {
 		discovery,
 		agentName,
@@ -372,12 +378,11 @@ export async function resolveEffectiveSubagentPolicy(
 		planMode,
 		isIsolated,
 		discardChanges,
-		isolationUnavailable,
-		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
-		applyChanges:
-			!discardChanges &&
-			(request.isolation?.apply ??
-				(request.invocationKind === "task" ? request.session.settings.get("task.isolation.apply") : true)),
+		cloneDisposition,
+		mergeMode: request.session.settings.get("task.isolation.merge"),
+		applyChanges,
+		...(managed !== undefined ? { managedSubagentExecution: managed } : {}),
+		lspReadOnly: managed !== undefined ? request.session.lspReadOnly : false,
 		enableLsp:
 			!planMode &&
 			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
@@ -481,9 +486,9 @@ function buildExecutorOptions(
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
+	const ordinary = !policy.planMode && policy.managedSubagentExecution === undefined;
 	const restrictToolNames =
-		policy.planMode || session.restrictToolNames === true || isReadOnlyAgent(policy.effectiveAgent);
-	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+		ordinary || policy.planMode || session.restrictToolNames === true || isReadOnlyAgent(policy.effectiveAgent);
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -523,9 +528,12 @@ function buildExecutorOptions(
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
+		lspReadOnly: policy.lspReadOnly,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
+		cloneDisposition: policy.cloneDisposition,
+		managedSubagentExecution: policy.managedSubagentExecution,
 		keepAlive: policy.discardChanges && request.keepAlive === undefined ? false : request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
@@ -534,8 +542,8 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
-		enableMCP,
+		// Subagent executor sessions never inherit ambient MCP: no manager, no proxies.
+		enableMCP: false,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -556,7 +564,10 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		// Ordinary cloned children own their eval kernel so scratch state never
+		// leaks into the parent; managed workflows keep their historical sharing.
+		parentEvalSessionId:
+			ordinary || request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -632,23 +643,6 @@ async function isolationRecoveryHint(result: SingleResult, artifactsDir: string)
 		branchName: result.branchName,
 	});
 	return hint ? ` ${hint}` : "";
-}
-
-/**
- * Summary for an isolated run whose changes are captured but deliberately not
- * applied (`task.isolation.apply=false`). Every captured artifact is named:
- * the root patch only when it holds changes, and each nested-repo patch file,
- * so the parent knows exactly where the work lives.
- */
-function describeCapturedChanges(result: SingleResult): string {
-	const nestedPatchPaths = result.nestedPatchPaths ?? [];
-	return renderIsolationSummary({
-		kind: "captured",
-		branchName: result.branchName,
-		rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
-		nestedCount: nestedPatchPaths.length || (result.nestedPatches?.length ?? 0),
-		nestedPatchPaths,
-	});
 }
 
 function attachStructuredOutputMetadata(result: SingleResult, schema: StructuredSubagentSchemaResolution): void {
@@ -751,6 +745,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			});
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
+		if (policy.cloneDisposition !== undefined) result.cloneDisposition = policy.cloneDisposition;
 		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&
@@ -798,12 +793,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths ?? [],
 			});
-		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
-			mergeSummary = describeCapturedChanges(result);
 		}
-		if (policy.isolationUnavailable) {
-			mergeSummary = renderIsolationSummary({ kind: "unavailable", error: policy.isolationUnavailable });
-		}
+		result.changesApplied = policy.isIsolated ? changesApplied : undefined;
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
 		return {

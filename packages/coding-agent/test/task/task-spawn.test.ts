@@ -11,8 +11,11 @@
  * Param validation (missing agent / missing task) is covered by
  * test/task/task-schema.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,7 +23,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
@@ -32,18 +35,43 @@ const taskAgent: AgentDefinition = {
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
-	isolation: "apply",
 };
+
+// Ordinary spawns always run in an isolated clone now, so preflight probes
+// the session cwd for a supported Git checkout even with execution stubbed.
+let repoDir: string;
+
+beforeAll(async () => {
+	repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-spawn-repo-"));
+	await $`git init -q -b main ${repoDir}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(repoDir, { recursive: true, force: true });
+});
 
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: repoDir,
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? {}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
+}
+
+/**
+ * Ordinary spawns dispatch through the isolation runner, never bare
+ * `runSubprocess`: stub the clone boundary, observe the executor options the
+ * runner received, and stamp the result the way the real runner does.
+ */
+function mockIsolatedDispatch(impl: (options: ExecutorOptions) => Promise<SingleResult>): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: repoDir, baseline: null });
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
+		...(await impl(opts.baseOptions)),
+		isolated: true,
+	}));
 }
 
 function getFirstText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -116,13 +144,15 @@ describe("task spawn routing", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	it("returns immediately on spawn and delivers the follow-up hint when the job completes", async () => {
+	it("returns immediately on spawn and delivers the one-shot transcript hint when the job completes", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
 			projectAgentsDir: null,
 		});
 		const gate = deferred();
-		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		const dispatched: ExecutorOptions[] = [];
+		mockIsolatedDispatch(async options => {
+			dispatched.push(options);
 			await gate.promise;
 			return makeResult(options.id ?? "?");
 		});
@@ -152,11 +182,13 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
+		// Default (readOnly omitted) spawns are one-shot discard clones: no
+		// idle agent remains to message, only the transcript.
+		expect(job!.resultText).toContain("Spawnling ran isolated and cannot be resumed or messaged");
+		expect(job!.resultText).not.toContain("is now idle");
 		expect(job!.resultText).toContain("history://Spawnling");
-		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+		expect(dispatched).toHaveLength(1);
+		expect(dispatched[0]?.modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
@@ -164,9 +196,11 @@ describe("task spawn routing", () => {
 			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
 			projectAgentsDir: null,
 		});
-		const runSpy = vi
-			.spyOn(executorModule, "runSubprocess")
-			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const dispatched: ExecutorOptions[] = [];
+		mockIsolatedDispatch(async options => {
+			dispatched.push(options);
+			return makeResult(options.id ?? "?");
+		});
 		const manager = createManager();
 		const session = createSession({ manager });
 		const signals: Array<AbortSignal | undefined> = [];
@@ -181,8 +215,8 @@ describe("task spawn routing", () => {
 
 		expect(signals).toHaveLength(1);
 		expect(signals[0]).toBeInstanceOf(AbortSignal);
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
-		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
+		expect(dispatched[0]?.modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
+		expect(dispatched[0]?.modelRoute).toBe("pool 1");
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [
@@ -223,17 +257,21 @@ describe("task spawn routing", () => {
 				patchPath: `${opts.artifactsDir}/${opts.agentId}.patch`,
 				...runnerOverrides,
 			}));
+			vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+				summary: "\n\nApplied isolated changes.",
+				changesApplied: true,
+				hadAnyChanges: true,
+				mergedBranchForNestedPatches: false,
+			});
 
 			const manager = createManager();
-			const tool = await TaskTool.create(
-				createSession({ manager, settings: { "task.isolation.enabled": true, "task.isolation.apply": false } }),
-			);
+			const tool = await TaskTool.create(createSession({ manager }));
 
 			const result = await tool.execute("tc-isolated", {
 				agent: "task",
 				name: "Sandboxed",
 				task: "Do the thing.",
-				isolated: true,
+				readOnly: false,
 			} as TaskParams);
 			const job = manager.getJob(result.details?.async?.jobId ?? "");
 			await job!.promise;
@@ -281,7 +319,7 @@ describe("task spawn routing", () => {
 			});
 			const gate = deferred();
 			let publishAdvisor: (() => void) | undefined;
-			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			mockIsolatedDispatch(async options => {
 				const progress = {
 					index: 0,
 					id: options.id ?? "?",
@@ -357,7 +395,7 @@ describe("task spawn routing", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const gate = deferred();
 		let publishProgress: ((metadata: Partial<AgentProgress>) => void) | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const progress: AgentProgress = {
 				...makeResult(options.id ?? "?"),
 				status: "running",
@@ -431,7 +469,7 @@ describe("task spawn routing", () => {
 		async settledFallback => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 			const gate = deferred();
-			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			mockIsolatedDispatch(async options => {
 				options.onProgress?.({
 					...makeResult(options.id ?? "?"),
 					status: "running",
@@ -483,7 +521,9 @@ describe("task spawn routing", () => {
 			projectAgentsDir: null,
 		});
 		let capturedArtifactsDir: string | undefined;
-		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		let dispatchCount = 0;
+		mockIsolatedDispatch(async options => {
+			dispatchCount += 1;
 			capturedArtifactsDir = options.artifactsDir;
 			return makeResult(options.id ?? "?");
 		});
@@ -502,7 +542,7 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(dispatchCount).toBe(1);
 		expect(capturedArtifactsDir).toBeTruthy();
 		await expect(fs.stat(capturedArtifactsDir!)).resolves.toBeDefined();
 		await fs.rm(capturedArtifactsDir!, { recursive: true, force: true });
@@ -519,7 +559,7 @@ describe("task spawn routing", () => {
 			projectAgentsDir: null,
 		});
 		let capturedArtifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			capturedArtifactsDir = options.artifactsDir;
 			return makeResult(options.id ?? "?");
 		});
@@ -575,7 +615,7 @@ describe("task spawn routing", () => {
 			projectAgentsDir: null,
 		});
 		let capturedArtifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			capturedArtifactsDir = options.artifactsDir;
 			return makeResult(options.id ?? "?");
 		});
@@ -624,7 +664,7 @@ describe("task spawn routing", () => {
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = deferred();
@@ -666,7 +706,7 @@ describe("task spawn routing", () => {
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = deferred();
@@ -709,7 +749,7 @@ describe("task spawn routing", () => {
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = deferred();
@@ -777,7 +817,7 @@ describe("task spawn routing", () => {
 			});
 			const started: string[] = [];
 			const gates = new Map<string, Deferred>();
-			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			mockIsolatedDispatch(async options => {
 				const id = options.id ?? "?";
 				started.push(id);
 				const gate = deferred();
@@ -815,7 +855,7 @@ describe("task spawn routing", () => {
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = deferred();
@@ -827,7 +867,7 @@ describe("task spawn routing", () => {
 		const manager = createManager();
 		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
 		const tool = await TaskTool.create({
-			cwd: "/tmp",
+			cwd: repoDir,
 			hasUI: false,
 			settings,
 			getSessionFile: () => null,
@@ -866,7 +906,7 @@ describe("task spawn routing", () => {
 		});
 		const started: string[] = [];
 		const gates = new Map<string, Deferred>();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			const id = options.id ?? "?";
 			started.push(id);
 			const gate = deferred();
@@ -878,7 +918,7 @@ describe("task spawn routing", () => {
 		const manager = createManager();
 		const settings = Settings.isolated({ "task.maxConcurrency": 4 });
 		const tool = await TaskTool.create({
-			cwd: "/tmp",
+			cwd: repoDir,
 			hasUI: false,
 			settings,
 			getSessionFile: () => null,

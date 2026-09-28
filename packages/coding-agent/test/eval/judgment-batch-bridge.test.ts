@@ -52,7 +52,6 @@ interface BatchSession {
 function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
-		"task.isolation.enabled": false,
 		modelRoles: { judge: "p/smol" },
 	});
 	const authStorage = createInMemoryAuthStorage();
@@ -478,7 +477,7 @@ import { ModelRegistry } from ${JSON.stringify(registryPath)};
 import { createInMemoryAuthStorage } from ${JSON.stringify(setupPath)};
 
 const SMOL = ${JSON.stringify(SMOL)};
-const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, modelRoles: { judge: "p/smol" } });
+const settings = Settings.isolated({ "async.enabled": false, modelRoles: { judge: "p/smol" } });
 const authStorage = createInMemoryAuthStorage();
 authStorage.setRuntimeApiKey("p", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-py-models.yml");

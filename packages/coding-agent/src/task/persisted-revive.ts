@@ -5,7 +5,6 @@ import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -13,9 +12,31 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { isMCPToolName } from "../tools/builtin-names";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
-import type { AgentDefinition } from "./types";
+import { attachIrcWakeTurnMonitor, createSubagentSettings } from "./executor";
+import type { AgentDefinition, ManagedSubagentExecution } from "./types";
+
+/** Validate the persisted host-managed contract; never infer it from other fields. */
+function parseManagedSubagentExecution(value: unknown): ManagedSubagentExecution | undefined {
+	if (value === undefined) return undefined;
+	const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+	const toolNames = record?.toolNames;
+	const spawns = record?.spawns;
+	const valid =
+		record !== undefined &&
+		(toolNames === undefined || (Array.isArray(toolNames) && toolNames.every(name => typeof name === "string"))) &&
+		(spawns === undefined ||
+			spawns === "*" ||
+			(Array.isArray(spawns) && spawns.every(name => typeof name === "string")));
+	if (!valid) {
+		throw new Error("Invalid persisted managed subagent execution policy.");
+	}
+	return {
+		...(toolNames !== undefined ? { toolNames: toolNames as string[] } : {}),
+		...(spawns !== undefined ? { spawns: spawns as string[] | "*" } : {}),
+	};
+}
 
 /**
  * Ambient context the reviver needs at revive time. The top-level session is
@@ -135,17 +156,14 @@ export function createPersistedSubagentReviverFactory(
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
-			const revivedToolNames =
-				init.readOnly === true && init.tools.includes("write")
-					? init.tools.filter(name => name !== "write")
-					: init.tools;
+			// MCP entries are dropped too: revived children never reconsult ambient MCP.
+			const revivedToolNames = init.tools.filter(
+				name => !(init.readOnly === true && name === "write") && !isMCPToolName(name),
+			);
+			const managedSubagentExecution = parseManagedSubagentExecution(init.managedSubagentExecution);
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
 			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
-			// A restricted persisted contract must not consult process-global MCP
-			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
-			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
-			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const { session } = await createAgentSession({
 				cwd: reopened.getCwd(),
 				authStorage: ctx.authStorage,
@@ -195,23 +213,29 @@ export function createPersistedSubagentReviverFactory(
 				spawns: init.spawns ?? "",
 				hasUI: false,
 				enableLsp: restrictToolNames ? false : ctx.enableLsp,
+				managedSubagentExecution,
+				// Revived children alias the live owner's memory backends; without
+				// owner state the backend start is a no-op and the tools stay absent.
+				parentHindsightSessionState: ctx.session.getHindsightSessionState(),
+				parentMnemopiSessionState: ctx.session.getMnemopiSessionState(),
+				// No ambient MCP on either contract: no manager, no proxies.
+				enableMCP: false,
 				...(restrictToolNames
 					? {
 							enableIrc: false,
-							enableMCP: false,
 							preloadedExtensionPaths: [],
 							preloadedCustomToolPaths: [],
 						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
+					: {}),
 			});
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+			// the original run didn't carry. Unknown/missing names are ignored;
+			// mounted MCP names are excluded like the persisted list.
+			await session.setActiveToolsByName([
+				...revivedToolNames,
+				...session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that

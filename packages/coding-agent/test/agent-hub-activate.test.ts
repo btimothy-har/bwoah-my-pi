@@ -385,6 +385,9 @@ describe("Agent hub Enter activation", () => {
 					systemPrompt: `base prompt\n\nROLE\n====\n${getBundledAgent("scout")?.systemPrompt}`,
 					task: "Inspect persisted telemetry.",
 					tools: ["read", "grep"],
+					// Persisted zero-LoC marker; bundled definitions no longer carry
+					// the read-only authority this attribution used to infer from.
+					readOnly: true,
 				}),
 				JSON.stringify({
 					type: "message",

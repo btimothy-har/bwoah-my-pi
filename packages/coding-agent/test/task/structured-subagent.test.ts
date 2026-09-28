@@ -1,9 +1,8 @@
 import { $ } from "bun";
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -15,6 +14,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { COMMON_SUBAGENT_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/task/tool-policy";
 import {
 	buildStructuredSubagentRecoveryHint,
 	resolveEffectiveSubagentPolicy,
@@ -31,10 +31,23 @@ const AGENT: AgentDefinition = {
 	description: "Test worker",
 	systemPrompt: "Do the assigned work.",
 	source: "bundled",
-	isolation: "apply",
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
+
+// Ordinary spawns always run in an isolated clone now, so every policy
+// resolution probes the session cwd for a supported Git checkout. One shared
+// fixture repo covers every test that does not create its own workspace.
+let sharedRepo: string;
+
+beforeAll(async () => {
+	sharedRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-subagent-repo-"));
+	await $`git init -q -b main ${sharedRepo}`.quiet();
+});
+
+afterAll(async () => {
+	await fs.rm(sharedRepo, { recursive: true, force: true });
+});
 
 function session(
 	options: {
@@ -43,25 +56,21 @@ function session(
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
-		isolationEnabled?: boolean;
-		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
-		cwd: options.cwd ?? "/tmp",
+		cwd: options.cwd ?? sharedRepo,
 		hasUI: false,
 		outputSchema: options.outputSchema,
 		settings:
 			options.settings ??
 			Settings.isolated({
 				"task.maxRecursionDepth": options.maxDepth ?? 2,
-				"task.isolation.enabled": options.isolationEnabled ?? false,
 				"isolation.backend": "rcopy",
 				"task.enableLsp": true,
 				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 				...(options.agentServiceTierOverrides
 					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
 					: {}),
@@ -70,6 +79,18 @@ function session(
 		getSessionSpawns: () => "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
+}
+
+/**
+ * Ordinary spawns dispatch through the isolation runner, never bare
+ * `runSubprocess`: stub the clone boundary and observe the executor options
+ * the runner would have received.
+ */
+function mockIsolatedDispatch(
+	impl: (options: executorModule.ExecutorOptions) => Promise<SingleResult> | SingleResult,
+): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: sharedRepo, baseline: null });
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => impl(opts.baseOptions));
 }
 
 function request(overrides: Partial<StructuredSubagentRequest> = {}): StructuredSubagentRequest {
@@ -187,7 +208,7 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
-	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
+	it("attenuates plan-mode agents and rejects readOnly: false before discovery", async () => {
 		mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: session({ planMode: true }), enableLsp: true, enableIrc: true }),
@@ -200,10 +221,8 @@ describe("structured subagent primitive", () => {
 		vi.restoreAllMocks();
 		const discover = vi.spyOn(discoveryModule, "discoverAgents");
 		await expect(
-			resolveEffectiveSubagentPolicy(
-				request({ session: session({ planMode: true }), isolation: { requested: false } }),
-			),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+			resolveEffectiveSubagentPolicy(request({ session: session({ planMode: true }), readOnly: false })),
+		).rejects.toThrow("readOnly: false is unavailable in plan mode.");
 
 		const planSession = session({ planMode: true });
 		const customTools = createEvalCustomTools(planSession, [
@@ -219,55 +238,67 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("isolates discovered agents by default but applies only when their frontmatter opts in", async () => {
-		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-policy-"));
-		try {
-			await $`git init -q ${repo}`.quiet();
-			const original = { ...AGENT, name: "reviewer", isolation: undefined };
-			const applying = { ...AGENT, name: "m1", isolation: "apply" as const };
-			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-				agents: [original, applying],
-				projectAgentsDir: null,
-			});
-			const enabled = session({ cwd: repo, isolationEnabled: true });
-			const discarded = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
-			expect(discarded).toMatchObject({ isIsolated: true, discardChanges: true, applyChanges: false });
-			const retained = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "m1" }));
-			expect(retained).toMatchObject({ isIsolated: true, discardChanges: false, applyChanges: true });
-			const direct = await resolveEffectiveSubagentPolicy(
-				request({ session: enabled, agent: "m1", isolation: { requested: false } }),
+	it("resolves the clone disposition from the caller's readOnly, never the definition", async () => {
+		const reviewer = { ...AGENT, name: "reviewer" };
+		mockDiscovery(reviewer);
+		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
+			for (const readOnly of [undefined, true] as const) {
+				const policy = await resolveEffectiveSubagentPolicy(
+					request({ agent: "reviewer", invocationKind, readOnly }),
+				);
+				expect(policy).toMatchObject({
+					isIsolated: true,
+					discardChanges: true,
+					applyChanges: false,
+					cloneDisposition: "discard",
+				});
+			}
+			const merging = await resolveEffectiveSubagentPolicy(
+				request({ agent: "reviewer", invocationKind, readOnly: false }),
 			);
-			expect(direct.isIsolated).toBe(false);
-			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({ session: enabled, agent: "reviewer", isolation: { requested: false } }),
-				),
-			).rejects.toThrow("discards its file changes");
-			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({ session: enabled, agent: "reviewer", isolation: { apply: true } }),
-				),
-			).rejects.toThrow("discards its file changes");
-		} finally {
-			await fs.rm(repo, { recursive: true, force: true });
+			expect(merging).toMatchObject({
+				isIsolated: true,
+				discardChanges: false,
+				applyChanges: true,
+				cloneDisposition: "merge",
+			});
 		}
 	});
 
-	it("reports unavailable default isolation instead of losing agents outside Git", async () => {
-		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
+	it("resolves the common toolset for ordinary spawns with definition extras unioned", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(request());
+		// Every declared extra of the fixture is already part of the common set.
+		expect(policy.effectiveAgent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
+	});
+
+	it("rejects MCP and unknown tool extras at preflight", async () => {
+		mockDiscovery({ ...AGENT, name: "mcp-agent", tools: ["read", "mcp__server_search"] });
+		await expect(resolveEffectiveSubagentPolicy(request({ agent: "mcp-agent" }))).rejects.toThrow(
+			"MCP tools are not available to subagents",
+		);
+
+		mockDiscovery({ ...AGENT, name: "unknown-agent", tools: ["read", "definitely_not_a_tool"] });
+		await expect(resolveEffectiveSubagentPolicy(request({ agent: "unknown-agent" }))).rejects.toThrow(
+			'declares unknown tool "definitely_not_a_tool"',
+		);
+	});
+
+	it("rejects ordinary spawns when the workspace cannot provide an isolated clone", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nongit-agent-"));
 		try {
-			const enabled = session({ cwd, isolationEnabled: true });
-			const fallback = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
-			expect(fallback.isIsolated).toBe(false);
-			expect(fallback.isolationUnavailable).toContain("Git repository not found");
-			await expect(
-				runStructuredSubagent(request({ session: enabled, agent: "reviewer", isolation: { requested: true } })),
-			).rejects.toThrow("Git repository not found for isolated task execution");
-			const disabled = await resolveEffectiveSubagentPolicy(
-				request({ session: session({ cwd, isolationEnabled: false }), agent: "reviewer" }),
+			const nonGit = session({ cwd });
+			await expect(resolveEffectiveSubagentPolicy(request({ session: nonGit, agent: "reviewer" }))).rejects.toThrow(
+				"requires an isolated clone",
 			);
-			expect(disabled.isolationUnavailable).toBe("task.isolation.enabled is false");
+			const runner = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+			const dispatch = vi.spyOn(executorModule, "runSubprocess");
+			await expect(runStructuredSubagent(request({ session: nonGit, agent: "reviewer" }))).rejects.toThrow(
+				"requires an isolated clone",
+			);
+			expect(runner).not.toHaveBeenCalled();
+			expect(dispatch).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
@@ -278,6 +309,7 @@ describe("structured subagent primitive", () => {
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
+		await $`git init -q -b main ${projectDir}`.quiet();
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
 			"task:\n  enableEffort: true\nretry:\n  modelFallback: true\n",
@@ -329,6 +361,7 @@ describe("structured subagent primitive", () => {
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await $`git init -q -b main ${projectDir}`.quiet();
 		await fs.mkdir(agentDir, { recursive: true });
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const liveSession = session({ cwd: projectDir, settings: liveSettings });
@@ -354,7 +387,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			dispatched.push(options);
 			return { ...result(), modelRole: options.modelRole };
 		});
@@ -371,7 +404,7 @@ describe("structured subagent primitive", () => {
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -473,7 +506,7 @@ describe("structured subagent primitive", () => {
 			return { model: "openai/gpt-4o", note: "pool test" };
 		};
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -516,7 +549,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -534,7 +567,7 @@ describe("structured subagent primitive", () => {
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(async options => {
 			artifactsDir = options.artifactsDir;
 			expect(await fs.stat(options.artifactsDir ?? "")).toBeDefined();
 			return result();
@@ -561,7 +594,7 @@ describe("structured subagent primitive", () => {
 		// directory is already gone by the time the model follows that URL
 		// (PR #10625 review).
 		mockDiscovery();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+		mockIsolatedDispatch(() => {
 			return {
 				...result(),
 				exitCode: 1,
@@ -602,7 +635,7 @@ describe("structured subagent primitive", () => {
 	it("does not return unavailable structured metadata without an effective schema", async () => {
 		const unstructuredAgent = { ...AGENT, output: undefined };
 		mockDiscovery(unstructuredAgent);
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+		mockIsolatedDispatch(() => {
 			const completed = result();
 			completed.structuredOutput = { source: "none", mode: "permissive", status: "unavailable" };
 			return completed;
@@ -668,11 +701,9 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
 
-		await expect(
-			runStructuredSubagent(
-				request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-			),
-		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
+		await expect(runStructuredSubagent(request())).rejects.toThrow(
+			"Isolated subagent execution could not be prepared: not a repository",
+		);
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
@@ -680,7 +711,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const sharedSession = session();
 		const ids: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			ids.push(options.id);
 			return result();
 		});
@@ -699,7 +730,7 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
+	it("suppresses ambient capability sources for plan-mode and ordinary children alike", async () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
@@ -716,7 +747,10 @@ describe("structured subagent primitive", () => {
 		>;
 		const planSession = session({ planMode: true });
 		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
-		const nonPlanSession = session();
+		// The ordinary session carries every ambient source a child could
+		// accidentally inherit: MCP, discovered extension/custom-tool paths, and
+		// a parent eval kernel.
+		const ordinarySession = session();
 		let explicitRoot = "/plugins/explicit";
 		const extensionRoots = () => ({
 			explicit: [explicitRoot],
@@ -724,107 +758,63 @@ describe("structured subagent primitive", () => {
 			configured: ["/plugins/configured"],
 			configuredLevel: "project" as const,
 		});
-		Object.assign(nonPlanSession, {
+		const getApiKey = async () => "exact-account-key";
+		Object.assign(ordinarySession, {
 			mcpManager,
 			extensionPaths,
 			customToolPaths,
 			preparedExtensions,
 			effectiveExtensionRoots: extensionRoots,
-		});
-		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
-		const restrictedSession = session();
-		const getApiKey = async () => "exact-account-key";
-		Object.assign(restrictedSession, {
-			restrictToolNames: true,
 			getApiKey,
-			mcpManager,
-			extensionPaths,
-			customToolPaths,
+			getEvalSessionId: () => "parent-eval-kernel",
 		});
-		const options = [] as executorModule.ExecutorOptions[];
+		const planOptions: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
+			planOptions.push(executorOptions);
+			return result();
+		});
+		const ordinaryOptions: executorModule.ExecutorOptions[] = [];
+		mockIsolatedDispatch(options => {
+			ordinaryOptions.push(options);
 			return result();
 		});
 
 		const planRun = await runStructuredSubagent(request({ session: planSession, retainArtifacts: true }));
-		const nonPlanRun = await runStructuredSubagent(request({ session: nonPlanSession, retainArtifacts: true }));
-		const mcpDisabledRun = await runStructuredSubagent(
-			request({ session: mcpDisabledSession, retainArtifacts: true }),
-		);
-		const restrictedRun = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
+		const ordinaryRun = await runStructuredSubagent(request({ session: ordinarySession, retainArtifacts: true }));
 
-		expect(options[0]).toMatchObject({
+		expect(planOptions[0]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
 			preloadedExtensionPaths: [],
 			preloadedCustomToolPaths: [],
 		});
-		expect(options[0]?.mcpManager).toBeUndefined();
-		expect(options[1]).toMatchObject({
-			enableMCP: true,
-			mcpManager,
-			preloadedExtensionPaths: extensionPaths,
+		expect(planOptions[0]?.mcpManager).toBeUndefined();
+		// Ordinary children are restricted clones: no ambient MCP, no discovered
+		// extension/custom-tool paths, and no shared parent eval kernel. Prepared
+		// owner extensions still travel so their hooks rebind to the clone.
+		expect(ordinaryOptions[0]).toMatchObject({
+			enableMCP: false,
+			restrictToolNames: true,
+			cloneDisposition: "discard",
+			preloadedExtensionPaths: [],
+			preloadedCustomToolPaths: [],
 			preloadedPreparedExtensions: preparedExtensions,
-			preloadedCustomToolPaths: customToolPaths,
 		});
-		expect(options[1]?.restrictToolNames).toBe(false);
-		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
+		expect(ordinaryOptions[0]?.mcpManager).toBeUndefined();
+		expect(ordinaryOptions[0]?.parentEvalSessionId).toBeUndefined();
+		expect(ordinaryOptions[0]?.getApiKey).toBe(getApiKey);
+		expect(ordinaryOptions[0]?.extensionRoots?.()).toEqual(extensionRoots());
 		explicitRoot = "/plugins/explicit-after-spawn";
-		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
-		expect(options[2]).toMatchObject({ enableMCP: false });
-		expect(options[2]?.mcpManager).toBeUndefined();
-		expect(options[3]).toMatchObject({
-			enableMCP: false,
-			restrictToolNames: true,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[3]?.mcpManager).toBeUndefined();
-		expect(options[3]?.getApiKey).toBe(getApiKey);
+		expect(ordinaryOptions[0]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
 		await fs.rm(planRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+		await fs.rm(ordinaryRun.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("restricts read-only specialists before ambient tools reach the child", async () => {
-		const specialist = getBundledAgent("conventions-specialist");
-		if (!specialist) throw new Error("Missing bundled conventions specialist");
-		mockDiscovery(specialist);
-		const host = session();
-		Object.assign(host, {
-			mcpManager: {} as NonNullable<ToolSession["mcpManager"]>,
-			extensionPaths: ["/plugins/unsafe.ts"],
-			customToolPaths: [{ path: "/tools/unsafe.ts", source: "project" }] as unknown as NonNullable<
-				ToolSession["customToolPaths"]
-			>,
-		});
-		const options: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
-			return result();
-		});
-
-		const settled = await runStructuredSubagent(
-			request({ session: host, agent: specialist.name, retainArtifacts: true }),
-		);
-		expect(options[0]).toMatchObject({
-			restrictToolNames: true,
-			enableMCP: false,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[0]?.mcpManager).toBeUndefined();
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-
-	it("keeps explicit memory readers on the backend-initializing path", async () => {
-		const reader = { ...AGENT, name: "memory-reader", isolation: undefined, tools: ["read", "recall", "yield"] };
+	it("keeps declared memory extras in the restricted ordinary toolset", async () => {
+		const reader = { ...AGENT, name: "memory-reader", tools: ["read", "recall"] };
 		mockDiscovery(reader);
 		const options: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+		mockIsolatedDispatch(executorOptions => {
 			options.push(executorOptions);
 			return result();
 		});
@@ -836,8 +826,9 @@ describe("structured subagent primitive", () => {
 				retainArtifacts: true,
 			}),
 		);
-		expect(options[0]?.restrictToolNames).toBe(false);
+		expect(options[0]?.restrictToolNames).toBe(true);
 		expect(options[0]?.agent.tools).toContain("recall");
+		expect(options[0]?.agent.tools).toEqual(expect.arrayContaining([...COMMON_SUBAGENT_TOOL_NAMES]));
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
@@ -874,10 +865,10 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 	});
 
-	it("cleans failed nonisolated handle artifacts", async () => {
+	it("cleans failed run artifacts that carry no recovery payloads", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			artifactsDir = options.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed" };
 		});
@@ -897,13 +888,13 @@ describe("structured subagent primitive", () => {
 		// provider's, and the partial prose is not presented as data.
 		mockDiscovery();
 		const error = "Anthropic stream envelope error: stream ended before message_stop";
-		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue({
+		mockIsolatedDispatch(() => ({
 			...result(),
 			exitCode: 1,
 			output: "I'll systematically investigate the codebase",
 			stderr: error,
 			error,
-		});
+		}));
 
 		const settled = await runStructuredSubagent(request());
 
@@ -924,7 +915,7 @@ describe("structured subagent primitive", () => {
 		// agent://<id> or history://<id> (PR #10625 review).
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockIsolatedDispatch(options => {
 			artifactsDir = options.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed" };
 		});
@@ -939,7 +930,7 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("returns a discard agent's report without retaining an unapplied patch", async () => {
-		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
+		mockDiscovery({ ...AGENT, name: "reviewer" });
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp", baseline: null });
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue({
 			...result(),
@@ -947,14 +938,38 @@ describe("structured subagent primitive", () => {
 			isolated: true,
 		});
 
-		const settled = await runStructuredSubagent(
-			request({ agent: "reviewer", session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request({ agent: "reviewer" }));
 
 		expect(settled.mergeSummary).toContain("Isolation: ran in a discarded worktree; file changes were not kept");
 		expect(settled.changesApplied).toBeNull();
+		expect(settled.result.cloneDisposition).toBe("discard");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(settled.artifactsDir)).rejects.toThrow();
+	});
+
+	it("merges a readOnly: false run's captured changes and stamps the disposition", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/repo", baseline: null });
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue({
+			...result(),
+			isolated: true,
+			patchPath: "/recovery/Worker.patch",
+		});
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "\n\nApplied isolated changes.",
+			changesApplied: true,
+			hadAnyChanges: true,
+			mergedBranchForNestedPatches: false,
+		});
+
+		const settled = await runStructuredSubagent(request({ readOnly: false, retainArtifacts: true }));
+
+		expect(merge).toHaveBeenCalledTimes(1);
+		expect(settled.changesApplied).toBe(true);
+		expect(settled.result.changesApplied).toBe(true);
+		expect(settled.result.cloneDisposition).toBe("merge");
+		expect(settled.mergeSummary).toContain("Applied isolated changes.");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("retains isolated failure artifacts needed for recovery", async () => {
@@ -966,9 +981,7 @@ describe("structured subagent primitive", () => {
 			return { ...result(), exitCode: 1, error: "agent failed", patchPath: "/recovery/Worker.patch" };
 		});
 
-		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request({ readOnly: false }));
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
@@ -986,61 +999,9 @@ describe("structured subagent primitive", () => {
 			error: "Nested patch capture failed: ENOSPC. Isolation workspace retained at /wt/abc.",
 		}));
 
-		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request({ readOnly: false }));
 
 		expect(settled.mergeSummary).toContain("omp/task/Worker");
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-
-	it("defaults task isolation to auto-apply and lets config retain artifacts", async () => {
-		mockDiscovery();
-		const defaultPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
-		expect(defaultPolicy.applyChanges).toBe(true);
-
-		const capturePolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(capturePolicy.applyChanges).toBe(false);
-
-		const evalPolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				invocationKind: "eval",
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(evalPolicy.applyChanges).toBe(true);
-	});
-
-	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {
-		mockDiscovery();
-		let artifactsDir: string | undefined;
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
-			artifactsDir = baseOptions.artifactsDir;
-			return { ...result(), patchPath: "/recovery/Worker.patch" };
-		});
-		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
-
-		const settled = await runStructuredSubagent(
-			request({
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-
-		expect(merge).not.toHaveBeenCalled();
-		expect(settled.changesApplied).toBeNull();
-		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
-		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
-		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 });

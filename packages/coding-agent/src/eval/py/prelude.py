@@ -994,9 +994,7 @@ if "__omp_prelude_loaded__" not in globals():
         label=None,
         schema=None,
         schema_mode=None,
-        isolated=None,
-        apply=None,
-        merge=None,
+        read_only=None,
         tools=None,
     ):
         """Start a background subagent and return its handle."""
@@ -1009,12 +1007,10 @@ if "__omp_prelude_loaded__" not in globals():
             args["schema"] = schema
         if schema_mode is not None:
             args["schemaMode"] = schema_mode
-        if isolated is not None:
-            args["isolated"] = bool(isolated)
-        if apply is not None:
-            args["apply"] = bool(apply)
-        if merge is not None:
-            args["merge"] = bool(merge)
+        if read_only is not None:
+            if not isinstance(read_only, bool):
+                raise TypeError("agent() read_only must be a bool")
+            args["readOnly"] = read_only
         if tools is not None:
             args["tools"] = list(tools)
         result = _bridge_call("__agent__", args)
@@ -1062,7 +1058,7 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
 
-    def workpool(agent=None, *, name=None, context=None, tools=None):
+    def workpool(agent=None, *, name=None, context=None, read_only=None, tools=None):
         """Create a pool of keep-alive subagents."""
         args = {"op": "create"}
         if agent is not None:
@@ -1071,6 +1067,10 @@ if "__omp_prelude_loaded__" not in globals():
             args["name"] = name
         if context is not None:
             args["context"] = context
+        if read_only is not None:
+            if not isinstance(read_only, bool):
+                raise TypeError("workpool() read_only must be a bool")
+            args["readOnly"] = read_only
         if tools is not None:
             args["tools"] = list(tools)
         result = _bridge_call("__workpool__", args)

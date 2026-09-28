@@ -10,10 +10,14 @@ import {
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
-	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type {
+	AgentProgress,
+	SingleResult,
+	StructuredSubagentSchemaMode,
+	SubagentCloneDisposition,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -28,11 +32,9 @@ const agentArgsSchema = type({
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
-	"isolated?": "boolean",
-	"apply?": "boolean",
-	"merge?": "boolean",
+	"readOnly?": "boolean",
 	"tools?": "string[]",
-	"+": "delete",
+	"+": "reject",
 });
 
 interface EvalAgentArgs {
@@ -41,9 +43,7 @@ interface EvalAgentArgs {
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
-	isolated?: boolean;
-	apply?: boolean;
-	merge?: boolean;
+	readOnly?: boolean;
 	tools?: string[];
 }
 
@@ -72,6 +72,8 @@ export interface EvalAgentResult {
 		schemaMode?: StructuredSubagentSchemaMode;
 		schemaStatus?: "valid" | "invalid";
 		isolated?: boolean;
+		/** Resolved clone disposition for this run. */
+		cloneDisposition?: SubagentCloneDisposition;
 		patchPath?: string;
 		/** False when `patchPath` is an empty root diff and the work lives in `nestedPatchPaths`. */
 		hasRootChanges?: boolean;
@@ -155,6 +157,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 			...(schemaMode !== undefined ? { schemaMode } : {}),
 			...(schemaStatus !== undefined ? { schemaStatus } : {}),
 			...(policy.isIsolated ? { isolated: true, changesApplied } : {}),
+			...(policy.cloneDisposition !== undefined ? { cloneDisposition: policy.cloneDisposition } : {}),
 			...(result.patchPath !== undefined ? { patchPath: result.patchPath } : {}),
 			...(result.hasRootChanges !== undefined ? { hasRootChanges: result.hasRootChanges } : {}),
 			...(result.branchName !== undefined ? { branchName: result.branchName } : {}),
@@ -178,19 +181,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 	}
 
-	const isolation: StructuredSubagentIsolationControls | undefined =
-		Object.hasOwn(parsed, "isolated") || Object.hasOwn(parsed, "apply") || Object.hasOwn(parsed, "merge")
-			? {
-					...(parsed.isolated !== undefined ? { requested: parsed.isolated } : {}),
-					...(parsed.merge !== undefined
-						? { merge: parsed.merge ? options.session.settings.get("task.isolation.merge") : "patch" }
-						: {}),
-					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
-				}
-			: undefined;
 	const customTools = parsed.tools?.length
 		? createEvalCustomTools(options.session, await describeEvalTools(options.session, parsed.tools, options.signal))
 		: undefined;
+	const readOnly = Object.hasOwn(parsed, "readOnly") ? { readOnly: parsed.readOnly } : {};
 
 	try {
 		const policy = await resolveEffectiveSubagentPolicy({
@@ -200,7 +194,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
-			...(isolation ? { isolation } : {}),
+			...readOnly,
 			...(customTools ? { customTools } : {}),
 		});
 		const manager = options.session.asyncJobManager;
@@ -224,7 +218,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 						identity: { id, label: parsed.label },
-						...(isolation ? { isolation } : {}),
+						...readOnly,
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
 						keepAlive: true,

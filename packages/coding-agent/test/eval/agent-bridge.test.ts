@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -19,6 +22,42 @@ import type { SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/to
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const jobManagers = new Set<AsyncJobManager>();
+const tempDirs = new Set<string>();
+
+async function makeRepoCwd(): Promise<string> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-bridge-"));
+	tempDirs.add(dir);
+	const proc = Bun.spawn(["git", "init", "-q", "-b", "main"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+	if ((await proc.exited) !== 0) throw new Error("git init failed");
+	return dir;
+}
+
+/**
+ * Ordinary spawns always run isolated now: stub clone preparation and delegate
+ * the isolated run to the executor mock, forwarding usage accounting exactly
+ * like the real runner.
+ */
+function mockIsolationDelegation(): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+		repoRoot: "/repo-root",
+		baseline: {
+			root: {
+				repoRoot: "/repo-root",
+				headCommit: "HEAD",
+				staged: "",
+				unstaged: "",
+				untracked: [],
+				untrackedPatch: "",
+			},
+			nested: [],
+		},
+	});
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
+		const result = await taskExecutor.runSubprocess(opts.baseOptions);
+		opts.onSubprocessResult?.(result);
+		return result;
+	});
+}
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 	return (
@@ -80,9 +119,9 @@ function createUsage(output: number) {
 	};
 }
 
-function createBudgetSession(sessionManager: SessionManager): ToolSession {
+function createBudgetSession(sessionManager: SessionManager, cwd: string): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd,
 		settings: Settings.isolated(),
 		getSessionSpawns: () => "*",
 		getSessionFile: () => null,
@@ -96,9 +135,11 @@ describe("runEvalAgent", () => {
 		vi.restoreAllMocks();
 		await Promise.all([...jobManagers].map(manager => manager.dispose()));
 		jobManagers.clear();
+		for (const dir of tempDirs) await fs.rm(dir, { recursive: true, force: true });
+		tempDirs.clear();
 	});
 
-	it("forwards session-scoped MCP and local protocol options", async () => {
+	it("excludes ambient MCP but forwards local protocol options", async () => {
 		const agent: AgentDefinition = {
 			name: "task",
 			description: "Task agent",
@@ -106,6 +147,7 @@ describe("runEvalAgent", () => {
 			source: "bundled",
 		};
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		mockIsolationDelegation();
 		const runSubprocessSpy = vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult());
 
 		const mcpManager = { sentinel: "mcp" } as unknown as MCPManager;
@@ -114,7 +156,7 @@ describe("runEvalAgent", () => {
 			getSessionId: () => "parent-session",
 		};
 		const session = {
-			cwd: "/tmp",
+			cwd: await makeRepoCwd(),
 			settings: Settings.isolated(),
 			getSessionSpawns: () => "*",
 			getSessionFile: () => null,
@@ -127,7 +169,9 @@ describe("runEvalAgent", () => {
 
 		expect(runSubprocessSpy).toHaveBeenCalledTimes(1);
 		const options = runSubprocessSpy.mock.calls[0]?.[0];
-		expect(options?.mcpManager).toBe(mcpManager);
+		// Subagent executor sessions never inherit ambient MCP.
+		expect(options?.enableMCP).toBe(false);
+		expect(options?.mcpManager).toBeUndefined();
 		expect(options?.localProtocolOptions).toBe(localProtocolOptions);
 		expect(options?.parentAgentId).toBe("BridgeParent");
 	});
@@ -147,9 +191,10 @@ describe("runEvalAgent", () => {
 			data: { status: "ok" },
 		};
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ output: "not JSON", structuredOutput }));
 		const session = {
-			cwd: "/tmp",
+			cwd: await makeRepoCwd(),
 			settings: Settings.isolated(),
 			getSessionSpawns: () => "*",
 			getSessionFile: () => null,
@@ -171,9 +216,13 @@ describe("runEvalAgent", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(1_234) }));
 
-		await runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) });
+		await runEvalAgentAndWait(
+			{ prompt: "do work", agent: "task" },
+			{ session: createBudgetSession(sessionManager, await makeRepoCwd()) },
+		);
 
 		expect(sessionManager.getTurnBudget()).toEqual({
 			total: 100_000,
@@ -192,6 +241,7 @@ describe("runEvalAgent", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, false);
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
 			createResult({
 				exitCode: 1,
@@ -202,7 +252,10 @@ describe("runEvalAgent", () => {
 		);
 
 		await expect(
-			runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) }),
+			runEvalAgentAndWait(
+				{ prompt: "do work", agent: "task" },
+				{ session: createBudgetSession(sessionManager, await makeRepoCwd()) },
+			),
 		).rejects.toThrow("agent failed");
 
 		expect(sessionManager.getTurnBudget().spent).toBe(2_345);
@@ -217,8 +270,7 @@ describe("runEvalAgent", () => {
 		};
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
-		const session = createBudgetSession(sessionManager);
-		session.settings.set("task.isolation.enabled", true);
+		const session = createBudgetSession(sessionManager, await makeRepoCwd());
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
 			repoRoot: "/tmp",
@@ -239,9 +291,9 @@ describe("runEvalAgent", () => {
 			throw new Error("cleanup failed");
 		});
 
-		await expect(
-			runEvalAgentAndWait({ prompt: "do work", agent: "task", isolated: true }, { session }),
-		).rejects.toThrow("cleanup failed");
+		await expect(runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session })).rejects.toThrow(
+			"cleanup failed",
+		);
 
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
 	});
@@ -255,13 +307,14 @@ describe("runEvalAgent", () => {
 		};
 		const recordEvalSubagentUsage = vi.fn();
 		const session = {
-			cwd: "/tmp",
+			cwd: await makeRepoCwd(),
 			settings: Settings.isolated(),
 			getSessionSpawns: () => "*",
 			getSessionFile: () => null,
 			recordEvalSubagentUsage,
 		} as unknown as ToolSession;
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(3_456) }));
 
 		await runStructuredSubagent({

@@ -36,6 +36,25 @@ async function runPrelude(
 }
 
 describe("python prelude", () => {
+	it("rejects a non-boolean read_only for agent() and workpool()", async () => {
+		const result = await runPrelude(
+			[
+				"for call in (lambda: agent('x', read_only='yes'), lambda: workpool(read_only=1)):",
+				"    try:",
+				"        call()",
+				"    except TypeError as error:",
+				"        print(str(error))",
+			].join("\n"),
+			{},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.trim().split("\n")).toEqual([
+			"agent() read_only must be a bool",
+			"workpool() read_only must be a bool",
+		]);
+	});
+
 	it("infers eval tool schemas and replaces definitions by name", async () => {
 		const result = await runPrelude(
 			[

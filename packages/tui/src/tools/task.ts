@@ -512,8 +512,8 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
-		if (item?.isolated === true) {
-			line += theme.fg("dim", " [isolated]");
+		if (item?.readOnly === false) {
+			line += theme.fg("dim", " [merge]");
 		}
 		lines.push(line);
 	}
@@ -579,7 +579,7 @@ function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSe
  * Render the tool call arguments.
  */
 export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: Theme): Component {
-	const showIsolated = "isolated" in args && args.isolated === true;
+	const showMerge = "readOnly" in args && args.readOnly === false;
 	// Dispatch glyph from the first frame: spawning is non-blocking, so a
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
@@ -617,7 +617,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 
 		return {
 			header,
-			headerMeta: showIsolated ? "isolated" : undefined,
+			headerMeta: showMerge ? "merge" : undefined,
 			sections,
 			phase: "pending",
 			borderColor: "borderMuted",
@@ -1734,8 +1734,11 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
-	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
-	isolated?: boolean;
+	/**
+	 * Clone disposition for this spawn: omitted/true = isolated clone, changes
+	 * discarded; false = isolated clone, successful initial changes applied back.
+	 */
+	readOnly?: boolean;
 }
 
 /**
@@ -1763,8 +1766,8 @@ export interface TaskParams {
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
-	/** Run in an isolated worktree (flat form; per-item in batch form). */
-	isolated?: boolean;
+	/** Clone disposition (flat form; per-item in batch form): omitted/true = discard clone changes, false = apply them. */
+	readOnly?: boolean;
 }
 
 /**
@@ -1912,6 +1915,9 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/** Harness disposition of a cloned subagent's workspace changes. */
+export type SubagentCloneDisposition = "discard" | "merge";
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -1958,6 +1964,10 @@ export interface SingleResult {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/** Resolved clone disposition for this run; absent for host-managed (non-clone) execution and historical results. */
+	cloneDisposition?: SubagentCloneDisposition;
+	/** Integration outcome for merge runs: null = no integration attempt, false = failed, true = applied or already applied. */
+	changesApplied?: boolean | null;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */

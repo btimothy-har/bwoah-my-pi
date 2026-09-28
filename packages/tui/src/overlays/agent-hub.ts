@@ -1112,12 +1112,17 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		add(theme.fg("dim", `Registered ${formatLocalDateTimeWithOffset(new Date(ref.createdAt))}`));
 
 		section("Changes");
+		const disposition = ref.history?.cloneDisposition;
 		add(
 			theme.fg(
 				"dim",
 				ref.kind === "advisor" || ref.history?.readOnly
 					? "Read-only · 0 LoC"
-					: "Shared workspace · per-agent LoC not attributable",
+					: disposition === "discard"
+						? "Clone · discard on release"
+						: disposition === "merge"
+							? "Clone · initial changes eligible for merge"
+							: "Shared workspace · per-agent LoC not attributable",
 			),
 		);
 		const artifacts = ref.history;

@@ -36,7 +36,6 @@ const JEV_PREVIEW: Model<Api> = {
 function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
-		"task.isolation.enabled": false,
 		modelRoles: { judge: opts.typesafe ? "typesafe/jev-preview" : "p/smol" },
 		"retry.fallbackChains": { judge: ["p/smol"] },
 	});

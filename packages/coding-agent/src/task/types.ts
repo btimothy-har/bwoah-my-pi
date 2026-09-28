@@ -45,56 +45,26 @@ const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
-export const taskItemSchema = type({
+const taskItemFields = {
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"+": "delete",
-});
-const taskItemSchemaIsolated = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"isolated?": "boolean",
-	"+": "delete",
-});
+	"readOnly?": "boolean",
+	"+": "reject",
+} as const;
 
-export const taskSchema = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"isolated?": "boolean",
-	"+": "delete",
-});
-const taskSchemaNoIsolation = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"+": "delete",
-});
+export const taskItemSchema = type(taskItemFields);
+
+export const taskSchema = type(taskItemFields);
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
-	"+": "delete",
-});
-const taskSchemaBatchNoIsolation = type({
-	context: "string",
 	tasks: taskItemSchema.array(),
-	"+": "delete",
+	"+": "reject",
 });
-const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaBatch] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
@@ -113,7 +83,6 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 }
 
 function createTaskSchema(options: {
-	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	defaultAgent: string;
 	effortEnabled: boolean;
@@ -122,55 +91,7 @@ function createTaskSchema(options: {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				...effortField,
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				...toolsField,
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
-		const item = type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"+": "delete",
-		});
-		return type.raw({
-			context: "string",
-			tasks: item.array(),
-			"+": "delete",
-		});
-	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"isolated?": "boolean",
-			"+": "delete",
-		});
-	}
-	return type.raw({
+	const item = type.raw({
 		"name?": "string",
 		agent,
 		task: "string",
@@ -178,13 +99,21 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
-		"+": "delete",
+		"readOnly?": "boolean",
+		"+": "reject",
 	});
+	if (options.batchEnabled) {
+		return type.raw({
+			context: "string",
+			tasks: item.array(),
+			"+": "reject",
+		});
+	}
+	return item;
 }
 
 /** Build the task wire schema for the current settings and spawn policy. */
 export function getTaskSchema(options: {
-	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
@@ -195,10 +124,9 @@ export function getTaskSchema(options: {
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled) {
-		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
-		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+		return options.batchEnabled ? taskSchemaBatch : taskSchema;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
+	const key = `${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent });
@@ -215,18 +143,31 @@ export function canSpawnAtDepth(maxRecursionDepth: number, taskDepth: number): b
 	return maxRecursionDepth < 0 || taskDepth < maxRecursionDepth;
 }
 
+/**
+ * Host-managed execution contract for product-owned subagent workflows
+ * (cleanse, commit analysis, security scans). Presence selects direct
+ * host-managed cwd execution with the workflow's own tool/spawn ceilings
+ * instead of the ordinary clone + common-tool policy. Host code only:
+ * never parsed from task/eval arguments or agent frontmatter.
+ */
+export interface ManagedSubagentExecution {
+	/** Replaces the definition's tool contract when supplied. */
+	toolNames?: string[];
+	/** Replaces the definition's spawn authority when supplied. */
+	spawns?: string[] | "*";
+}
+
 /** Agent definition (bundled or discovered) */
 export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	/** Additive built-in extras on top of the common subagent toolset. */
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
-	/** Isolated file changes: apply via task isolation settings, or discard (the default). */
-	isolation?: "apply" | "discard";
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */

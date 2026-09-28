@@ -18,7 +18,6 @@ import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -199,7 +198,12 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
+		// An empty declaration forwards as an explicit list (suppresses the
+		// default registry) rather than collapsing to undefined. It is not a
+		// read-only contract, so the unrestricted path's always-on hub grant
+		// applies; the SDK unions the required yield tool at session
+		// construction. Absent stays undefined so defaults apply.
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["hub"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
@@ -222,22 +226,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
-		const specialist = getBundledAgent("conventions-specialist");
-		if (!specialist) throw new Error("Missing bundled conventions specialist");
-		const specialistResult = await runSubprocess({
-			...baseOptions,
-			id: "review-specialist-child",
-			agent: { ...specialist, model: undefined },
-		});
 
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
-		expect(specialistResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
 		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
-		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -247,8 +242,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyPrompt = promptText(0);
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
-		const specialistPrompt = promptText(3);
-		expect(specialistPrompt.includes("# Peers")).toBe(false);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
 		expect(writablePrompt.includes("# Peers")).toBe(true);
 		expect(spawningPrompt.includes("# Peers")).toBe(true);
@@ -368,20 +361,23 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "write", "yield"] }));
 	});
 
-	it("retains inherited MCP proxy tools for normal children", async () => {
+	it("never inherits ambient MCP proxies without an explicit opt-in", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
-			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
+			getTools: vi.fn(() => [{ name: "mcp__private_read", label: "private/read" }]),
 		} as unknown as MCPManager;
 
 		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
-		expect(forwarded?.enableMCP).toBe(true);
-		expect(forwarded?.mcpManager).toBe(mcpManager);
-		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		// Subagent executor sessions never inherit ambient MCP: a passed manager
+		// is inert unless the caller explicitly sets enableMCP.
+		expect(forwarded?.enableMCP).toBe(false);
+		expect(forwarded?.mcpManager).toBeUndefined();
+		expect(forwarded?.customTools).toBeUndefined();
+		expect(mcpManager.getTools).not.toHaveBeenCalled();
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

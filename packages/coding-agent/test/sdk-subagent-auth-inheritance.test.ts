@@ -11,6 +11,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -77,6 +78,9 @@ afterEach(() => {
 describe("task subagent OAuth pin inheritance", () => {
 	it("keeps inherited credentials and metadata on the parent's account affinity", async () => {
 		const tempDir = TempDir.createSync("@pi-subagent-auth-pin-");
+		// Ordinary spawns always run isolated; preflight probes the session cwd
+		// for a Git checkout, so the temp workspace must be one.
+		Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: tempDir.path() });
 		const authStorage = createInMemoryAuthStorage();
 		const sessions: AgentSession[] = [];
 		try {
@@ -99,7 +103,6 @@ describe("task subagent OAuth pin inheritance", () => {
 				"async.enabled": false,
 				"compaction.enabled": false,
 				"task.batch": true,
-				"task.isolation.enabled": false,
 				"todo.enabled": false,
 			});
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
@@ -108,6 +111,25 @@ describe("task subagent OAuth pin inheritance", () => {
 				dispatched.push(options);
 				return subprocessResult(options.id ?? "task");
 			});
+			// Stub clone preparation and delegate the isolated run to the executor
+			// mock, exactly like the real runner.
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+				repoRoot: tempDir.path(),
+				baseline: {
+					root: {
+						repoRoot: tempDir.path(),
+						headCommit: "HEAD",
+						staged: "",
+						unstaged: "",
+						untracked: [],
+						untrackedPatch: "",
+					},
+					nested: [],
+				},
+			});
+			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+				executorModule.runSubprocess(opts.baseOptions),
+			);
 
 			const { session: parent } = await createAgentSession({
 				cwd: tempDir.path(),

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
@@ -16,17 +19,25 @@ const SCOUT: AgentDefinition = {
 };
 
 const managers = new Set<AsyncJobManager>();
+const tempDirs = new Set<string>();
 
-function makeSession(): ToolSession {
+async function makeRepo(): Promise<string> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "workpool-bridge-"));
+	tempDirs.add(dir);
+	const proc = Bun.spawn(["git", "init", "-q", "-b", "main"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+	if ((await proc.exited) !== 0) throw new Error("git init failed");
+	return dir;
+}
+
+async function makeSession(): Promise<ToolSession> {
 	const manager = new AsyncJobManager({ retentionMs: 0 });
 	managers.add(manager);
 	return {
-		cwd: "/tmp",
+		cwd: await makeRepo(),
 		hasUI: false,
 		settings: Settings.isolated({
 			"task.maxConcurrency": 2,
 			"task.maxRecursionDepth": 2,
-			"task.isolation.enabled": false,
 			"task.enableLsp": false,
 		}),
 		asyncJobManager: manager,
@@ -40,6 +51,8 @@ function makeSession(): ToolSession {
 afterEach(async () => {
 	for (const manager of managers) await manager.dispose();
 	managers.clear();
+	for (const dir of tempDirs) await fs.rm(dir, { recursive: true, force: true });
+	tempDirs.clear();
 	vi.restoreAllMocks();
 	AgentRegistry.resetGlobalForTests();
 	WorkPoolRegistry.resetForTests();
@@ -47,7 +60,7 @@ afterEach(async () => {
 
 describe("runEvalWorkpool", () => {
 	it("validates operation arguments", async () => {
-		const session = makeSession();
+		const session = await makeSession();
 		await expect(runEvalWorkpool(null, { session })).rejects.toThrow("arguments must be an object");
 		await expect(runEvalWorkpool({}, { session })).rejects.toThrow("requires an op");
 		await expect(runEvalWorkpool({ op: "create", agent: 4 }, { session })).rejects.toThrow(
@@ -59,15 +72,27 @@ describe("runEvalWorkpool", () => {
 	});
 
 	it("rejects unknown pool names", async () => {
-		const session = makeSession();
+		const session = await makeSession();
 		await expect(runEvalWorkpool({ op: "status", name: "missing" }, { session })).rejects.toThrow(
 			'unknown workpool "missing"',
 		);
 	});
 
+	it("rejects obsolete spawn keys and non-boolean readOnly at create", async () => {
+		const session = await makeSession();
+		for (const key of ["isolated", "apply", "merge"]) {
+			await expect(runEvalWorkpool({ op: "create", agent: "scout", [key]: true }, { session })).rejects.toThrow(
+				`workpool create does not accept "${key}"`,
+			);
+		}
+		await expect(runEvalWorkpool({ op: "create", agent: "scout", readOnly: "yes" }, { session })).rejects.toThrow(
+			"workpool readOnly must be a boolean",
+		);
+	});
+
 	it("creates unique default names and validates push and peek arguments", async () => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
-		const session = makeSession();
+		const session = await makeSession();
 		const events: Array<Record<string, unknown>> = [];
 		const first = await runEvalWorkpool(
 			{ op: "create", agent: "scout" },

@@ -41,6 +41,9 @@ function buildToolSession(
 		// Programmatic fan-out: results feed the commit agent's evidence, not a
 		// model choosing further spawns, so the specialization nudge is noise here.
 		suppressSpawnAdvisory: true,
+		// Read-only per-file analysis runs directly in the commit agent's tree;
+		// one clone per file is pure overhead. No descendant spawning.
+		managedSubagentExecution: { spawns: [] },
 		getSessionFile: () => ctx.sessionManager.getSessionFile() ?? null,
 		getSessionSpawns: () => options.spawns,
 		settings: options.settings,
@@ -86,8 +89,6 @@ export function createAnalyzeFileTool(options: {
 						name: `AnalyzeFile${index + 1}`,
 						agent: "sonic",
 						task: assignment,
-						// Read-only per-file analysis; one isolated clone per file is pure overhead.
-						isolated: false,
 					};
 					return taskTool.execute(`${toolCallId}-${index + 1}`, taskParams, signal);
 				}),

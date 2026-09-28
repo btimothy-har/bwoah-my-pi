@@ -288,12 +288,12 @@ export function parseModelList(value: unknown): string[] | undefined {
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	/** Additive built-in extras on top of the common subagent toolset. */
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
-	isolation?: "apply" | "discard";
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
@@ -329,10 +329,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
-	// Subagents with explicit tool lists always need yield
-	if (tools && !tools.includes("yield")) {
-		tools = [...tools, "yield"];
-	}
+	// Explicit tool lists are additive extras; the required yield tool is
+	// unioned into the common subagent set at spawn resolution.
 
 	// Parse spawns field (array, "*", or CSV)
 	let spawns: string[] | "*" | undefined;
@@ -366,7 +364,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
-	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
+	// prewalk: true → hand off to the default target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
 	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
 		const trimmed = frontmatter.prewalk.trim();
@@ -378,8 +376,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		const trimmed = frontmatter.advisor.trim();
 		if (trimmed) advisor = trimmed;
 	}
-	const isolation =
-		frontmatter.isolation === "apply" || frontmatter.isolation === "discard" ? frontmatter.isolation : undefined;
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
@@ -390,7 +386,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns,
 		model,
 		output,
-		isolation,
 		thinkingLevel,
 		blocking,
 		autoloadSkills,

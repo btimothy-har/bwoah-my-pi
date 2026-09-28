@@ -42,7 +42,7 @@ _No files to review._
 
 Invoke the `code-review` skill (`skill://code-review`) for the code review contract. If the skill is not available in this session, state that limitation and follow the `review_findings` tool's contract directly.
 
-Use `task` to dispatch reviewers in the batch or flat shape specified by the skill for the current `task.batch` setting.
+Use `task` to dispatch reviewers in the batch or flat shape specified by the skill for the current `task.batch` setting. Every reviewer dispatch — batch item, flat call, or focused re-dispatch — MUST pass `readOnly: true` explicitly.
 
 ### Chair Diff Capture
 

@@ -4977,17 +4977,6 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Delegation
-	"task.isolation.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tasks",
-			group: "Isolation",
-			label: "Isolate Subagents",
-			description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
-		},
-	},
-
 	"isolation.backend": {
 		type: "enum",
 		values: ["auto", "apfs", "btrfs", "zfs", "reflink", "overlayfs", "projfs", "block-clone", "rcopy"] as const,
@@ -5047,18 +5036,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"task.isolation.apply": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tasks",
-			group: "Isolation",
-			label: "Apply Isolated Changes",
-			description:
-				"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
-		},
-	},
-
 	"task.isolation.merge": {
 		type: "enum",
 		values: ["patch", "branch"] as const,
@@ -5067,7 +5044,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			group: "Isolation",
 			label: "Isolation Merge Strategy",
-			description: "How isolated task changes are integrated (patch apply or branch merge)",
+			description:
+				"How isolated task changes are integrated when spawned with readOnly: false (patch apply or branch merge)",
 			options: [
 				{ value: "patch", label: "Patch", description: "Combine diffs and git apply" },
 				{ value: "branch", label: "Branch", description: "Commit per task, merge with --no-ff" },

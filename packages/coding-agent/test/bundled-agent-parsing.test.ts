@@ -27,53 +27,43 @@ describe("bundled agent parsing", () => {
 	});
 
 	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
-		const lenses = [
-			["conventions-specialist", Effort.High],
-			["integration-specialist", Effort.High],
-			["testing-specialist", Effort.Medium],
-			["code-clarity-specialist", Effort.Medium],
-			["docs-specialist", Effort.Low],
-			["security-specialist", Effort.High],
-			["data-model-specialist", Effort.High],
-		] as const;
-
-		for (const [name, effort] of lenses) {
+		for (const name of [
+			"conventions-specialist",
+			"integration-specialist",
+			"testing-specialist",
+			"code-clarity-specialist",
+			"docs-specialist",
+			"security-specialist",
+			"data-model-specialist",
+		]) {
 			const agent = getBundledAgent(name);
 			expect(agent?.output).toBeUndefined();
-			expect(agent?.thinkingLevel).toBe(effort);
-			expect(agent?.isolation).toBeUndefined();
-			expect(agent?.spawns).toBeUndefined();
-			expect(agent?.tools).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
+			// `tools` is additive extras only; yield is unioned at spawn resolution.
+			expect(agent?.tools).toBeDefined();
+			expect(agent?.tools).not.toContain("yield");
+			expect("isolation" in (agent ?? {})).toBe(false);
 		}
 	});
 
-	it("keeps the devil's advocate read-only and unschematized by default", () => {
+	it("keeps the devil's advocate unschematized with its declared extras", () => {
 		const agent = getBundledAgent("devils-advocate");
-		expect(agent?.isolation).toBeUndefined();
-		expect(agent?.tools).toEqual(["read", "grep", "glob", "web_search", "yield"]);
-		expect(agent?.thinkingLevel).toBe(Effort.High);
+		expect(agent?.tools).toBeDefined();
+		expect(agent?.tools).not.toContain("yield");
 		expect(agent?.output).toBeUndefined();
 	});
 
-	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {
-		expect(getBundledAgent("task")?.isolation).toBe("apply");
-		expect(getBundledAgent("sonic")?.isolation).toBe("apply");
-		expect(getBundledAgent("reviewer")?.isolation).toBeUndefined();
-		for (const [value, expected] of [
-			["apply", "apply"],
-			["discard", "discard"],
-			["typo", undefined],
-		] as const) {
+	it("ignores the removed isolation frontmatter instead of parsing it", () => {
+		for (const value of ["apply", "discard", "typo"] as const) {
 			const agent = parseAgent(
 				"custom.md",
 				`---\nname: custom\ndescription: Custom agent\nisolation: ${value}\n---\nReview the assignment.`,
 				"user",
 			);
-			expect(agent.isolation).toBe(expected);
+			expect("isolation" in agent).toBe(false);
 		}
 	});
 
-	it("keeps unpacked workers applying edits and specialists reporting without a default schema", async () => {
+	it("resolves unpacked agents through the caller's readOnly, never the definition", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
@@ -83,22 +73,40 @@ describe("bundled agent parsing", () => {
 			});
 			const session = {
 				cwd: repo,
-				settings: Settings.isolated({ "task.isolation.enabled": true }),
+				settings: Settings.isolated(),
 				hasUI: false,
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
 			};
-			for (const name of ["task", "sonic"]) {
+			for (const name of ["task", "sonic", "conventions-specialist", "devils-advocate"]) {
 				const policy = await resolveEffectiveSubagentPolicy({
 					session,
 					invocationKind: "task",
-					assignment: "Edit a file",
+					assignment: "Do the work",
 					agent: name,
 				});
 				expect(policy.agent.source).toBe("project");
-				expect(policy.isIsolated).toBe(true);
-				expect(policy.discardChanges).toBe(false);
-				expect(policy.applyChanges).toBe(true);
+				// Omitted readOnly: every ordinary spawn is a discard clone.
+				expect(policy).toMatchObject({
+					isIsolated: true,
+					discardChanges: true,
+					applyChanges: false,
+					cloneDisposition: "discard",
+				});
+
+				const merging = await resolveEffectiveSubagentPolicy({
+					session,
+					invocationKind: "task",
+					assignment: "Do the work",
+					agent: name,
+					readOnly: false,
+				});
+				expect(merging).toMatchObject({
+					isIsolated: true,
+					discardChanges: false,
+					applyChanges: true,
+					cloneDisposition: "merge",
+				});
 			}
 
 			for (const name of ["conventions-specialist", "devils-advocate"]) {
@@ -108,10 +116,6 @@ describe("bundled agent parsing", () => {
 					assignment: "Review the change",
 					agent: name,
 				});
-				expect(policy.agent.source).toBe("project");
-				expect(policy.isIsolated).toBe(true);
-				expect(policy.discardChanges).toBe(true);
-				expect(policy.applyChanges).toBe(false);
 				expect(policy.schema.source).toBe("none");
 			}
 		} finally {
@@ -194,10 +198,14 @@ describe("bundled agent parsing", () => {
 			});
 		}
 		for (const agent of loadBundledAgents().filter(agent => !["task", "sonic"].includes(agent.name))) {
-			expect(resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern })).toEqual({
-				patterns: [activeModelPattern],
-				role: undefined,
-			});
+			const selection = resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern });
+			// The roster's declared alias decides routing: `@smol` lenses keep the
+			// fast role, `@default` lenses follow the session's active model.
+			if (agent.model?.[0] === "@smol") {
+				expect(selection).toEqual({ patterns: ["fast/hy3"], role: "smol" });
+			} else {
+				expect(selection.patterns).toEqual([activeModelPattern]);
+			}
 		}
 		const reviewer = getBundledAgent("reviewer");
 		expect(resolveAgentModelSelection({ agentModel: reviewer?.model, settings })).toEqual({

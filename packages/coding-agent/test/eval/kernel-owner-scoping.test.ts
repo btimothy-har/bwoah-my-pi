@@ -14,7 +14,6 @@ function makeSession(cwd: string): ToolSession {
 		hasUI: false,
 		settings: Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 		}),
 		taskDepth: 0,

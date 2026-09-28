@@ -16,7 +16,6 @@ function makeSession(cwd: string, evalSessionId: string, options?: { autoProvisi
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"eval.autoProvision": options?.autoProvision ?? true,
-			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 		}),
 		taskDepth: 0,

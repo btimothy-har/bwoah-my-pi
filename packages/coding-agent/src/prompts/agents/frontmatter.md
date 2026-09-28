@@ -9,6 +9,5 @@ description: {{jsonStringify description}}
 {{/if}}{{#if prewalk}}prewalk: {{jsonStringify prewalk}}
 {{/if}}{{#if advisor}}advisor: {{jsonStringify advisor}}
 {{/if}}{{#if autoloadSkills}}autoloadSkills: {{jsonStringify autoloadSkills}}
-{{/if}}{{#if isolation}}isolation: {{jsonStringify isolation}}
 {{/if}}---
 {{body}}

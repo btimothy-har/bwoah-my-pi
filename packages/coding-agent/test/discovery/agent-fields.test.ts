@@ -91,10 +91,10 @@ describe("parseAgentFields", () => {
 			tools: ["Read", "Search"],
 		});
 
-		expect(fields?.tools).toEqual(["read", "grep", "yield"]);
+		expect(fields?.tools).toEqual(["read", "grep"]);
 	});
 	test("keeps an explicitly empty tools list distinct from an absent one", () => {
-		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual(["yield"]);
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual([]);
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
@@ -105,7 +105,7 @@ describe("parseAgentFields", () => {
 			tools: ["Find", "Glob", "Search", "Grep"],
 		});
 
-		expect(fields?.tools).toEqual(["find", "glob", "grep", "yield"]);
+		expect(fields?.tools).toEqual(["find", "glob", "grep"]);
 	});
 
 	test("parses autoloadSkills from array frontmatter", () => {

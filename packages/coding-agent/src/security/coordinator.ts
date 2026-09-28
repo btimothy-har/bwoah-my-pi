@@ -239,8 +239,8 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		"security-reviewer": "off",
 	});
 	// Ref-diff scans already execute in their own detached worktree (below), so
-	// scan reviewers must not be re-cloned per spawn.
-	scanSettings.override("task.isolation.enabled", false);
+	// scan reviewers must not be re-cloned per spawn: they run host-managed with
+	// their historical read-only ceiling, no descendants, and read-only LSP.
 	const providerSessionId = `security:${input.scanId}`;
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,
@@ -260,6 +260,10 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		restrictToolNames: true,
 		allowRestrictedCustomTools: true,
 		spawns: "security-reviewer",
+		managedSubagentExecution: {
+			toolNames: ["read", "find", "grep", "glob", "lsp", "ast_grep", "yield"],
+			spawns: [],
+		},
 		appendSystemPrompt: securityCoordinatorPrompt.trim(),
 		disableExtensionDiscovery: true,
 		enableMCP: false,

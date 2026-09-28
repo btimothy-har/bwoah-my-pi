@@ -205,6 +205,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import type { ManagedSubagentExecution } from "./task/types";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
@@ -590,6 +591,12 @@ export interface CreateAgentSessionOptions {
 	 * and ambient custom tools remain disabled. Default: false.
 	 */
 	allowRestrictedCustomTools?: boolean;
+	/**
+	 * Host-managed subagent execution contract for product-owned workflows.
+	 * Host code only; forwarded onto the child ToolSession so managed
+	 * descendants keep direct host-managed cwd execution.
+	 */
+	managedSubagentExecution?: ManagedSubagentExecution;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -1795,6 +1802,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	// Restricted sessions bootstrap memory only for explicitly requested
+	// backend tools; unrestricted sessions keep the whole backend set.
+	const requestedMemoryNames = restrictToolNames
+		? normalizeToolNames(options.toolNames ?? []).filter((name): name is (typeof MEMORY_BACKEND_TOOL_NAMES)[number] =>
+				(MEMORY_BACKEND_TOOL_NAMES as readonly string[]).includes(name),
+			)
+		: [...MEMORY_BACKEND_TOOL_NAMES];
+	const memoryToolsEnabled = !restrictToolNames || requestedMemoryNames.length > 0;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
@@ -1878,7 +1893,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			resolveRelatedWorkspace: () => resolveSessionRelatedWorkspace(),
 			enableLsp,
 			lspReadOnly,
-			enableIrc: restrictToolNames ? false : options.enableIrc,
+			enableIrc: options.enableIrc ?? !restrictToolNames,
 			/**
 			 * Frozen at the last system-prompt rebuild: a mid-session `/skillful`
 			 * toggle rides the next turn's notice, never the tool prefix. The
@@ -1924,8 +1939,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
-			getHindsightSessionState: () => session?.getHindsightSessionState(),
-			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			managedSubagentExecution: options.managedSubagentExecution,
+			// A memoryless intermediate child still forwards the owner's backend
+			// state so its descendants can use declared memory tools.
+			getHindsightSessionState: () => session?.getHindsightSessionState() ?? options.parentHindsightSessionState,
+			getMnemopiSessionState: () => session?.getMnemopiSessionState() ?? options.parentMnemopiSessionState,
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
@@ -3338,7 +3356,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					setActiveRules(nextActiveRules);
 				}
 			}
-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+			const memoryBackend = memoryToolsEnabled ? await resolveMemoryBackend(settings) : undefined;
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
@@ -4046,15 +4064,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
-			memoryEnabled: !restrictToolNames,
+			memoryEnabled: memoryToolsEnabled,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
-			createMemoryTools: restrictToolNames
+			createMemoryTools: !memoryToolsEnabled
 				? undefined
 				: async () => {
-						const tools = await Promise.all(
-							MEMORY_BACKEND_TOOL_NAMES.map(name => BUILTIN_TOOLS[name](toolSession)),
-						);
+						const tools = await Promise.all(requestedMemoryNames.map(name => BUILTIN_TOOLS[name](toolSession)));
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
@@ -4563,7 +4579,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
-		if (!restrictToolNames) {
+		if (memoryToolsEnabled) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 				new AutoLearnController({
