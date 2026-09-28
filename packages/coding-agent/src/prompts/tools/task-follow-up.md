@@ -5,9 +5,13 @@
 {{agentId}} was aborted — {{#if transcriptAvailable}}transcript at history://{{agentId}}{{else}}transcript unavailable{{/if}}
 {{/if}}
 {{else}}
+{{#if mergeRetained}}
+{{agentId}} is now idle — {{#if ircEnabled}}message it via `hub` to follow up; {{/if}}follow-up edits are not automatically applied. transcript at history://{{agentId}}
+{{else}}
 {{#if isolated}}
 {{agentId}} ran isolated and cannot be resumed or messaged — transcript at history://{{agentId}}
 {{else}}
 {{agentId}} is now idle — {{#if ircEnabled}}message it via `hub` to follow up; {{/if}}transcript at history://{{agentId}}
+{{/if}}
 {{/if}}
 {{/if}}

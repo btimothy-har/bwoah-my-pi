@@ -312,10 +312,14 @@ export async function resolveEffectiveSubagentPolicy(
 			throw error;
 		}
 	} else if (managed !== undefined) {
+		// An explicit empty spawn list means no authority, like an absent field:
+		// downstream presence checks (task auto-add, read-only attribution) key
+		// off `undefined`, while the spawn policy denies identically either way.
+		const managedSpawns = managed.spawns === "*" || (managed.spawns?.length ?? 0) > 0 ? managed.spawns : undefined;
 		effectiveAgent = {
 			...agent,
 			...(managed.toolNames !== undefined ? { tools: normalizeToolNames(managed.toolNames) } : {}),
-			...(managed.spawns !== undefined ? { spawns: managed.spawns } : {}),
+			...(managed.spawns !== undefined ? { spawns: managedSpawns } : {}),
 		};
 	}
 	const schema = resolveSchema(request, effectiveAgent);
@@ -347,9 +351,6 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	let isIsolated = false;
-	let discardChanges = false;
-	let applyChanges = false;
 	let cloneDisposition: SubagentCloneDisposition | undefined;
 	if (!planMode && managed === undefined) {
 		const readOnly = request.readOnly ?? true;
@@ -360,11 +361,13 @@ export async function resolveEffectiveSubagentPolicy(
 				`Subagent execution requires an isolated clone, but this workspace cannot provide one: ${probe.unavailable}`,
 			);
 		}
-		isIsolated = true;
-		discardChanges = readOnly;
-		applyChanges = !readOnly;
 		cloneDisposition = readOnly ? "discard" : "merge";
 	}
+	// The booleans derive from the single disposition value: exactly one exists
+	// iff the run is an ordinary clone, so consumers can never disagree.
+	const isIsolated = cloneDisposition !== undefined;
+	const discardChanges = cloneDisposition === "discard";
+	const applyChanges = cloneDisposition === "merge";
 	return {
 		discovery,
 		agentName,

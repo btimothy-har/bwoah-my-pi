@@ -62,7 +62,7 @@ Find bugs author wants fixed before merge.
 3. Each issue: incremental `yield`, `type: ["findings"]`.
 4. Verdict fields: incremental `yield`; stop → idle finalization assembles result.
 
-Prefer read-only inspection: `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. You MAY create scratch files and run focused commands inside your clone to verify a suspected defect — your file changes are discarded. NEVER edit files to "fix" them; report instead.
+Prefer read-only inspection: `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. You MAY create scratch files and run focused commands inside your clone to verify a suspected defect — your file changes are discarded unless your caller opted to apply them. NEVER edit files to "fix" them; report instead.
 </procedure>
 
 <criteria>

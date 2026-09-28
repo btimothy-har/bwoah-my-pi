@@ -623,7 +623,7 @@ lsp:
 | `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
 | `eval.autoProvision`              | boolean | `true`    | Create the managed JavaScript eval package environment on first `%bun add`.                                                                                 |
 | `eval.tools.enabled`              | boolean | `true`    | Expose kernel-defined `@tool` / `tool(fn)` functions to `task`, `agent()`, and `workpool()` subagents.                                                      |
-|| `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items. Pools created with `readOnly: false` always use fresh one-shot workers per batch so every batch's changes can be applied. |
+| `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items. Pools created with `readOnly: false` always use fresh one-shot workers per batch so every batch's changes can be applied. |
 | `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |
 | `python.interpreter`              | string  | `""`      | Path to a Python interpreter; empty = auto-detect.                                                                                                          |
 | `lsp.enabled`                     | boolean | `true`    | Language-server integration. `--no-lsp` disables for the run.                                                                                               |
@@ -880,9 +880,9 @@ Applied whenever raw settings are loaded (global, project, overlays, and runtime
 | `inspect_image.timeoutMs`                                                | `images.questionTimeoutMs`                                                                                   |
 | `queueMode`                                                              | `steeringMode`                                                                                               |
 | flat `theme: "<name>"` string                                            | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
-|| legacy `task.isolation.mode: none`                                       | removed (ordinary spawns always run in an isolated clone; there is no off switch)                            |
-|| legacy `task.isolation.mode: <backend>`                                  | `isolation.backend: <backend>`                                                                               |
-|| `task.isolation.enabled` / `task.isolation.apply`                        | removed — clone disposition is per spawn via the `readOnly` field; `task.isolation.merge`/`task.isolation.commits` remain |
+| legacy `task.isolation.mode: none`                                       | removed (ordinary spawns always run in an isolated clone; there is no off switch)                            |
+| legacy `task.isolation.mode: <backend>`                                  | `isolation.backend: <backend>`                                                                               |
+| `task.isolation.enabled` / `task.isolation.apply`                        | removed — clone disposition is per spawn via the `readOnly` field; `task.isolation.merge`/`task.isolation.commits` remain |
 | `task.simple`                                                            | removed                                                                                                      |
 | legacy isolation backends (`worktree`, `fuse-overlay`, `fuse-projfs`)    | `rcopy`, `overlayfs`, `projfs`                                                                               |
 | `lastChangelogVersion`                                                   | moved to a marker file and stripped from `config.yml`                                                        |

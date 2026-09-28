@@ -1,19 +1,3 @@
-{{#when kind "==" "captured"}}
-{{#if branchName}}
-Isolation: changes captured on branch `{{branchName}}` (apply=false). Not merged.
-{{else}}
-{{#if rootPatchPath}}
-Isolation: changes captured at `{{rootPatchPath}}` (apply=false). Not applied.
-{{else}}
-{{#if nestedCount}}
-Isolation: changes captured for {{pluralize nestedCount "nested repository" "nested repositories"}} (apply=false). Not applied.
-{{else}}
-Isolation: no changes captured.
-{{/if}}
-{{/if}}
-{{/if}}
-{{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
-{{/when}}
 {{#when kind "==" "capture-error"}}
 <system-notification>Isolation: {{error}}</system-notification>
 {{#if branchName}}
@@ -81,7 +65,4 @@ Nested repository patches (not applied):
 {{/when}}
 {{#when kind "==" "discarded"}}
 Isolation: ran in a discarded worktree; file changes were not kept. The yielded result is the deliverable.
-{{/when}}
-{{#when kind "==" "unavailable"}}
-Isolation: unavailable ({{error}}); this agent ran in the parent checkout and its file changes were NOT discarded.
 {{/when}}

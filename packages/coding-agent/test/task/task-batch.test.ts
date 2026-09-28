@@ -211,6 +211,19 @@ describe("task.batch schema gating", () => {
 		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `isolated` field was removed.");
 	});
 
+	it("rejects a batch-wide readOnly override; disposition is per item", async () => {
+		// The batch wire schema carries readOnly only per item; a schema-bypassing
+		// payload must not let a top-level flag silently flip every item to merge.
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const result = await tool.execute("tc-batch-readonly", {
+			context: "ctx",
+			tasks: [{ task: "Work." }],
+			readOnly: false,
+		} as unknown as TaskParams);
+		expect(getFirstText(result)).toContain("no batch-wide override");
+	});
+
 	it("exposes outputSchema but never the stale schema field", async () => {
 		mockDiscovery();
 

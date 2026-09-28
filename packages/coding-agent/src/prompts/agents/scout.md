@@ -59,6 +59,6 @@ You MUST infer the thoroughness from the task; default to medium:
 </procedure>
 
 <critical>
-Report findings via `yield`; your file changes are discarded — the parent applies nothing you write. You MAY create scratch files and run commands inside your clone, but the report is the deliverable.
+Report findings via `yield`; your file changes are discarded unless your caller opted to apply them — the parent applies nothing you write by default. You MAY create scratch files and run commands inside your clone, but the report is the deliverable.
 You MUST keep going until complete.
 </critical>

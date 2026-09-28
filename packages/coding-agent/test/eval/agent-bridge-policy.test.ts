@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -189,14 +190,14 @@ function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult>
 	};
 }
 
-function makeEvalSession(
+async function makeEvalSession(
 	tempDir: TempDir,
 	prefix: string,
 	settings?: Settings,
-): { session: ToolSession; sessionFile: string; sessionId: string } {
+): Promise<{ session: ToolSession; sessionFile: string; sessionId: string }> {
 	// Ordinary spawns always run in an isolated clone; preflight probes the
 	// session cwd for a Git checkout, so the temp workspace must be one.
-	Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: tempDir.path() });
+	await $`git init -q -b main`.cwd(tempDir.path()).quiet();
 	const sessionFile = path.join(tempDir.path(), "session.jsonl");
 	const artifactsDir = sessionFile.slice(0, -6);
 	const session = makeSession({
@@ -643,7 +644,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("exposes agent() in JavaScript and parses structured output", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent");
+		const { session, sessionFile } = await makeEvalSession(tempDir, "js-agent");
 		mockAgents();
 		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
@@ -683,7 +684,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("runs JavaScript agent handles concurrently and returns results in input order", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-handles-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-handles");
+		const { session, sessionFile } = await makeEvalSession(tempDir, "js-agent-handles");
 		mockAgents();
 		mockIsolationDelegation();
 		const overlap = spyOverlapBarrier(4);
@@ -700,7 +701,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("propagates handle failures or returns them in place when requested", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-handle-errors-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-handle-errors");
+		const { session, sessionFile } = await makeEvalSession(tempDir, "js-agent-handle-errors");
 		mockAgents();
 		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
@@ -730,7 +731,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("exposes agent() in the Python runtime", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-");
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent");
+		const { session, sessionFile, sessionId } = await makeEvalSession(tempDir, "py-agent");
 		mockAgents();
 		mockIsolationDelegation();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
@@ -774,7 +775,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("runs Python agent handles concurrently and returns results in input order", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-handles-");
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-handles");
+		const { session, sessionFile, sessionId } = await makeEvalSession(tempDir, "py-agent-handles");
 		mockAgents();
 		mockIsolationDelegation();
 		const overlap = spyOverlapBarrier(4);
@@ -794,7 +795,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("streams the latest enriched agent progress through onStatus before the cell finishes", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-progress");
+		const { session, sessionFile } = await makeEvalSession(tempDir, "js-agent-progress");
 		mockAgents();
 		mockIsolationDelegation();
 		const releaseCompletion = Promise.withResolvers<void>();
@@ -896,7 +897,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-timeout-pause-");
-		const { session } = makeEvalSession(
+		const { session } = await makeEvalSession(
 			tempDir,
 			"js-agent-timeout-pause",
 			Settings.isolated({ "task.maxRuntimeMs": 1 }),
@@ -965,7 +966,7 @@ describe("agent() through eval runtimes", () => {
 
 	it("keeps timeout paused despite agent() progress snapshots", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-timeout-pause-");
-		const { session } = makeEvalSession(tempDir, "js-agent-progress-timeout-pause");
+		const { session } = await makeEvalSession(tempDir, "js-agent-progress-timeout-pause");
 		mockAgents();
 		mockIsolationDelegation();
 
@@ -1050,7 +1051,7 @@ describe("agent() through eval runtimes", () => {
 		// Asserted as an ordering, not a duration: the agent call must finish
 		// before the cell settles. Killing early inverts the two.
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-interrupt-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-interrupt");
+		const { session, sessionFile } = await makeEvalSession(tempDir, "js-agent-interrupt");
 		mockAgents();
 		mockIsolationDelegation();
 

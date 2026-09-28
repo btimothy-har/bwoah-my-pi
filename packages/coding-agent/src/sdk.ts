@@ -1810,6 +1810,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			)
 		: [...MEMORY_BACKEND_TOOL_NAMES];
 	const memoryToolsEnabled = !restrictToolNames || requestedMemoryNames.length > 0;
+	// One resolved value drives both the session flag and prompt guidance:
+	// restricted sessions admit hub only on an explicit IRC opt-in.
+	const enableIrc = options.enableIrc ?? !restrictToolNames;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
@@ -1893,7 +1896,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			resolveRelatedWorkspace: () => resolveSessionRelatedWorkspace(),
 			enableLsp,
 			lspReadOnly,
-			enableIrc: options.enableIrc ?? !restrictToolNames,
+			enableIrc,
 			/**
 			 * Frozen at the last system-prompt rebuild: a mid-session `/skillful`
 			 * toggle rides the next turn's notice, never the tool prefix. The
@@ -3469,7 +3472,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.spawns ?? "*",
 				),
 				delegationBias: sessionDelegationBias(toolSession),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: enableIrc && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,

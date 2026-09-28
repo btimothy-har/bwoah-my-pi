@@ -5,6 +5,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -14,6 +15,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { isReadOnlyAgent } from "@oh-my-pi/pi-coding-agent/task/read-only-policy";
 import { COMMON_SUBAGENT_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/task/tool-policy";
 import {
 	buildStructuredSubagentRecoveryHint,
@@ -270,6 +272,47 @@ describe("structured subagent primitive", () => {
 		const policy = await resolveEffectiveSubagentPolicy(request());
 		// Every declared extra of the fixture is already part of the common set.
 		expect(policy.effectiveAgent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
+	});
+
+	it("unions caller-defined eval tools into the resolved common toolset", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ customTools: [{ name: "word_count" } as unknown as CustomTool] }),
+		);
+		// Dropping the union would admit nothing: the restricted child registry
+		// rejects a delegated function that is missing from the explicit list.
+		expect(policy.effectiveAgent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES, "word_count"]);
+	});
+
+	it("forwards writable LSP for ordinary clones and the parent's policy for managed runs", async () => {
+		mockDiscovery();
+		const ordinary = await resolveEffectiveSubagentPolicy(request());
+		// Restricted sessions default LSP to read-only; the explicit false keeps
+		// renames/code actions working inside ordinary clones.
+		expect(ordinary.lspReadOnly).toBe(false);
+
+		const managedSession = session();
+		managedSession.lspReadOnly = true;
+		managedSession.managedSubagentExecution = {};
+		const managed = await resolveEffectiveSubagentPolicy(request({ session: managedSession }));
+		expect(managed.lspReadOnly).toBe(true);
+	});
+
+	it("resolves a session-inherited managed contract without a clone or the common toolset", async () => {
+		mockDiscovery();
+		const managedSession = session();
+		managedSession.managedSubagentExecution = { toolNames: ["read", "grep"], spawns: [] };
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: managedSession }));
+
+		// The managed carrier replaces the definition's contract: direct cwd, its
+		// own tool ceiling, and no clone disposition.
+		expect(policy.isIsolated).toBe(false);
+		expect(policy.cloneDisposition).toBeUndefined();
+		expect(policy.effectiveAgent.tools).toEqual(["read", "grep"]);
+		// An explicit empty spawn list normalizes to absent: no executor task
+		// auto-add, and the historical read-only classification stays intact.
+		expect(policy.effectiveAgent.spawns).toBeUndefined();
+		expect(isReadOnlyAgent(policy.effectiveAgent)).toBe(true);
 	});
 
 	it("rejects MCP and unknown tool extras at preflight", async () => {

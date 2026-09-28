@@ -182,11 +182,22 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	if (Object.hasOwn(params, "isolated")) {
 		return OBSOLETE_ISOLATION_MESSAGE;
 	}
+	if (Object.hasOwn(params, "apply") || Object.hasOwn(params, "merge")) {
+		return "The `apply`/`merge` fields were removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+	}
 	const readOnlyError = validateReadOnly(params.readOnly, "The call");
 	if (readOnlyError) return readOnlyError;
+	// Batch shape has no batch-wide disposition: a schema-bypassing payload with a
+	// top-level readOnly must not silently apply to every item.
+	if (Array.isArray(params.tasks) && params.tasks.length > 0 && Object.hasOwn(params, "readOnly")) {
+		return "Batch calls take `readOnly` per item in `tasks[]`; there is no batch-wide override.";
+	}
 	for (const [index, item] of (params.tasks ?? []).entries()) {
 		if (Object.hasOwn(item, "isolated")) {
 			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_ISOLATION_MESSAGE}`;
+		}
+		if (Object.hasOwn(item, "apply") || Object.hasOwn(item, "merge")) {
+			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: the \`apply\`/\`merge\` fields were removed; use \`readOnly\`.`;
 		}
 		const itemError = validateReadOnly(item.readOnly, `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 		if (itemError) return itemError;
@@ -304,7 +315,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.readOnly !== undefined) {
 		spawn.readOnly = item.readOnly;
-	} else if ("readOnly" in params) {
+	} else if ("readOnly" in params && !Array.isArray(params.tasks)) {
 		spawn.readOnly = params.readOnly;
 	}
 	return spawn;
@@ -1092,12 +1103,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (aborted: boolean, isolated: boolean): Promise<string> => {
+		const buildFollowUpHint = async (
+			aborted: boolean,
+			isolated: boolean,
+			mergeRetained: boolean,
+		): Promise<string> => {
 			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
+				mergeRetained,
 				ircEnabled,
 				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
@@ -1242,7 +1258,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true, singleResult?.isolated === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(
+						singleResult?.aborted === true,
+						singleResult?.isolated === true && singleResult?.cloneDisposition !== "merge",
+						singleResult?.isolated === true && singleResult?.cloneDisposition === "merge",
+					)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1259,7 +1279,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, false, false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();

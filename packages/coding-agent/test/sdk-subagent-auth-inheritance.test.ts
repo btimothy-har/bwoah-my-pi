@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
 import type { OAuthCredential } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -80,7 +81,7 @@ describe("task subagent OAuth pin inheritance", () => {
 		const tempDir = TempDir.createSync("@pi-subagent-auth-pin-");
 		// Ordinary spawns always run isolated; preflight probes the session cwd
 		// for a Git checkout, so the temp workspace must be one.
-		Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: tempDir.path() });
+		await $`git init -q -b main`.cwd(tempDir.path()).quiet();
 		const authStorage = createInMemoryAuthStorage();
 		const sessions: AgentSession[] = [];
 		try {

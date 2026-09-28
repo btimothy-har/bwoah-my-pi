@@ -221,7 +221,7 @@ describe("task spawn routing", () => {
 
 	for (const { label, runnerOverrides, expectRetained } of [
 		{
-			label: "tells the parent an isolated agent cannot be messaged instead of calling it idle",
+			label: "tells the parent a retained merge agent stays messageable without auto-merging follow-ups",
 			runnerOverrides: {},
 			expectRetained: false,
 		},
@@ -277,11 +277,13 @@ describe("task spawn routing", () => {
 			await job!.promise;
 
 			const delivered = `${job!.resultText ?? ""}${job!.errorText ?? ""}`;
-			expect(delivered).toContain("Sandboxed ran isolated and cannot be resumed or messaged");
+			// Merge runs stay retained: messageable via hub, but follow-up edits do
+			// not auto-merge. Discard runs would get the transcript-only message.
+			expect(delivered).toContain("Sandboxed is now idle");
+			expect(delivered).toContain("message it via `hub` to follow up");
+			expect(delivered).toContain("follow-up edits are not automatically applied");
 			expect(delivered).toContain("history://Sandboxed");
-			expect(delivered).not.toContain("is now idle");
-			expect(delivered).not.toContain("message it via");
-			expect(delivered).not.toContain("removed");
+			expect(delivered).not.toContain("cannot be resumed or messaged");
 			if (expectRetained) {
 				expect(job!.status).toBe("failed");
 				expect(delivered).toContain("Isolation workspace retained at /wt/sandboxed/m");

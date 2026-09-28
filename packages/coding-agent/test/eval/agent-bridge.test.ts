@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { $ } from "bun";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,8 +28,7 @@ const tempDirs = new Set<string>();
 async function makeRepoCwd(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-bridge-"));
 	tempDirs.add(dir);
-	const proc = Bun.spawn(["git", "init", "-q", "-b", "main"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
-	if ((await proc.exited) !== 0) throw new Error("git init failed");
+	await $`git init -q -b main`.cwd(dir).quiet();
 	return dir;
 }
 

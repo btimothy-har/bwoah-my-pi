@@ -53,15 +53,13 @@ type IsoBackendKind = natives.IsoBackendKind;
 
 /** Which isolation outcome `isolation-summary.md` should describe. */
 export type IsolationSummaryKind =
-	| "captured"
 	| "capture-error"
 	| "nested-apply-failed"
 	| "not-applied"
 	| "branch-merge-failed"
 	| "branch-capture-failed"
 	| "merge-error"
-	| "discarded"
-	| "unavailable";
+	| "discarded";
 
 /** Context for `isolation-summary.md`; unused fields are simply absent. */
 export interface IsolationSummaryContext {
@@ -69,7 +67,6 @@ export interface IsolationSummaryContext {
 	branchName?: string;
 	/** Root patch path, only when it holds changes. */
 	rootPatchPath?: string;
-	nestedCount?: number;
 	nestedPatchPaths?: string[];
 	error?: string;
 	conflict?: string;
