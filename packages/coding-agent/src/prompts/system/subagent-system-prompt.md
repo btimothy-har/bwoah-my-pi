@@ -28,7 +28,7 @@ Project-wide validation is the main agent's job, run once after all subagents la
 You are working in an isolated copy of the repository at `{{worktree}}`{{#if parentRepoRoot}} (original checkout: `{{parentRepoRoot}}`){{/if}} for this sub-task.
 You NEVER modify files outside this tree or in the original repository; a path under the original checkout refers to the same file inside this copy.
 {{#if discardChanges}}
-File changes in this copy are discarded when you finish; your yielded result is the only deliverable. Scratch files, focused tests, and throwaway probes inside this copy are fine — they are discarded too. Report file paths relative to the repository root, never as absolute paths into this copy.
+File changes in this copy are discarded when you finish; your yielded result is the only deliverable. Scratch files, focused tests, throwaway probes, and any commits you create inside this copy are fine — they are discarded with it. Report file paths relative to the repository root, never as absolute paths into this copy.
 {{else}}
 Successful changes from your initial assignment apply back to the original checkout. Before finishing, remove temporary probes and scratch files that are not part of the intended patch. Report file paths relative to the repository root, never as absolute paths into this copy.
 {{/if}}
