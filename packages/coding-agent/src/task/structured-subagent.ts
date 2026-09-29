@@ -312,9 +312,10 @@ export async function resolveEffectiveSubagentPolicy(
 			throw error;
 		}
 	} else if (managed !== undefined) {
-		// An explicit empty spawn list means no authority, like an absent field:
-		// downstream presence checks (task auto-add, read-only attribution) key
-		// off `undefined`, while the spawn policy denies identically either way.
+		// An explicit empty spawn list means no authority. The key must be
+		// materialized with value undefined — spreading nothing would leak the
+		// definition's own spawns through — and downstream presence checks key
+		// off `=== undefined`, so the explicit undefined is exactly "absent".
 		const managedSpawns = managed.spawns === "*" || (managed.spawns?.length ?? 0) > 0 ? managed.spawns : undefined;
 		effectiveAgent = {
 			...agent,

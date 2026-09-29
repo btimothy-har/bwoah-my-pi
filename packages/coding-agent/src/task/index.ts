@@ -174,6 +174,8 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  */
 const OBSOLETE_ISOLATION_MESSAGE =
 	"The `isolated` field was removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+const OBSOLETE_APPLY_MERGE_MESSAGE =
+	"The `apply`/`merge` fields were removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
 
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
 	if (Object.hasOwn(params, "schema")) {
@@ -183,7 +185,7 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		return OBSOLETE_ISOLATION_MESSAGE;
 	}
 	if (Object.hasOwn(params, "apply") || Object.hasOwn(params, "merge")) {
-		return "The `apply`/`merge` fields were removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+		return OBSOLETE_APPLY_MERGE_MESSAGE;
 	}
 	const readOnlyError = validateReadOnly(params.readOnly, "The call");
 	if (readOnlyError) return readOnlyError;
@@ -197,7 +199,7 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_ISOLATION_MESSAGE}`;
 		}
 		if (Object.hasOwn(item, "apply") || Object.hasOwn(item, "merge")) {
-			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: the \`apply\`/\`merge\` fields were removed; use \`readOnly\`.`;
+			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_APPLY_MERGE_MESSAGE}`;
 		}
 		const itemError = validateReadOnly(item.readOnly, `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 		if (itemError) return itemError;
@@ -301,8 +303,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * the item's own value, else `defaultAgent` from the session spawn policy.
  * `tasks` never leaks into a spawn; the shared `context` rides along
  * unchanged. Keys are only materialized when present — `#runSpawn`
- * distinguishes an absent `readOnly` from an explicit one. The item's
- * `readOnly` (batch form) wins over the top-level flag (flat form).
+ * distinguishes an absent `readOnly` from an explicit one. Batch calls may not
+ * carry a top-level `readOnly`: validateShapeParams rejects them before this runs,
+ * so the fallback only ever serves the flat form.
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
@@ -315,7 +318,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.readOnly !== undefined) {
 		spawn.readOnly = item.readOnly;
-	} else if ("readOnly" in params && !Array.isArray(params.tasks)) {
+	} else if ("readOnly" in params) {
 		spawn.readOnly = params.readOnly;
 	}
 	return spawn;
@@ -1103,11 +1106,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (
-			aborted: boolean,
-			isolated: boolean,
-			mergeRetained: boolean,
-		): Promise<string> => {
+		const buildFollowUpHint = async (aborted: boolean, result: SingleResult | undefined): Promise<string> => {
+			// Derive inside so the template's ladder (mergeRetained > isolated > idle)
+			// cannot receive an inconsistent boolean pair from a future caller.
+			const isolated = result?.isolated === true && result?.cloneDisposition !== "merge";
+			const mergeRetained = result?.isolated === true && result?.cloneDisposition === "merge";
 			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
@@ -1258,11 +1261,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(
-						singleResult?.aborted === true,
-						singleResult?.isolated === true && singleResult?.cloneDisposition !== "merge",
-						singleResult?.isolated === true && singleResult?.cloneDisposition === "merge",
-					)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true, singleResult)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1279,7 +1278,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, false, false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, undefined) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();

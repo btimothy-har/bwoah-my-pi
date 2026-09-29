@@ -211,6 +211,24 @@ describe("task.batch schema gating", () => {
 		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `isolated` field was removed.");
 	});
 
+	it("rejects the removed apply/merge fields with the readOnly migration error", async () => {
+		mockDiscovery();
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		const flatResult = await flat.execute("tc-obsolete-apply", {
+			task: "Work.",
+			apply: true,
+		} as unknown as TaskParams);
+		expect(getFirstText(flatResult)).toContain("The `apply`/`merge` fields were removed.");
+		expect(getFirstText(flatResult)).toContain("readOnly");
+
+		const batched = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const batch = await batched.execute("tc-obsolete-merge", {
+			context: "ctx",
+			tasks: [{ name: "Legacy", task: "Work.", merge: "branch" }],
+		} as unknown as TaskParams);
+		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `apply`/`merge` fields were removed.");
+	});
+
 	it("rejects a batch-wide readOnly override; disposition is per item", async () => {
 		// The batch wire schema carries readOnly only per item; a schema-bypassing
 		// payload must not let a top-level flag silently flip every item to merge.
