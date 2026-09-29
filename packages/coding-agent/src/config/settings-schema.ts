@@ -4977,6 +4977,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Delegation
+	"task.isolation.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Isolate Subagents (inert)",
+			description:
+				"No longer applied: ordinary subagents always run in an isolated clone. Kept so existing configs remain valid; control apply-back per spawn with `readOnly`.",
+		},
+	},
+
 	"isolation.backend": {
 		type: "enum",
 		values: ["auto", "apfs", "btrfs", "zfs", "reflink", "overlayfs", "projfs", "block-clone", "rcopy"] as const,
@@ -5033,6 +5045,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Clean Canonical Home on /wt",
 			description:
 				"After `/wt` binds an execution worktree, reset tracked changes and remove untracked files from the canonical home. Uncommitted changes are already carried into the worktree, so nothing is lost",
+		},
+	},
+
+	"task.isolation.apply": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Apply Isolated Changes (inert)",
+			description:
+				"No longer applied: readOnly: false always applies successful changes back. Kept so existing configs remain valid; retention-on-failure recovery artifacts are unaffected.",
 		},
 	},
 

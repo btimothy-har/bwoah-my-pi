@@ -882,7 +882,7 @@ Applied whenever raw settings are loaded (global, project, overlays, and runtime
 | flat `theme: "<name>"` string                                            | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
 | legacy `task.isolation.mode: none`                                       | removed (ordinary spawns always run in an isolated clone; there is no off switch)                            |
 | legacy `task.isolation.mode: <backend>`                                  | `isolation.backend: <backend>`                                                                               |
-| `task.isolation.enabled` / `task.isolation.apply`                        | removed — clone disposition is per spawn via the `readOnly` field; `task.isolation.merge`/`task.isolation.commits` remain |
+| `task.isolation.enabled` / `task.isolation.apply`                        | recognized but inert — ordinary spawns always run in an isolated clone; apply-back is per spawn via the `readOnly` field. Existing configs keep working; nothing reads these keys |
 | `task.simple`                                                            | removed                                                                                                      |
 | legacy isolation backends (`worktree`, `fuse-overlay`, `fuse-projfs`)    | `rcopy`, `overlayfs`, `projfs`                                                                               |
 | `lastChangelogVersion`                                                   | moved to a marker file and stripped from `config.yml`                                                        |

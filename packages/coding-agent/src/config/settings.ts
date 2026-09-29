@@ -2191,10 +2191,10 @@ export class Settings {
 			}
 			delete raw["features.unexpectedStopDetection"];
 		}
-		// Subagent clones are always on with a per-spawn `readOnly` disposition, so
-		// legacy enablement/apply keys are dropped rather than migrated. The legacy
-		// combined `task.isolation.mode` still normalizes backend names; its
-		// enablement half is discarded. Handles nested YAML and quoted dotted keys.
+		// Legacy `task.isolation.mode` still normalizes backend names; the removed
+		// enablement half derives nothing. `task.isolation.enabled`/`apply` remain
+		// recognized (inert) settings, so they are deliberately NOT stripped here:
+		// existing user configs stay valid even though nothing reads them.
 		const legacyIsolationBackends: Record<string, string> = {
 			worktree: "rcopy",
 			"fuse-overlay": "overlayfs",
@@ -2209,12 +2209,8 @@ export class Settings {
 					: undefined;
 		if (isolationObj) {
 			delete isolationObj.mode;
-			delete isolationObj.enabled;
-			delete isolationObj.apply;
 		}
 		delete raw[legacyIsolationModePath];
-		delete raw["task.isolation.enabled"];
-		delete raw["task.isolation.apply"];
 
 		const rootIsolation = isRecord(raw.isolation) ? (raw.isolation as Record<string, unknown>) : undefined;
 		const configuredBackend =
