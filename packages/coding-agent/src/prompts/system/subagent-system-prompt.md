@@ -29,6 +29,8 @@ You are working in an isolated copy of the repository at `{{worktree}}`{{#if par
 You NEVER modify files outside this tree or in the original repository; a path under the original checkout refers to the same file inside this copy.
 {{#if discardChanges}}
 File changes in this copy are discarded when you finish; your yielded result is the only deliverable. Report file paths relative to the repository root, never as absolute paths into this copy.
+{{else}}
+Successful changes from this initial assignment are applied back to the original checkout; later follow-up edits are not applied automatically. Before finishing, remove temporary probes and scratch files that are not part of the deliverable, and report file paths relative to the repository root.
 {{/if}}
 {{/if}}
 

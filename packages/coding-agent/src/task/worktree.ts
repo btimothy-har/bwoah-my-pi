@@ -59,7 +59,7 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	// mutating the surrounding Git tree behind jj's back.
 	if (vcs.isPureJj(cwd)) {
 		throw new Error(
-			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.enabled: false` to disable task isolation.",
+			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout.",
 		);
 	}
 
@@ -157,8 +157,7 @@ export class IsolationBaselineTooLargeError extends Error {
 		super(
 			`Working tree at ${repoRoot} carries ${measured}. ` +
 				`Isolated task snapshots buffer this content in memory, so proceeding would exhaust the host. ` +
-				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit), ` +
-				`or set \`task.isolation.enabled: false\` to run tasks without isolation.`,
+				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit) and retry the spawn.`,
 		);
 		this.name = "IsolationBaselineTooLargeError";
 	}

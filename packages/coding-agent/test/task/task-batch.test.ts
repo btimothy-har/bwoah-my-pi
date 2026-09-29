@@ -2,12 +2,13 @@
  * Contracts: task.batch gating (batch spawning + shared context).
  *
  * 1. The wire schema is shape-swapped by `task.batch`: `{ context, tasks[] }`
- *    when on (per-spawn fields — including `model`, `isolated`, `outputSchema`, and
+ *    when on (per-spawn fields — including `mutable`, `outputSchema`, and
  *    `schemaMode` — live in the items), the flat form exposes those fields
  *    directly. The stale `schema` field is never accepted.
  * 2. Shape validation rejects stale `schema`, `tasks`/`context` while batch
  *    is disabled, top-level `task` in batch calls, empty/invalid items,
- *    duplicate names, and a missing shared `context`.
+ *    duplicate names, removed isolation controls, a batch-root `mutable`, and
+ *    a missing shared `context`.
  * 3. With `async.enabled=true`, a batch call registers one background job per
  *    item; with `async.enabled=false`, it blocks and returns merged results.
  *    Both modes forward the shared `context`; the flat form stays accepted at
@@ -23,6 +24,8 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { COMMON_SUBAGENT_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/task/tool-policy";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -33,7 +36,7 @@ const taskAgent: AgentDefinition = {
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
-	isolation: "apply",
+	mutable: true,
 };
 
 const scoutAgent: AgentDefinition = {
@@ -187,54 +190,58 @@ describe("task.batch schema gating", () => {
 		expect(batch.description).toContain("`effort`");
 	});
 
-	it("keeps isolation boolean-only in the batch item schema", async () => {
+	it("keeps mutable boolean-only in the batch item schema", async () => {
 		mockDiscovery();
 
-		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "task.isolation.enabled": true } }),
-		);
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		// The batch root has no mutable of its own: disposition is per item.
 		const properties = getSchemaProperties(tool);
-		expect(properties.isolated).toBeUndefined();
+		expect(properties.mutable).toBeUndefined();
 		const itemProperties = getBatchItemProperties(tool);
-		const isolatedSchema = itemProperties.isolated;
-		if (!isolatedSchema || typeof isolatedSchema !== "object" || !("type" in isolatedSchema)) {
-			throw new Error("Expected isolated to be a boolean schema");
+		const mutableSchema = itemProperties.mutable;
+		if (!mutableSchema || typeof mutableSchema !== "object" || !("type" in mutableSchema)) {
+			throw new Error("Expected mutable to be a boolean schema");
 		}
-		expect(isolatedSchema.type).toBe("boolean");
+		expect(mutableSchema.type).toBe("boolean");
+		// The removed isolation controls never reappear under another name.
+		expect(itemProperties.isolated).toBeUndefined();
 		expect(itemProperties.apply).toBeUndefined();
+		expect(itemProperties.merge).toBeUndefined();
 	});
 
-	it("describes default discard isolation and identifies agents that apply changes", async () => {
+	it("describes the mutable ceiling and identifies agents that apply changes back", async () => {
 		mockDiscovery([
 			taskAgent,
 			scoutAgent,
 			getBundledAgent("conventions-specialist")!,
 			getBundledAgent("devils-advocate")!,
 		]);
-		const enabled = await TaskTool.create(createSession({ settings: { "task.isolation.enabled": true } }));
-		expect(enabled.description).toContain("Every spawn runs in its own isolated worktree by default");
-		expect(enabled.description).toContain("### task (isolation: apply)");
-		expect(enabled.description).not.toContain("### scout (isolation: apply)");
-		expect(enabled.description).toContain("### conventions-specialist (READ-ONLY)");
-		expect(enabled.description).not.toContain("### conventions-specialist (isolation: apply)");
-		expect(enabled.description).toContain("### devils-advocate (READ-ONLY)");
-
-		const disabled = await TaskTool.create(createSession());
-		expect(disabled.description).not.toContain("`isolated`");
-		expect(disabled.description).not.toContain("(isolation: apply)");
+		const tool = await TaskTool.create(createSession());
+		expect(tool.description).toContain("writable isolated clone");
+		expect(tool.description).toContain("`mutable: false` to force discard");
+		expect(tool.description).toContain("### task (mutable: apply-back)");
+		expect(tool.description).not.toContain("### scout (mutable: apply-back)");
+		// Bundled agents all delegate now, so none carries a READ-ONLY badge;
+		// the badge remains for custom read-only definitions like this scout.
+		expect(tool.description).not.toContain("### conventions-specialist (READ-ONLY)");
+		expect(tool.description).not.toContain("### devils-advocate (READ-ONLY)");
+		expect(tool.description).toContain("### scout (READ-ONLY)");
+		expect(tool.description).not.toContain("(isolation: apply)");
 	});
 
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
+	it("keeps mutable on the batch item schema in plan mode", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(
 			createSession({
 				planMode: true,
-				settings: { "task.batch": true, "task.isolation.enabled": true },
+				settings: { "task.batch": true },
 			}),
 		);
+		// Plan mode accepts mutable: false/omitted and rejects true at preflight;
+		// the schema stays honest about the field instead of hiding it.
 		const itemProperties = getBatchItemProperties(tool);
-		expect(itemProperties.isolated).toBeUndefined();
-		expect(tool.description).not.toContain("`isolated`");
+		expect(itemProperties.mutable).toBeDefined();
+		expect(tool.description).toContain("`mutable`");
 	});
 
 	it("exposes outputSchema but never the stale schema field", async () => {
@@ -311,12 +318,38 @@ describe("task.batch validation", () => {
 		expect(text).toContain("Duplicate task name");
 	});
 
+	it("rejects removed isolation controls and misplaced mutable before dispatch", async () => {
+		for (const key of ["isolated", "apply", "merge", "readOnly", "isolation"] as const) {
+			const flat = await executeText({ agent: "task", task: "Work.", [key]: true }, { "task.batch": false });
+			expect(flat).toContain("Subagent isolation controls were removed");
+			const batched = await executeText(
+				{ context: "ctx", tasks: [{ name: "A", task: "Work.", [key]: false }] },
+				{ "task.batch": true },
+			);
+			expect(batched).toContain("Subagent isolation controls were removed");
+		}
+
+		const rootMutable = await executeText(
+			{ context: "ctx", mutable: true, tasks: [{ name: "A", task: "Work." }] },
+			{ "task.batch": true },
+		);
+		expect(rootMutable).toContain("mutable is per task; put it on each tasks[] item.");
+
+		const flatInvalid = await executeText({ agent: "task", task: "Work.", mutable: "yes" }, { "task.batch": false });
+		expect(flatInvalid).toContain("`mutable` must be a boolean");
+
+		const itemInvalid = await executeText(
+			{ context: "ctx", tasks: [{ name: "A", task: "Work.", mutable: 1 }] },
+			{ "task.batch": true },
+		);
+		expect(itemInvalid).toContain("Task 1 (`A`) has an invalid `mutable` value");
+	});
+
 	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
-		// Regression (#6039): the flat single-spawn wire schema carries
-		// `"+": "delete"`, so a batch `{ context, tasks[] }` payload is stripped
-		// by arktype and rejected as `task must be a string (was missing)` in the
-		// agent loop — preempting the tool's own actionable message. The lenient
-		// flag makes the loop forward the raw args to execute() on that failure.
+		// Regression (#6039): the strict wire schema rejects a batch
+		// `{ context, tasks[] }` payload on undeclared keys in the agent loop —
+		// preempting the tool's own actionable message. The lenient flag makes
+		// the loop forward the raw args to execute() on that failure.
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
 		expect(tool.lenientArgValidation).toBe(true);
@@ -344,6 +377,23 @@ describe("task.batch spawning", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
+		// Ordinary spawns always clone: stub the clone seam so runs delegate to
+		// the (separately mocked) executor without a real Git checkout, and the
+		// mutable task fixture's merge disposition resolves to a clean no-op.
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			executorModule.runSubprocess(opts.baseOptions),
+		);
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
 	});
 
 	afterEach(async () => {
@@ -506,14 +556,18 @@ describe("task.batch spawning", () => {
 		const byId = new Map(seen.map(spawn => [spawn.id, spawn]));
 		const scoutSpawn = byId.get("Scout");
 		const reviewerSpawn = byId.get("Review");
-		expect(scoutSpawn?.agent).toBe(scoutAgent);
-		expect(scoutSpawn?.agent.tools).toEqual(["read"]);
+		// The effective agent keeps its definition's identity, model, and schema
+		// but runs with the shared coding toolset: the definition's `tools` are
+		// additive extras on top, and both declared extras here are already in it.
+		expect(scoutSpawn?.agent.name).toBe("scout");
+		expect(scoutSpawn?.agent.systemPrompt).toBe(scoutAgent.systemPrompt);
+		expect(scoutSpawn?.agent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
 		expect(scoutSpawn?.modelOverride).toEqual(["anthropic/claude-haiku-4-5:low"]);
 		expect(scoutSpawn?.outputSchema).toBe(scoutSchema);
 		expect(scoutSpawn?.outputSchemaSource).toBe("agent");
 		expect(scoutSpawn?.outputSchemaOverridesAgent).toBe(false);
-		expect(reviewerSpawn?.agent).toBe(reviewerAgent);
-		expect(reviewerSpawn?.agent.tools).toEqual(["read", "bash"]);
+		expect(reviewerSpawn?.agent.name).toBe("reviewer");
+		expect(reviewerSpawn?.agent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
 		expect(reviewerSpawn?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6:medium"]);
 		expect(reviewerSpawn?.outputSchema).toBe(callerSchema);
 		expect(reviewerSpawn?.outputSchemaSource).toBe("caller");

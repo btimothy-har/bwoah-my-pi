@@ -1,5 +1,6 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { SubagentCloneDisposition } from "../tools/task";
 
 /** Identity of the ambient main session in the agent roster. */
 export const MAIN_AGENT_ID = "Main";
@@ -50,6 +51,12 @@ export interface AgentRecordLike {
 		resolvedModelIsFallback?: boolean;
 		metrics?: AgentMetricsSummary;
 		readOnly?: boolean;
+		/**
+		 * Recorded clone disposition for an ordinary cloned run; absent for
+		 * historical, plan, and host-managed executions. Never inferred from
+		 * the current definition.
+		 */
+		cloneDisposition?: SubagentCloneDisposition;
 		outputPath?: string;
 		patchPath?: string;
 		branchName?: string;

@@ -20,6 +20,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -374,7 +375,7 @@ describe("task tool plan-mode prewalk guard", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false }),
+			settings: Settings.isolated({}),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),
@@ -386,6 +387,16 @@ describe("task tool plan-mode prewalk guard", () => {
 			agents: [prewalkAgent],
 			projectAgentsDir: null,
 		});
+		// Ordinary (non-plan) spawns always clone: stub the seam so the run
+		// delegates to the mocked executor without a real Git checkout.
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			executorModule.runSubprocess(opts.baseOptions),
+		);
 		let forwarded: AgentDefinition | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => {
 			forwarded = options.agent;

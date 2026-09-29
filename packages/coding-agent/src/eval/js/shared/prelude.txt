@@ -14,7 +14,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const options = {};
 		for (let index = 0; index < keys.length && index < args.length; index++) {
 			const value = args[index];
-			if (!isNil(value)) options[keys[index]] = value;
+			if (isNil(value)) continue;
+			const key = keys[index];
+			if (key === null) {
+				throw new TypeError(
+					`${name}() no longer accepts a positional isolation control at slot ${index + 1}; pass named options like ${example} instead.`,
+				);
+			}
+			options[key] = value;
 		}
 		return options;
 	};
@@ -438,8 +445,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				"agent",
 				opts,
 				rest,
-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+				["agent", "label", "schema", null, null, null, "schemaMode", "tools"],
+				"{ agent, label, schema, schemaMode, mutable, tools }",
 			);
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
@@ -503,7 +510,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			opts,
 			rest,
 			["name", "context", "tools"],
-			"{ name, context, tools }",
+			"{ name, context, mutable, tools }",
 		);
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",

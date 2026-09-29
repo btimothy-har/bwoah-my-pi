@@ -1,4 +1,5 @@
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { rejectObsoleteSubagentControls } from "./agent-bridge";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import { resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
 import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
@@ -47,6 +48,15 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
 	return value.trim();
 }
 
+function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
+	const value = args[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") {
+		throw new ToolError(`workpool ${key} must be a boolean`);
+	}
+	return value;
+}
+
 function optionalTools(args: Record<string, unknown>): string[] | undefined {
 	if (args.tools === undefined) return undefined;
 	if (!Array.isArray(args.tools) || !args.tools.every(tool => typeof tool === "string" && tool.length > 0)) {
@@ -69,10 +79,12 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 	if (typeof op !== "string") throw new ToolError("workpool() requires an op");
 
 	if (op === "create") {
+		rejectObsoleteSubagentControls(record);
 		const agent = optionalString(record, "agent");
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
+		const mutable = optionalBoolean(record, "mutable");
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -81,6 +93,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
+			...(mutable !== undefined ? { mutable } : {}),
 		});
 		const customTools = tools?.length
 			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))

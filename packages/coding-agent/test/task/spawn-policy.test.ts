@@ -25,7 +25,6 @@ function makeSession(spawns: string): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.batch": true,
-		"task.isolation.enabled": false,
 	});
 	return {
 		cwd: process.cwd(),
@@ -42,7 +41,7 @@ describe("task spawn policy surfaces", () => {
 	});
 
 	it("uses the first allowed spawn as the schema default", () => {
-		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, defaultAgent: "fact-finder" });
+		const schema = getTaskSchema({ batchEnabled: false, defaultAgent: "fact-finder" });
 		const parsed = schema({ task: "check" });
 
 		expect(parsed).toEqual({ agent: "fact-finder", task: "check" });
@@ -104,7 +103,6 @@ describe("task tool description scout gating", () => {
 		const settings = Settings.isolated({
 			"async.enabled": false,
 			"task.batch": true,
-			"task.isolation.enabled": false,
 			...(disabledScout ? { "task.disabledAgents": ["scout"] } : {}),
 		});
 		const tool = await TaskTool.create({

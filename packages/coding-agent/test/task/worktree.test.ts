@@ -98,7 +98,7 @@ describe("worktree isolation helpers", () => {
 		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeGreaterThan(
 			ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 		);
-		expect((error as Error).message).toContain("task.isolation.enabled: false");
+		expect((error as Error).message).toContain("Commit or gitignore the bulk");
 	});
 
 	// Regression: the staged and unstaged diffs were rendered in full before the
@@ -125,7 +125,7 @@ describe("worktree isolation helpers", () => {
 		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
 		expect((error as IsolationBaselineTooLargeError).budgetBytes).toBe(budget);
 		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeUndefined();
-		expect((error as Error).message).toContain("task.isolation.enabled: false");
+		expect((error as Error).message).toContain("Commit or gitignore the bulk");
 
 		const within = await captureBaseline(repo);
 		expect(within.root.staged).toContain("+++ b/staged.txt");

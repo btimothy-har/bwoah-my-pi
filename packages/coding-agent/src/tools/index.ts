@@ -37,7 +37,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
+import { type AgentDefinition, canSpawnAtDepth, type ManagedSubagentExecution } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
@@ -274,6 +274,12 @@ export interface ToolSession {
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
+	/**
+	 * Host-managed subagent execution contract for product-owned workflows.
+	 * Host code only; presence makes spawned descendants run host-managed
+	 * (direct cwd, contract tools/spawns) instead of the ordinary clone policy.
+	 */
+	managedSubagentExecution?: ManagedSubagentExecution;
 	/**
 	 * Whether MCP capabilities may be forwarded to child sessions. `false`
 	 * prohibits inherited-manager and process-global MCP fallback.
@@ -709,7 +715,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
+			// Explicitly requested (restricted) lists own their membership; default
+			// lists still drop todo for yield-driven subagents unless prewalk needs it.
+			return (
+				session.settings.get("todo.enabled") &&
+				(restrictToolNames || !includeYield || session.prewalkArmed === true)
+			);
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
 		if (name === "find") return isFindEnabled(session);
@@ -726,8 +737,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
 		if (name === "hub") {
+			// Restricted sessions admit hub only on an explicit IRC opt-in;
+			// unrestricted sessions keep their ambient default.
 			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
+				isIrcEnabled(session.settings, session.taskDepth ?? 0) &&
+				(restrictToolNames ? session.enableIrc === true : session.enableIrc !== false)
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {

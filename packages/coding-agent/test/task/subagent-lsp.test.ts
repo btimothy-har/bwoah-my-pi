@@ -89,7 +89,6 @@ function createYieldingSession(): AgentSession {
 
 function createSession(
 	options: {
-		isolationEnabled?: boolean;
 		parentEnableLsp?: boolean;
 		planMode?: PlanModeState;
 		sessionFile?: string | null;
@@ -109,7 +108,6 @@ function createSession(
 		enableLsp: options.parentEnableLsp,
 		settings: Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.enabled": options.isolationEnabled ?? false,
 			...(options.taskEnableLsp !== undefined ? { "task.enableLsp": options.taskEnableLsp } : {}),
 		}),
 		getSessionFile: () => options.sessionFile ?? null,
@@ -179,6 +177,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["lsp"],
 		});
+		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 
 		const tool = await TaskTool.create(createSession());
@@ -195,6 +194,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["lsp"],
 		});
+		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 
 		const tool = await TaskTool.create(createSession({ taskEnableLsp: true }));
@@ -212,6 +212,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["lsp"],
 		});
+		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 
 		const tool = await TaskTool.create(createSession({ parentEnableLsp: false, taskEnableLsp: true }));
@@ -220,7 +221,7 @@ describe("subagent LSP availability", () => {
 		expect(getOptions()?.enableLsp).toBe(false);
 	});
 
-	it("disables LSP for isolated subagents by default", async () => {
+	it("runs cloned subagents in the worktree cwd with LSP off by default", async () => {
 		mockAgents({
 			name: "task",
 			description: "Task agent",
@@ -231,14 +232,14 @@ describe("subagent LSP availability", () => {
 		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
 
-		const tool = await TaskTool.create(createSession({ isolationEnabled: true }));
-		await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
+		const tool = await TaskTool.create(createSession());
+		await tool.execute("tool-call", TEST_TASK);
 
 		expect(getOptions()?.cwd).toBe("/tmp/isolated-subagent");
 		expect(getOptions()?.enableLsp).toBe(false);
 	});
 
-	it("opens isolated persisted subagent sessions with the worktree cwd", async () => {
+	it("opens cloned persisted subagent sessions with the worktree cwd", async () => {
 		mockAgents({
 			name: "task",
 			description: "Task agent",
@@ -248,11 +249,11 @@ describe("subagent LSP availability", () => {
 		});
 		mockIsolation();
 		const { getOptions } = mockCreateAgentSession();
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-session-cwd-"));
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cloned-session-cwd-"));
 		try {
 			const parentSessionFile = path.join(tempDir, "parent.jsonl");
-			const tool = await TaskTool.create(createSession({ isolationEnabled: true, sessionFile: parentSessionFile }));
-			await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
+			const tool = await TaskTool.create(createSession({ sessionFile: parentSessionFile }));
+			await tool.execute("tool-call", TEST_TASK);
 
 			const sessionManager = getOptions()?.sessionManager as { getCwd?: () => string } | undefined;
 			expect(getOptions()?.cwd).toBe("/tmp/isolated-subagent");

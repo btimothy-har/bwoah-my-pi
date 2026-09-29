@@ -246,4 +246,4 @@ Top-level sessions own managers they create. `AgentSession.dispose()` disconnect
 - [`src/mcp/tool-bridge.ts`](../packages/coding-agent/src/mcp/tool-bridge.ts) — `MCPTool` and `DeferredMCPTool` runtime behavior.
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — `refreshMCPTools` live rebinding.
 - [`src/modes/controllers/mcp-command-controller.ts`](../packages/coding-agent/src/modes/controllers/mcp-command-controller.ts) — interactive reload/reconnect flows.
-- [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts) — subagent MCP proxying via parent manager connections.
+- [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts) — subagent executor sessions never proxy parent MCP connections (an explicit `enableMCP: true` opt-in exists but is unused).

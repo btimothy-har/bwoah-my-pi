@@ -42,7 +42,7 @@ describe("eval js agent() handle", () => {
 		expect(handle.handle).toBe("agent://abc123");
 	});
 
-	it("maps positional args onto named options in order", async () => {
+	it("maps positional args onto named options, with the removed isolation slots skipped", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {
 			seenArgs = args as Record<string, unknown>;
@@ -55,19 +55,46 @@ describe("eval js agent() handle", () => {
 		) => Promise<unknown>;
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 
-		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict", ["read"]);
+		// Slots 4-6 were the removed isolated/apply/merge controls; null or
+		// undefined holes there are simply omitted from the bridge call.
+		await positionalAgent("scout", "reviewer", "Legacy", schema, undefined, null, undefined, "strict", ["read"]);
 
 		expect(seenArgs).toEqual({
 			prompt: "scout",
 			agent: "reviewer",
 			label: "Legacy",
 			schema,
-			isolated: true,
-			apply: false,
-			merge: true,
 			schemaMode: "strict",
 			tools: ["read"],
 		});
+	});
+
+	it("rejects non-null values in the removed positional isolation slots", async () => {
+		const sandbox = loadPrelude(async () => ({ id: "x", agent: "task" }));
+		const positionalAgent = sandbox.agent as (
+			prompt: string,
+			options?: unknown,
+			...rest: unknown[]
+		) => Promise<unknown>;
+
+		await expect(Promise.resolve(positionalAgent("p", "reviewer", "L", undefined, true))).rejects.toThrow(
+			"agent() no longer accepts a positional isolation control at slot 4",
+		);
+		await expect(
+			Promise.resolve(positionalAgent("p", "reviewer", "L", undefined, undefined, undefined, false)),
+		).rejects.toThrow("agent() no longer accepts a positional isolation control at slot 6");
+	});
+
+	it("forwards a named mutable option to the bridge", async () => {
+		let seenArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return { id: "m-1", agent: "task" };
+		});
+
+		await (sandbox.agent as AgentHelper)("work", { mutable: false });
+
+		expect(seenArgs).toEqual({ prompt: "work", mutable: false });
 	});
 
 	it("throws when the bridge omits the handle id", async () => {

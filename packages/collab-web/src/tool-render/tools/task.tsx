@@ -11,7 +11,6 @@ interface TaskItemView {
 	id: string | null;
 	description: string | null;
 	assignment: string | null;
-	isolated: boolean;
 }
 
 function taskItems(args: Record<string, unknown>): TaskItemView[] {
@@ -24,7 +23,6 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 				id: str(entry.id),
 				description: str(entry.description),
 				assignment: str(entry.assignment),
-				isolated: entry.isolated === true,
 			});
 		}
 		return items;
@@ -33,7 +31,6 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 		id: str(args.id),
 		description: str(args.description),
 		assignment: str(args.assignment),
-		isolated: args.isolated === true,
 	};
 	return flat.id || flat.description || flat.assignment ? [flat] : [];
 }
@@ -227,7 +224,6 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 									)
 								}
 							>
-								{t.isolated && <Badge>isolated</Badge>}{" "}
 								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
 							</Row>
 							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}

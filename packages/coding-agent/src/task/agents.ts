@@ -31,7 +31,7 @@ interface AgentFrontmatter {
 	spawns?: string;
 	model?: string | string[];
 	thinkingLevel?: string;
-	isolation?: "apply" | "discard";
+	mutable?: boolean;
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
@@ -46,7 +46,11 @@ interface EmbeddedAgentDef {
 function buildAgentContent(def: EmbeddedAgentDef): string {
 	const body = prompt.render(def.template);
 	if (!def.frontmatter) return body;
-	return prompt.render(agentFrontmatterTemplate, { ...def.frontmatter, body });
+	return prompt.render(agentFrontmatterTemplate, {
+		...def.frontmatter,
+		body,
+		hasMutable: def.frontmatter.mutable !== undefined,
+	});
 }
 
 const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
@@ -61,7 +65,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 			spawns: "*",
 			model: "@task",
 			thinkingLevel: AUTO_THINKING,
-			isolation: "apply",
+			mutable: true,
 			// No `prewalk` frontmatter: the generic task hand-off (strong model
 			// plans, then hands off to the smol role) is armed by the
 			// `task.prewalk` setting (default off) or per agent via /agents
@@ -74,9 +78,10 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		frontmatter: {
 			name: "sonic",
 			description: "Low-reasoning agent for strictly mechanical updates or data collection only",
+			spawns: "*",
 			model: "@smol",
 			thinkingLevel: Effort.Medium,
-			isolation: "apply",
+			mutable: true,
 		},
 		template: taskMd,
 	},
@@ -128,6 +133,14 @@ export function parseAgent(
 		location: filePath,
 		level,
 	});
+	for (const key of ["isolation", "readOnly"] as const) {
+		if (Object.hasOwn(frontmatter, key)) {
+			throw new AgentParsingError(
+				new Error(`Agent frontmatter "${key}" was removed; use mutable: true or mutable: false.`),
+				filePath,
+			);
+		}
+	}
 	const fields = parseAgentFields(frontmatter);
 	if (!fields) {
 		throw new AgentParsingError(new Error(`Invalid agent field: ${filePath}\n${content}`), filePath);

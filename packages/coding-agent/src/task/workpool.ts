@@ -133,7 +133,7 @@ export class WorkPool {
 		this.customTools = options.customTools ?? [];
 		this.freshAgents =
 			session.settings.get("eval.workpool.freshAgents") ||
-			(options.policy.isIsolated && !options.policy.discardChanges);
+			(options.policy.execution.kind === "clone" && options.policy.execution.disposition === "merge");
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		}
@@ -388,15 +388,17 @@ export class WorkPool {
 							outputSchema,
 							schemaMode: "strict",
 							workPoolYieldItems,
-							// Pin the creation-time isolation mode: the pool's fresh/reuse/keepAlive
-							// decision was made from this policy, and the launch re-resolves live
-							// settings. Only apply agents may request an explicit mode; discard
-							// agents always re-resolve (explicit controls are rejected for them).
-							// Plan mode forbids explicit isolation controls entirely.
-							...(this.policy.agent.isolation === "apply" && !this.policy.planMode
-								? { isolation: { requested: this.policy.isIsolated } }
+							// Pin the creation-time execution mode: the pool's fresh/reuse/keepAlive
+							// decision was made from this policy, and the launch re-resolves the
+							// live definition ceiling. Clone workers pass their disposition as an
+							// explicit mutable (false included); plan/managed runs synthesize none.
+							...(this.policy.execution.kind === "clone"
+								? { mutable: this.policy.execution.disposition === "merge" }
 								: {}),
-							keepAlive: !(this.freshAgents && this.policy.isIsolated),
+							...(this.policy.execution.kind === "managed"
+								? { managedSubagentExecution: this.policy.execution.contract }
+								: {}),
+							keepAlive: !(this.freshAgents && this.policy.execution.kind === "clone"),
 							retainArtifacts: true,
 							shareEvalSession: false,
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

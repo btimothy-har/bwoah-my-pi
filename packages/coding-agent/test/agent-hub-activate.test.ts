@@ -385,6 +385,10 @@ describe("Agent hub Enter activation", () => {
 					systemPrompt: `base prompt\n\nROLE\n====\n${getBundledAgent("scout")?.systemPrompt}`,
 					task: "Inspect persisted telemetry.",
 					tools: ["read", "grep"],
+					// Historical capability marker: bundled scout is no longer
+					// inferred read-only (it delegates now), so the badge reads the
+					// recorded value rather than the current definition.
+					readOnly: true,
 				}),
 				JSON.stringify({
 					type: "message",

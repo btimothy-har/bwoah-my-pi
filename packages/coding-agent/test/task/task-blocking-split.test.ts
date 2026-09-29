@@ -25,6 +25,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -99,6 +100,16 @@ describe("task per-item blocking split", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
+		// Ordinary spawns always clone: stub the clone seam so runs delegate to
+		// the (separately mocked) executor without a real Git checkout.
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			executorModule.runSubprocess(opts.baseOptions),
+		);
 	});
 
 	afterEach(async () => {

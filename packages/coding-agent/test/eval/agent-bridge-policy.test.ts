@@ -32,7 +32,7 @@ const taskAgent = {
 	source: "bundled",
 	spawns: "*",
 	model: ["@task"],
-	isolation: "apply",
+	mutable: true,
 } satisfies AgentDefinition;
 
 const reviewerAgent = {
@@ -41,7 +41,7 @@ const reviewerAgent = {
 	systemPrompt: "Review the task.",
 	source: "bundled",
 	model: ["@smol"],
-	isolation: "apply",
+	mutable: true,
 } satisfies AgentDefinition;
 
 const jobManagers = new Set<AsyncJobManager>();
@@ -91,7 +91,6 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		options.settings ??
 		Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 		});
 	const artifactsDir = options.artifactsDir ?? null;
@@ -125,6 +124,23 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 
 function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): void {
 	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	// Ordinary agents always execute in a clone now. Stub the clone seam so the
+	// run reaches the (separately mocked) executor without a real Git checkout;
+	// merges resolve to a clean no-op apply-back unless a test overrides them.
+	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockImplementation(async cwd => ({ repoRoot: cwd }));
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockImplementation(async cwd => ({ repoRoot: cwd }) as never);
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
+		const result = await taskExecutor.runSubprocess(opts.baseOptions);
+		// Mirror the real runner's usage-reporting callback.
+		opts.onSubprocessResult?.(result);
+		return result;
+	});
+	vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		summary: "",
+		changesApplied: true,
+		hadAnyChanges: false,
+		mergedBranchForNestedPatches: false,
+	});
 }
 
 function spyOverlapBarrier(count: number): { maxInFlight: () => number } {
@@ -208,11 +224,12 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("task");
 		expect(runSpy.mock.calls[1]?.[0].agent.name).toBe("reviewer");
 	});
-	it("returns a discard agent's result when isolation is disabled instead of treating its notice as a failed merge", async () => {
-		mockAgents([{ ...reviewerAgent, isolation: undefined }]);
+	it("returns a discard clone's result with its notice instead of treating it as a failed merge", async () => {
+		mockAgents([{ ...reviewerAgent, mutable: undefined }]);
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, { output: '{"status":"reviewed"}' }),
 		);
+		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const result = await runEvalAgentAndWait(
 			{
@@ -223,7 +240,10 @@ describe("runEvalAgent", () => {
 			{ session: makeSession() },
 		);
 		expect(result.data).toEqual({ status: "reviewed" });
-		expect(result.details.isolationSummary).toContain("ran in the parent checkout");
+		expect(mergeSpy).not.toHaveBeenCalled();
+		expect(result.details.cloneDisposition).toBe("discard");
+		expect(result.details.changesApplied).toBeNull();
+		expect(result.details.isolationSummary).toContain("ran in a discarded worktree");
 	});
 
 	it("throws for an unknown agent", async () => {
@@ -276,7 +296,6 @@ describe("runEvalAgent", () => {
 					session: makeSession({
 						settings: Settings.isolated({
 							"async.enabled": false,
-							"task.isolation.enabled": false,
 							"task.maxRecursionDepth": 0,
 						}),
 					}),
@@ -291,7 +310,6 @@ describe("runEvalAgent", () => {
 					depth: 3,
 					settings: Settings.isolated({
 						"async.enabled": false,
-						"task.isolation.enabled": false,
 						"task.maxRecursionDepth": -1,
 					}),
 				}),
@@ -313,8 +331,11 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 		await expect(
+			runEvalAgentAndWait({ prompt: "unsafe", mutable: true }, { session: makeSession({ planMode: true }) }),
+		).rejects.toThrow("Mutable subagent execution is unavailable in plan mode.");
+		await expect(
 			runEvalAgentAndWait({ prompt: "unsafe", isolated: true }, { session: makeSession({ planMode: true }) }),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+		).rejects.toThrow("Subagent isolation controls were removed");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
@@ -329,7 +350,6 @@ describe("runEvalAgent", () => {
 			modelString: "p/fallback",
 			settings: Settings.isolated({
 				"async.enabled": false,
-				"task.isolation.enabled": false,
 				"task.enableLsp": true,
 				// Default task.maxRecursionDepth is 2, which would now (correctly)
 				// block depth=2 — widen it so the test still exercises depth=2.
@@ -360,19 +380,17 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("rejects a per-call model argument on agent() (removed, issue #6438)", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
-
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		// The strict schema refuses unknown keys: a legacy `model` argument fails
+		// loudly instead of being silently discarded — the agent's own frontmatter
+		// model is the only per-agent selector (issue #6438).
+		await expect(
+			runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() }),
+		).rejects.toThrow("agent() received invalid arguments");
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
@@ -444,7 +462,7 @@ describe("runEvalAgent", () => {
 			return singleResult(options, { output: "recoverable output" });
 		});
 
-		const result = await runEvalAgentAndWait({ prompt: "hello", handle: true }, { session: makeSession() });
+		const result = await runEvalAgentAndWait({ prompt: "hello" }, { session: makeSession() });
 		const resource = await new AgentProtocolHandler().resolve(new URL(`agent://${result.details.id}`) as never);
 
 		expect(resource.content).toBe("recoverable output");
@@ -522,7 +540,15 @@ describe("runEvalAgent", () => {
 		const result = await runEvalAgentAndWait({ prompt: "hello" }, { session: makeSession() });
 		expect(result).toEqual({
 			text: "done",
-			details: { agent: "task", id: "0-EvalAgent", model: "p/model", structured: false },
+			details: {
+				agent: "task",
+				id: "0-EvalAgent",
+				model: "p/model",
+				structured: false,
+				isolated: true,
+				changesApplied: true,
+				cloneDisposition: "merge",
+			},
 		});
 		await expect(runEvalAgentAndWait({ prompt: "fail" }, { session: makeSession() })).rejects.toThrow("boom");
 	});
@@ -1059,16 +1085,15 @@ describe("agent() through eval runtimes", () => {
 	}, 30_000);
 });
 
-describe("runEvalAgent isolation", () => {
+describe("runEvalAgent clone dispositions", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	function isolatedSession(overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {}): ToolSession {
+	function cloneSession(overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {}): ToolSession {
 		return makeSession({
 			settings: Settings.isolated({
 				"async.enabled": false,
-				"task.isolation.enabled": true,
 				"task.isolation.merge": "patch",
 				...overrides,
 			}),
@@ -1087,41 +1112,50 @@ describe("runEvalAgent isolation", () => {
 		return { repoRoot };
 	}
 
-	it("rejects isolated=true when task.isolation.enabled is false", async () => {
+	it("rejects removed isolation controls before spawning", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		const prepSpy = vi.spyOn(isolationRunner, "prepareIsolationContext");
+		const isolatedSpy = vi
+			.spyOn(isolationRunner, "runIsolatedSubprocess")
+			.mockImplementation(async opts => singleResult(opts.baseOptions));
 
 		const session = makeSession();
-
-		await expect(runEvalAgentAndWait({ prompt: "do work", isolated: true }, { session })).rejects.toThrow(
-			"task.isolation.enabled; it is currently false",
-		);
-		expect(prepSpy).not.toHaveBeenCalled();
-		expect(runSpy).not.toHaveBeenCalled();
-	});
-
-	it("rejects either explicit merge value for a discard agent before spawning", async () => {
-		mockAgents([{ ...reviewerAgent, isolation: undefined }]);
-		const runSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
-		const session = makeSession();
-		for (const merge of [false, true]) {
-			await expect(runEvalAgentAndWait({ prompt: "Review", agent: "reviewer", merge }, { session })).rejects.toThrow(
-				"discards its file changes",
+		for (const key of ["isolated", "apply", "merge", "readOnly", "isolation"] as const) {
+			await expect(runEvalAgentAndWait({ prompt: "do work", [key]: true }, { session })).rejects.toThrow(
+				"Subagent isolation controls were removed",
 			);
 		}
+		expect(isolatedSpy).not.toHaveBeenCalled();
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("isolates by default when enabled and lets an apply agent opt out", async () => {
+	it("rejects mutable: true for a discard-ceiling agent but accepts narrowing to false", async () => {
+		mockAgents([{ ...reviewerAgent, mutable: undefined }]);
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const isolatedSpy = vi
+			.spyOn(isolationRunner, "runIsolatedSubprocess")
+			.mockImplementation(async opts => singleResult(opts.baseOptions));
+		const session = makeSession();
+
+		await expect(
+			runEvalAgentAndWait({ prompt: "Review", agent: "reviewer", mutable: true }, { session }),
+		).rejects.toThrow('Agent "reviewer" does not permit mutable execution');
+		expect(isolatedSpy).not.toHaveBeenCalled();
+
+		const narrowed = await runEvalAgentAndWait({ prompt: "Review", agent: "reviewer", mutable: false }, { session });
+		expect(isolatedSpy).toHaveBeenCalledTimes(1);
+		expect(isolatedSpy.mock.calls[0]?.[0].discard).toBe(true);
+		expect(narrowed.details.cloneDisposition).toBe("discard");
+		expect(narrowed.details.changesApplied).toBeNull();
+	});
+
+	it("clones every ordinary agent and merges only at the mutable ceiling", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const isolatedSpy = vi
 			.spyOn(isolationRunner, "runIsolatedSubprocess")
 			.mockImplementation(async opts => singleResult(opts.baseOptions, { output: "isolated-run" }));
-		const plainSpy = vi
-			.spyOn(taskExecutor, "runSubprocess")
-			.mockImplementation(async options => singleResult(options, { output: "plain-run" }));
+		const plainSpy = vi.spyOn(taskExecutor, "runSubprocess");
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "",
 			changesApplied: true,
@@ -1129,28 +1163,36 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		const defaultResult = await runEvalAgentAndWait({ prompt: "default" }, { session: isolatedSession() });
+		// Default: the task fixture's mutable ceiling merges a successful run.
+		const defaultResult = await runEvalAgentAndWait({ prompt: "default" }, { session: cloneSession() });
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
+		expect(isolatedSpy.mock.calls[0]?.[0].discard).toBe(false);
 		expect(plainSpy).not.toHaveBeenCalled();
 		expect(defaultResult.details.changesApplied).toBe(true);
+		expect(defaultResult.details.cloneDisposition).toBe("merge");
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
 
-		const direct = await runEvalAgentAndWait({ prompt: "direct", isolated: false }, { session: isolatedSession() });
-		expect(plainSpy).toHaveBeenCalledTimes(1);
-		expect(direct.details.changesApplied).toBeUndefined();
-		expect(mergeSpy).toHaveBeenCalledTimes(1);
-
-		await runEvalAgentAndWait({ prompt: "on", isolated: true }, { session: isolatedSession() });
+		// Narrowing to false runs the same clone but discards it: no merge.
+		const discard = await runEvalAgentAndWait({ prompt: "direct", mutable: false }, { session: cloneSession() });
 		expect(isolatedSpy).toHaveBeenCalledTimes(2);
+		expect(isolatedSpy.mock.calls[1]?.[0].discard).toBe(true);
+		expect(plainSpy).not.toHaveBeenCalled();
+		expect(discard.details.changesApplied).toBeNull();
+		expect(discard.details.cloneDisposition).toBe("discard");
+		expect(mergeSpy).toHaveBeenCalledTimes(1);
+
+		// An explicit true at the ceiling merges as the default does.
+		await runEvalAgentAndWait({ prompt: "on", mutable: true }, { session: cloneSession() });
+		expect(isolatedSpy).toHaveBeenCalledTimes(3);
 		expect(mergeSpy).toHaveBeenCalledTimes(2);
 	});
 
-	it("preserves temp artifacts for non-isolated handle outputs", async () => {
-		mockAgents();
+	it("preserves temp artifacts for a discard clone's handle output", async () => {
+		mockAgents([{ ...reviewerAgent, mutable: undefined }]);
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		await runEvalAgentAndWait({ prompt: "plain handle", handle: true }, { session: makeSession() });
+		await runEvalAgentAndWait({ prompt: "plain handle", agent: "reviewer" }, { session: makeSession() });
 
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
@@ -1158,7 +1200,7 @@ describe("runEvalAgent isolation", () => {
 		expect(removedArtifactsDir).toBe(false);
 	});
 
-	it("forwards merge=false as patch mode and passes the worktree cwd through baseOptions", async () => {
+	it("passes the configured merge mode and parent cwd through the clone run", async () => {
 		mockAgents();
 		const { repoRoot } = mockIsolationContext();
 		const isolatedSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
@@ -1174,18 +1216,21 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		// Branch is the configured merge mode, but `merge: false` must demote to patch.
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgentAndWait({ prompt: "migration", isolated: true, merge: false }, { session });
+		const session = cloneSession({ "task.isolation.merge": "branch" });
+		const result = await runEvalAgentAndWait({ prompt: "migration" }, { session });
 
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
 		const isolatedCall = isolatedSpy.mock.calls[0]?.[0];
 		if (!isolatedCall) throw new Error("runIsolatedSubprocess was not called");
-		expect(isolatedCall.mergeMode).toBe("patch");
+		// The configured merge mode reaches the runner verbatim.
+		expect(isolatedCall.mergeMode).toBe("branch");
 		expect(isolatedCall.baseOptions.cwd).toBe(session.cwd);
 		expect(isolatedCall.context.repoRoot).toBe(repoRoot);
 		expect(result.details.patchPath).toMatch(/\.patch$/);
 		expect(result.text).toContain("Applied patches: yes");
+
+		await runEvalAgentAndWait({ prompt: "migration" }, { session: cloneSession() });
+		expect(isolatedSpy.mock.calls[1]?.[0].mergeMode).toBe("patch");
 	});
 
 	it("keeps the timeout paused through isolation merge/apply so the cell can't abort mid-cherry-pick", async () => {
@@ -1207,9 +1252,9 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		await runEvalAgentAndWait(
-			{ prompt: "migration", isolated: true },
+			{ prompt: "migration" },
 			{
-				session: isolatedSession(),
+				session: cloneSession(),
 				emitStatus: event => {
 					if (event.op === EVAL_TIMEOUT_PAUSE_OP || event.op === EVAL_TIMEOUT_RESUME_OP) ops.push(event.op);
 				},
@@ -1256,9 +1301,9 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		await runEvalAgentAndWait(
-			{ prompt: "scout", isolated: true },
+			{ prompt: "scout" },
 			{
-				session: isolatedSession(),
+				session: cloneSession(),
 				emitStatus: event => {
 					if (event.op === EVAL_TIMEOUT_PAUSE_OP || event.op === EVAL_TIMEOUT_RESUME_OP) ops.push(event.op);
 				},
@@ -1293,14 +1338,13 @@ describe("runEvalAgent isolation", () => {
 		const result = await runEvalAgentAndWait(
 			{
 				prompt: "structured",
-				isolated: true,
 				schema: {
 					type: "object",
 					properties: { status: { type: "string" } },
 					required: ["status"],
 				},
 			},
-			{ session: isolatedSession() },
+			{ session: cloneSession() },
 		);
 
 		expect(JSON.parse(result.text)).toEqual({ status: "ok" });
@@ -1329,14 +1373,13 @@ describe("runEvalAgent isolation", () => {
 			runEvalAgentAndWait(
 				{
 					prompt: "structured",
-					isolated: true,
 					schema: {
 						type: "object",
 						properties: { status: { type: "string" } },
 						required: ["status"],
 					},
 				},
-				{ session: isolatedSession() },
+				{ session: cloneSession() },
 			),
 		).rejects.toThrow(/isolated apply failed.*Patch apply failed.*Captured patch preserved at \/artifacts\//s);
 	});
@@ -1353,8 +1396,8 @@ describe("runEvalAgent isolation", () => {
 		);
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
+		const session = cloneSession({ "task.isolation.merge": "branch" });
+		await expect(runEvalAgentAndWait({ prompt: "scout" }, { session })).rejects.toThrow(
 			/Merge failed.*garbage at end of loose object.*Captured patch preserved at \/artifacts\//s,
 		);
 		expect(mergeSpy).not.toHaveBeenCalled();
@@ -1376,8 +1419,8 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
+		const session = cloneSession({ "task.isolation.merge": "branch" });
+		await expect(runEvalAgentAndWait({ prompt: "scout" }, { session })).rejects.toThrow(
 			/isolated apply failed.*Branch merge failed.*Captured branch preserved as omp\/task\//s,
 		);
 	});
@@ -1402,7 +1445,7 @@ describe("runEvalAgent isolation", () => {
 
 		let caught: Error | undefined;
 		try {
-			await runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session: isolatedSession() });
+			await runEvalAgentAndWait({ prompt: "scout" }, { session: cloneSession() });
 		} catch (err) {
 			caught = err as Error;
 		}
@@ -1441,125 +1484,56 @@ describe("runEvalAgent isolation", () => {
 			runEvalAgentAndWait(
 				{
 					prompt: "structured",
-					isolated: true,
 					schema: {
 						type: "object",
 						properties: { status: { type: "string" } },
 						required: ["status"],
 					},
 				},
-				{ session: isolatedSession() },
+				{ session: cloneSession() },
 			),
 		).rejects.toThrow(
 			/nested patch apply failed.*Some nested repository patches failed to apply.*nested-0-sub_nested\.patch/s,
 		);
 	});
 
-	it("skips the merge phase when apply=false and surfaces the patch artifact instead", async () => {
+	it("skips the merge phase for a discard run and captures nothing", async () => {
 		mockAgents();
 		mockIsolationContext();
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, {
-				output: "captured",
-				patchPath: "/artifacts/captured.patch",
-			}),
+			singleResult(opts.baseOptions, { output: "done" }),
 		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
 
-		const result = await runEvalAgentAndWait(
-			{ prompt: "scout", isolated: true, apply: false },
-			{ session: isolatedSession() },
-		);
+		const result = await runEvalAgentAndWait({ prompt: "scout", mutable: false }, { session: cloneSession() });
 
 		expect(mergeSpy).not.toHaveBeenCalled();
 		expect(result.details.isolated).toBe(true);
+		expect(result.details.cloneDisposition).toBe("discard");
 		expect(result.details.changesApplied).toBeNull();
-		expect(result.details.patchPath).toBe("/artifacts/captured.patch");
-		expect(result.text).toContain("/artifacts/captured.patch");
-		expect(result.text).toContain("apply=false");
-	});
-
-	it("surfaces a captured branch name when apply=false and the run used branch mode", async () => {
-		mockAgents();
-		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, {
-				output: "branched",
-				branchName: `omp/task/${opts.agentId}`,
-			}),
-		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
-
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
-
-		expect(mergeSpy).not.toHaveBeenCalled();
-		expect(result.details.branchName).toMatch(/^omp\/task\//);
-		expect(result.text).toContain("omp/task/");
-		expect(result.text).toContain("apply=false");
-	});
-
-	it("surfaces nested patches when apply=false captured branch-mode nested-only changes", async () => {
-		mockAgents();
-		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, {
-				output: "nested-only",
-				nestedPatches: [{ relativePath: "nested", patch: "diff --git a/file b/file\n" }],
-			}),
-		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
-
-		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
-
-		expect(mergeSpy).not.toHaveBeenCalled();
-		expect(result.details.branchName).toBeUndefined();
+		// Discard never captures: no patch, no branch, no nested patches.
 		expect(result.details.patchPath).toBeUndefined();
-		expect(result.details.nestedPatches).toEqual([{ relativePath: "nested", patch: "diff --git a/file b/file\n" }]);
-		expect(result.text).toContain("nested repository");
-		expect(result.text).toContain("apply=false");
+		expect(result.details.branchName).toBeUndefined();
+		expect(result.details.nestedPatches).toBeUndefined();
+		expect(result.text).toContain("ran in a discarded worktree; file changes were not kept");
 	});
 
-	it("names each nested patch file and not the empty root patch when apply=false captured nested-only changes", async () => {
-		mockAgents();
-		mockIsolationContext();
-		const nestedPatchPath = "/artifacts/NestedOnly.nested-0-inner.patch";
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, {
-				output: "nested-only",
-				patchPath: `/artifacts/${opts.agentId}.patch`,
-				hasRootChanges: false,
-				nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
-				nestedPatchPaths: [nestedPatchPath],
-			}),
-		);
-
-		const session = isolatedSession();
-		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
-
-		// The headline fix: a 0-byte root patch is not reported as "changes
-		// captured at …"; the nested file that holds the work is named instead.
-		expect(result.text).toContain("Isolation: changes captured for 1 nested repository (apply=false). Not applied.");
-		expect(result.text).toContain(`- nested repository patch: \`${nestedPatchPath}\``);
-		expect(result.text).not.toContain("changes captured at");
-		expect(result.details.nestedPatchPaths).toEqual([nestedPatchPath]);
-	});
-
-	it("preserves the temp artifacts dir when apply=false so details.patchPath remains valid", async () => {
+	it("preserves the temp artifacts dir for a discard run's handle output", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
+			singleResult(opts.baseOptions, { output: "done" }),
 		);
 
-		const result = await runEvalAgentAndWait(
-			{ prompt: "scout", isolated: true, apply: false },
-			{ session: isolatedSession() },
-		);
+		const result = await runEvalAgentAndWait({ prompt: "scout", mutable: false }, { session: cloneSession() });
 
-		expect(result.details.patchPath).toMatch(/\.patch$/);
+		expect(result.details.cloneDisposition).toBe("discard");
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
@@ -1580,7 +1554,7 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		await runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session: isolatedSession() });
+		await runEvalAgentAndWait({ prompt: "scout" }, { session: cloneSession() });
 
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),

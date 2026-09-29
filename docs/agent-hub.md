@@ -37,6 +37,7 @@ On a wide terminal, the selected agent's inspector appears beside the roster. On
 - the current tool and arguments, last intent, and retry state;
 - context-window use when available;
 - parent and child lineage;
+- the Changes pane's workspace line: historical read-only capability, clone discarded on completion, clone whose initial changes were eligible for merge, or a shared/host-managed workspace;
 - output and patch paths, plus isolated-worktree branch metadata when present.
 
 Metrics depend on the progress or persisted usage data available for that agent. Missing data appears as `usage —` rather than an estimate.

@@ -5,6 +5,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { buildSpecializationAdvisory, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -73,7 +74,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			cwd: "/tmp",
 			hasUI: false,
 			suppressSpawnAdvisory: suppress,
-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
+			settings: Settings.isolated({ "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;
@@ -86,7 +87,6 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			// `task.disabledAgents` is what the task tool reads to drop scout from
 			// the rendered description and the appended specialization advisory.
 			settings: Settings.isolated({
-				"task.isolation.enabled": false,
 				"task.batch": true,
 				"task.disabledAgents": ["scout"],
 			}),
@@ -97,6 +97,16 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 
 	async function spawnTextFor(s: ToolSession): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		// Ordinary spawns always clone: stub the seam so the run delegates to
+		// the mocked executor without a real Git checkout.
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			executorModule.runSubprocess(opts.baseOptions),
+		);
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => ({
 			index: options.index ?? 0,
 			id: options.id ?? "X",

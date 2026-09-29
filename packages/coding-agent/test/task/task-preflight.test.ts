@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -16,6 +17,8 @@ const taskAgent: AgentDefinition = {
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
 };
+
+const mutableTaskAgent: AgentDefinition = { ...taskAgent, mutable: true };
 
 function createSession(options: {
 	manager: AsyncJobManager;
@@ -160,5 +163,116 @@ describe("task async preflight", () => {
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+});
+
+describe("task disposition pinning", () => {
+	const managers: AsyncJobManager[] = [];
+
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 1_000 });
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	function manager(): AsyncJobManager {
+		const result = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(result);
+		return result;
+	}
+
+	/**
+	 * Two-item batch behind a concurrency-1 semaphore: both items preflight
+	 * with the current definition, then the definition is swapped while First
+	 * is gated in the executor, so Second's launch re-resolves the changed
+	 * ceiling against its pinned disposition.
+	 */
+	async function runPinnedBatch(options: {
+		preflightAgent: AgentDefinition;
+		launchAgent: AgentDefinition;
+	}): Promise<{ first: AsyncJob; second: AsyncJob; isolatedCalls: Array<{ discard: boolean }> }> {
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [options.preflightAgent], projectAgentsDir: null });
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as never);
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
+		const gate = Promise.withResolvers<void>();
+		const firstStarted = Promise.withResolvers<void>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			firstStarted.resolve();
+			await gate.promise;
+			return resultFor(options.id);
+		});
+		const isolatedCalls: Array<{ discard: boolean }> = [];
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
+			isolatedCalls.push({ discard: opts.discard });
+			const result = await executorModule.runSubprocess(opts.baseOptions);
+			return { ...result, isolated: true };
+		});
+
+		const jobs = manager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager: jobs,
+				settings: { "async.enabled": true, "task.batch": true, "task.maxConcurrency": 1 },
+			}),
+		);
+		const result = await tool.execute("pinning", {
+			context: "ctx",
+			tasks: [
+				{ name: "First", task: "Work A." },
+				{ name: "Second", task: "Work B." },
+			],
+		} as TaskParams);
+		const first = jobs.getJob("First");
+		const second = jobs.getJob("Second");
+		if (!first || !second) throw new Error(`Expected both jobs to register: ${textOf(result)}`);
+
+		// First is gated mid-dispatch; swap the definition before Second launches.
+		await firstStarted.promise;
+		discover.mockResolvedValue({ agents: [options.launchAgent], projectAgentsDir: null });
+		gate.resolve();
+		await first.promise;
+		await second.promise.catch(() => {});
+		return { first, second, isolatedCalls };
+	}
+
+	it("rejects a merge-pinned launch when the definition tightens after preflight", async () => {
+		const { first, second, isolatedCalls } = await runPinnedBatch({
+			preflightAgent: mutableTaskAgent,
+			launchAgent: taskAgent,
+		});
+
+		expect(first.status).toBe("completed");
+		expect(second.status).toBe("failed");
+		expect(second.errorText ?? second.resultText ?? "").toContain('Agent "task" does not permit mutable execution');
+		expect(isolatedCalls).toHaveLength(1);
+	});
+
+	it("keeps a discard-pinned launch when the definition loosens after preflight", async () => {
+		const { first, second, isolatedCalls } = await runPinnedBatch({
+			preflightAgent: taskAgent,
+			launchAgent: mutableTaskAgent,
+		});
+
+		expect(first.status).toBe("completed");
+		expect(second.status).toBe("completed");
+		// Loosening never promotes a pinned discard to a merge.
+		expect(isolatedCalls).toEqual([{ discard: true }, { discard: true }]);
 	});
 });

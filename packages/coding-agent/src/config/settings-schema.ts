@@ -4977,15 +4977,12 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Delegation
+	// Inert legacy key: ordinary subagents always run in an isolated clone, so
+	// there is no off switch. Kept so existing configs remain valid; no UI
+	// control and no runtime reads.
 	"task.isolation.enabled": {
 		type: "boolean",
 		default: false,
-		ui: {
-			tab: "tasks",
-			group: "Isolation",
-			label: "Isolate Subagents",
-			description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
-		},
 	},
 
 	"isolation.backend": {
@@ -5047,16 +5044,12 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Inert legacy key: apply-back follows the agent definition's `mutable`
+	// ceiling, narrowed by the per-spawn `mutable` argument. Kept so existing
+	// configs remain valid; no UI control and no runtime reads.
 	"task.isolation.apply": {
 		type: "boolean",
 		default: true,
-		ui: {
-			tab: "tasks",
-			group: "Isolation",
-			label: "Apply Isolated Changes",
-			description:
-				"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
-		},
 	},
 
 	"task.isolation.merge": {
@@ -5067,7 +5060,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			group: "Isolation",
 			label: "Isolation Merge Strategy",
-			description: "How isolated task changes are integrated (patch apply or branch merge)",
+			description:
+				"How a merge-disposition clone's changes are integrated into the parent checkout (patch apply or branch merge)",
 			options: [
 				{ value: "patch", label: "Patch", description: "Combine diffs and git apply" },
 				{ value: "branch", label: "Branch", description: "Commit per task, merge with --no-ff" },
@@ -5132,7 +5126,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Batch Task Calls",
 			description:
-				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item `mutable` disposition, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
 		},
 	},
 

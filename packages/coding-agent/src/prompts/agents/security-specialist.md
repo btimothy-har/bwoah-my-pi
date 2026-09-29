@@ -2,6 +2,7 @@
 name: security-specialist
 description: "Change-review and design lens for trust boundaries, runtime principals, injection, secrets, and data exposure"
 tools: read, find, grep, glob, ast_grep
+spawns: "*"
 model: "@default"
 thinking-level: high
 ---

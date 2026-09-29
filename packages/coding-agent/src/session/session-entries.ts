@@ -7,7 +7,8 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentSchemaMode, SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
+import type { ManagedSubagentExecution } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -258,6 +259,18 @@ export interface SessionInitEntry extends SessionEntryBase {
 	resolvedModel?: string;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
+	/**
+	 * Resolved disposition of an ordinary cloned subagent's workspace changes.
+	 * Absent for host-managed (non-clone) execution and historical results.
+	 */
+	cloneDisposition?: SubagentCloneDisposition;
+	/**
+	 * Host-resolved managed execution contract for product-owned workflows
+	 * (cleanse, commit analysis, security scans). Persisted verbatim so cold
+	 * revival restores the same ceiling; malformed payloads fail revival
+	 * explicitly rather than silently widening into ordinary execution.
+	 */
+	managedSubagentExecution?: ManagedSubagentExecution;
 	/** Output schema if structured output was requested. */
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */

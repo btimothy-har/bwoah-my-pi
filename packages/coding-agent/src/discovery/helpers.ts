@@ -293,7 +293,8 @@ export interface ParsedAgentFields {
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
-	isolation?: "apply" | "discard";
+	/** Apply-back ceiling for cloned executions; absent means `false`. */
+	mutable?: boolean;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
@@ -378,8 +379,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		const trimmed = frontmatter.advisor.trim();
 		if (trimmed) advisor = trimmed;
 	}
-	const isolation =
-		frontmatter.isolation === "apply" || frontmatter.isolation === "discard" ? frontmatter.isolation : undefined;
+	const mutable = parseBoolean(frontmatter.mutable);
+	// A present but unsupported value is an invalid definition, not an omitted one.
+	if (mutable === undefined && frontmatter.mutable !== undefined) return null;
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
@@ -390,7 +392,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns,
 		model,
 		output,
-		isolation,
+		mutable,
 		thinkingLevel,
 		blocking,
 		autoloadSkills,

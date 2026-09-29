@@ -2,6 +2,7 @@
 name: data-model-specialist
 description: "Reviews or advises on SQL and dbt models: grain, joins and fan-out, lineage, materialization, schema contracts, tests, dimensional modeling"
 tools: read, find, grep, glob, ast_grep
+spawns: "*"
 model: "@default"
 thinking-level: high
 ---
