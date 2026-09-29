@@ -54,7 +54,9 @@ try {
 	await $`git init -q -b main`.cwd(cwd).quiet();
 	await Bun.write(path.join(cwd, "seed.txt"), "seed\n");
 	await $`git add seed.txt`.cwd(cwd).quiet();
-	await $`git -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm init`.cwd(cwd).quiet();
+	await $`git -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm init`
+		.cwd(cwd)
+		.quiet();
 	for (const name of ["a", "b"]) {
 		const agents = path.join(work, `extension-${name}`, "agents");
 		await Bun.write(
