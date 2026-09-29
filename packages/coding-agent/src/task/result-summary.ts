@@ -9,10 +9,27 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
 
 /** Inline preview budget before the envelope points at `agent://<id>` instead. */
 const FULL_OUTPUT_THRESHOLD = 5000;
+
+/**
+ * Whether a stopped subagent can be resumed instead of redone. True only for a
+ * run that stopped before finishing (aborted) with a live-or-parked registry
+ * entry and a workspace that still exists: discard clones are one-shot (their
+ * clone is gone), while merge clones and non-cloned runs stay resumable. Merge
+ * follow-up edits never apply back automatically — a separate limitation.
+ */
+export function isSubagentResumable(input: {
+	aborted: boolean;
+	cloneDisposition?: SubagentCloneDisposition;
+	status?: string;
+}): boolean {
+	return (
+		input.aborted && input.cloneDisposition !== "discard" && (input.status === "idle" || input.status === "parked")
+	);
+}
 
 /**
  * Preview text for a child result. Falls back to "(no output)" — annotated
@@ -64,8 +81,11 @@ export function formatTaskResultSummary(
 	// must not read as resumable; merge clones and non-cloned runs stay
 	// resumable, though merge follow-up edits never apply back automatically.
 	const refStatus = AgentRegistry.global().get(result.id)?.status;
-	const resumable =
-		result.aborted && result.cloneDisposition !== "discard" && (refStatus === "idle" || refStatus === "parked");
+	const resumable = isSubagentResumable({
+		aborted: result.aborted === true,
+		cloneDisposition: result.cloneDisposition,
+		status: refStatus,
+	});
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,

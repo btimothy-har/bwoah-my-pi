@@ -13,7 +13,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 
 # Task Design
 - **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Exploratory research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
-- **Disposition:** Every spawn runs in a writable isolated clone of the checkout — scratch files, probes, and builds all work there. The agent definition's `mutable` ceiling decides apply-back: agents marked `mutable: apply-back` below integrate a successful initial run's changes into your checkout (mechanism per `task.isolation.merge`); pass `mutable: false` to force discard. Every other agent discards its clone — the yielded result is the deliverable. `mutable: true` on an unmarked agent is rejected.
+- **Disposition:** {{#if nonCloneExecution}}Subagents in this session run directly in the working tree, not in an isolated clone; `mutable` is unavailable here and is rejected if passed.{{else}}Every spawn runs in a writable isolated clone of the checkout — scratch files, probes, and builds all work there. The agent definition's `mutable` ceiling decides apply-back: agents marked `mutable: apply-back` below integrate a successful initial run's changes into your checkout (mechanism per `task.isolation.merge`); pass `mutable: false` to force discard. Every other agent discards its clone — the yielded result is the deliverable. `mutable: true` on an unmarked agent is rejected.{{/if}}
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a scout only when affected files are genuinely unknown.{{/if}}
 - **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
@@ -35,7 +35,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
-  - `mutable`: Per-spawn clone disposition. `true` applies a successful run's changes back — only when the agent's definition permits it (marked `mutable: apply-back` below); rejected otherwise. `false` discards the clone. Omitted resolves to the definition's default. Never set it on the batch root; it is per item.
+{{#unless nonCloneExecution}}  - `mutable`: Per-spawn clone disposition. `true` applies a successful run's changes back — only when the agent's definition permits it (marked `mutable: apply-back` below); rejected otherwise. `false` discards the clone. Omitted resolves to the definition's default. Never set it on the batch root; it is per item.
+{{/unless}}
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
@@ -48,7 +49,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
-- `mutable`: Clone disposition for this spawn. `true` applies a successful run's changes back — only when the agent's definition permits it (marked `mutable: apply-back` below); rejected otherwise. `false` discards the clone. Omitted resolves to the definition's default.
+{{#unless nonCloneExecution}}- `mutable`: Clone disposition for this spawn. `true` applies a successful run's changes back — only when the agent's definition permits it (marked `mutable: apply-back` below); rejected otherwise. `false` discards the clone. Omitted resolves to the definition's default.
+{{/unless}}
 {{/if}}
 
 # Communication

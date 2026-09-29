@@ -10,6 +10,7 @@ import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runne
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -200,17 +201,10 @@ describe("task disposition pinning", () => {
 		const discover = vi
 			.spyOn(discoveryModule, "discoverAgents")
 			.mockResolvedValue({ agents: [options.preflightAgent], projectAgentsDir: null });
-		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot: "/tmp",
-			baseline: null,
-		} as never);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-			summary: "",
-			changesApplied: true,
-			hadAnyChanges: false,
-			mergedBranchForNestedPatches: false,
-		});
+		// Ordinary spawns always clone: stub the seam so runs reach the
+		// (separately mocked) executor; the per-test runner stub below records
+		// each launch's pinned disposition.
+		stubCloneSeam({ repoRoot: "/tmp" });
 		const gate = Promise.withResolvers<void>();
 		const firstStarted = Promise.withResolvers<void>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {

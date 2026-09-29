@@ -26,6 +26,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -42,20 +43,7 @@ const taskAgent: AgentDefinition = {
  * report a clean no-op apply-back.
  */
 function mockCloneSupport(): void {
-	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
-	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-		repoRoot: "/tmp",
-		baseline: null,
-	} as never);
-	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-		executorModule.runSubprocess(opts.baseOptions),
-	);
-	vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-		summary: "",
-		changesApplied: true,
-		hadAnyChanges: false,
-		mergedBranchForNestedPatches: false,
-	});
+	stubCloneSeam({ repoRoot: "/tmp" });
 }
 
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {

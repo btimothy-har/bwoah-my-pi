@@ -11,11 +11,11 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { stubCloneSeam } from "./helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -105,14 +105,7 @@ describe("task subagent OAuth pin inheritance", () => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 			// Ordinary spawns always clone: stub the clone seam so dispatches
 			// delegate to the mocked executor without a real Git checkout.
-			vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: tempDir.path() });
-			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-				repoRoot: tempDir.path(),
-				baseline: null,
-			} as never);
-			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-				executorModule.runSubprocess(opts.baseOptions),
-			);
+			stubCloneSeam({ repoRoot: tempDir.path() });
 			const dispatched: executorModule.ExecutorOptions[] = [];
 			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 				dispatched.push(options);

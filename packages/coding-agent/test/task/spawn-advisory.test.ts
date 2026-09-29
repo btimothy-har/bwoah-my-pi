@@ -5,10 +5,10 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { buildSpecializationAdvisory, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 // Contract: the task tool appends an advisory (never a rejection) steering the
 // spawner toward more specific agent types when one call resolves ≥2 items to
@@ -99,14 +99,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		// Ordinary spawns always clone: stub the seam so the run delegates to
 		// the mocked executor without a real Git checkout.
-		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot: "/tmp",
-			baseline: null,
-		} as never);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			executorModule.runSubprocess(opts.baseOptions),
-		);
+		stubCloneSeam({ repoRoot: "/tmp" });
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => ({
 			index: options.index ?? 0,
 			id: options.id ?? "X",

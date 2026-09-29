@@ -532,6 +532,47 @@ function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
 }
 
+/**
+ * Drop alternates entries that merely repeat the direct source's own borrow
+ * chain. Copy backends duplicate the source's `.git` verbatim, so a nested
+ * clone's file is `[direct source objects, ...the source's copied borrows]`
+ * — a diamond the native object graph rejects as a cycle ("Alternates form
+ * a cycle"), even though git itself resolves transitive borrows. Keeping only
+ * the entries the direct source cannot reach preserves the same object
+ * visibility without the false cycle. No-op for non-nested clones.
+ */
+async function dedupeNestedAlternates(mergedDir: string): Promise<void> {
+	const alternatesPath = path.join(mergedDir, ".git", "objects", "info", "alternates");
+	let lines: string[];
+	try {
+		lines = (await Bun.file(alternatesPath).text()).split("\n").filter(Boolean);
+	} catch {
+		return;
+	}
+	if (lines.length < 2) return;
+	const canonical = async (p: string) => fs.realpath(p).catch(() => p);
+	const direct = await canonical(lines[0]);
+	const reachable = new Set<string>();
+	const queue = [direct];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		if (reachable.has(current)) continue;
+		reachable.add(current);
+		try {
+			const nested = (await Bun.file(path.join(current, "info", "alternates")).text()).split("\n").filter(Boolean);
+			for (const entry of nested) queue.push(await canonical(entry));
+		} catch {
+			// No alternates file (or unreadable): chain ends here.
+		}
+	}
+	const kept: string[] = [lines[0]];
+	for (const line of lines.slice(1)) {
+		if (!reachable.has(await canonical(line))) kept.push(line);
+	}
+	if (kept.length === lines.length) return;
+	await Bun.write(alternatesPath, `${kept.join("\n")}\n`);
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
@@ -564,6 +605,7 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
+			await dedupeNestedAlternates(mergedDir);
 			return {
 				mergedDir,
 				backend: candidate,

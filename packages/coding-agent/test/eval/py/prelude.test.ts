@@ -184,4 +184,63 @@ describe("python prelude", () => {
 			proxy.stop(true);
 		}
 	});
+
+	it("forwards mutable through agent()/workpool() and rejects obsolete kwargs before any bridge call", async () => {
+		const result = await runPrelude(
+			[
+				"calls = []",
+				"def _capture(name, args):",
+				"    calls.append(args)",
+				"    if name == '__agent__':",
+				"        return {'id': 'a1', 'agent': 'task'}",
+				"    return {'name': 'pool-1', 'agent': 'task', 'limit': 2}",
+				"_bridge_call = _capture",
+				"def raised(fn):",
+				"    try:",
+				"        fn()",
+				"    except TypeError as exc:",
+				"        return str(exc)",
+				"    return None",
+				"out = {}",
+				"handle = agent('do work', mutable=False)",
+				"out['agent_false'] = calls[-1]",
+				"out['agent_handle'] = handle.id",
+				"agent('more work', mutable=True)",
+				"out['agent_true'] = calls[-1]",
+				"out['agent_mutable_int'] = raised(lambda: agent('x', mutable=1))",
+				"out['agent_isolated'] = raised(lambda: agent('x', isolated=True))",
+				"out['agent_apply'] = raised(lambda: agent('x', apply=True))",
+				"out['agent_merge'] = raised(lambda: agent('x', merge=True))",
+				"out['agent_call_count'] = len(calls)",
+				"pool = workpool('task', mutable=False)",
+				"out['pool_false'] = calls[-1]",
+				"out['pool_name'] = pool.name",
+				"out['pool_mutable_int'] = raised(lambda: workpool(mutable=1))",
+				"out['pool_isolated'] = raised(lambda: workpool(isolated=True))",
+				"out['pool_call_count'] = len(calls)",
+				"print(json.dumps(out, sort_keys=True))",
+			].join("\n"),
+			{},
+		);
+
+		expect(result.exitCode).toBe(0);
+		const out = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}");
+		// Boolean mutable forwards verbatim, in both polarities.
+		expect(out.agent_false).toEqual({ prompt: "do work", mutable: false });
+		expect(out.agent_true).toEqual({ prompt: "more work", mutable: true });
+		expect(out.agent_handle).toBe("a1");
+		// Non-bool mutable and the removed isolation controls raise TypeError
+		// before any bridge dispatch: only the two valid agent() calls landed.
+		expect(out.agent_mutable_int).toContain("agent() mutable must be a bool");
+		expect(out.agent_isolated).toContain("unexpected keyword argument 'isolated'");
+		expect(out.agent_apply).toContain("unexpected keyword argument 'apply'");
+		expect(out.agent_merge).toContain("unexpected keyword argument 'merge'");
+		expect(out.agent_call_count).toBe(2);
+		// Same contract on pool creation.
+		expect(out.pool_false).toEqual({ op: "create", agent: "task", mutable: false });
+		expect(out.pool_name).toBe("pool-1");
+		expect(out.pool_mutable_int).toContain("workpool() mutable must be a bool");
+		expect(out.pool_isolated).toContain("unexpected keyword argument 'isolated'");
+		expect(out.pool_call_count).toBe(3);
+	});
 });

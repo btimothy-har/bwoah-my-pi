@@ -4,10 +4,10 @@ import { Settings } from "../../src/config/settings";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import * as discovery from "../../src/task/discovery";
-import * as isolationRunner from "../../src/task/isolation-runner";
 import type { AgentDefinition } from "../../src/task/types";
 import { WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const SCOUT: AgentDefinition = {
 	name: "scout",
@@ -39,8 +39,9 @@ function makeSession(): ToolSession {
 
 function mockCreateSupport(agents: AgentDefinition[] = [SCOUT]): void {
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
-	// Pool creation preflights an ordinary clone; the probe needs no real repo.
-	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+	// Pool creation preflights an ordinary clone; the seam needs no real repo.
+	// Workers never launch in these tests, so the runner/merge stubs stay inert.
+	stubCloneSeam({ repoRoot: "/tmp" });
 }
 
 afterEach(async () => {

@@ -17,6 +17,7 @@ import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const jobManagers = new Set<AsyncJobManager>();
 
@@ -26,20 +27,7 @@ const jobManagers = new Set<AsyncJobManager>();
  * merges resolve to a clean no-op apply-back.
  */
 function mockCloneSeam(): void {
-	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockImplementation(async cwd => ({ repoRoot: cwd }));
-	vi.spyOn(isolationRunner, "prepareIsolationContext").mockImplementation(async cwd => ({ repoRoot: cwd }) as never);
-	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
-		const result = await taskExecutor.runSubprocess(opts.baseOptions);
-		// Mirror the real runner's usage-reporting callback.
-		opts.onSubprocessResult?.(result);
-		return result;
-	});
-	vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-		summary: "",
-		changesApplied: true,
-		hadAnyChanges: false,
-		mergedBranchForNestedPatches: false,
-	});
+	stubCloneSeam({ baseline: "omit" });
 }
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {

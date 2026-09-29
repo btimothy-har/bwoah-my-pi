@@ -6,6 +6,14 @@ import type { AgentDefinition } from "./types";
 export const OBSOLETE_SUBAGENT_CONTROL_MESSAGE =
 	"Subagent isolation controls were removed. Use mutable: false to discard, or mutable: true when the agent definition permits apply-back.";
 
+/** Removed request controls, rejected by own-key presence (even false/null/undefined) at every ingress. */
+export const OBSOLETE_SUBAGENT_CONTROL_KEYS = ["isolated", "apply", "merge", "readOnly", "isolation"] as const;
+
+/** True when the record carries any removed subagent isolation control. */
+export function hasObsoleteSubagentControl(record: object): boolean {
+	return OBSOLETE_SUBAGENT_CONTROL_KEYS.some(key => Object.hasOwn(record, key));
+}
+
 /** Tools every ordinary (cloned) subagent requests, in stable order. */
 export const COMMON_SUBAGENT_TOOL_NAMES = [
 	"read",

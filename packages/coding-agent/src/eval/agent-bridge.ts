@@ -12,7 +12,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import { OBSOLETE_SUBAGENT_CONTROL_MESSAGE } from "../task/tool-policy";
+import { hasObsoleteSubagentControl, OBSOLETE_SUBAGENT_CONTROL_MESSAGE } from "../task/tool-policy";
 import type {
 	AgentProgress,
 	SingleResult,
@@ -86,13 +86,9 @@ export interface EvalAgentResult {
 	};
 }
 
-const OBSOLETE_SUBAGENT_CONTROL_KEYS = ["isolated", "apply", "merge", "readOnly", "isolation"] as const;
-
 /** Reject removed subagent isolation request keys by own-key presence, even false/null/undefined. */
 export function rejectObsoleteSubagentControls(args: Record<string, unknown>): void {
-	for (const key of OBSOLETE_SUBAGENT_CONTROL_KEYS) {
-		if (Object.hasOwn(args, key)) throw new ToolError(OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
-	}
+	if (hasObsoleteSubagentControl(args)) throw new ToolError(OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
 }
 
 function parseAgentArgs(args: unknown): EvalAgentArgs {

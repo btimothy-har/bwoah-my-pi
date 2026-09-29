@@ -165,7 +165,7 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
 - JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, mutable?, tools? })`; Python uses keyword arguments (`schema_mode`, `mutable`).
-- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode `mutable: true`, unknown `tools` names, removed `isolated`/`apply`/`merge`/`readOnly` keys) fails the call synchronously; execution failures surface from `.wait()`.
+- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode `mutable: true`, unknown `tools` names, removed `isolated`/`apply`/`merge`/`readOnly`/`isolation` keys) fails the call synchronously; execution failures surface from `.wait()`.
 - `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `mutable` pins the clone disposition: every ordinary child runs in a writable isolated clone of the checkout; `true` applies a successful run's changes back (only when the agent definition declares `mutable: true`; rejected otherwise), `false` discards the clone, and an omitted value resolves to the definition default at preflight and stays pinned for the queued launch.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.

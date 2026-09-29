@@ -24,6 +24,7 @@ import { AgentOutputManager } from "../../src/task/output-manager";
 import type { AgentDefinition } from "../../src/task/types";
 import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent = {
 	name: "task",
@@ -127,20 +128,7 @@ function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): voi
 	// Ordinary agents always execute in a clone now. Stub the clone seam so the
 	// run reaches the (separately mocked) executor without a real Git checkout;
 	// merges resolve to a clean no-op apply-back unless a test overrides them.
-	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockImplementation(async cwd => ({ repoRoot: cwd }));
-	vi.spyOn(isolationRunner, "prepareIsolationContext").mockImplementation(async cwd => ({ repoRoot: cwd }) as never);
-	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
-		const result = await taskExecutor.runSubprocess(opts.baseOptions);
-		// Mirror the real runner's usage-reporting callback.
-		opts.onSubprocessResult?.(result);
-		return result;
-	});
-	vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-		summary: "",
-		changesApplied: true,
-		hadAnyChanges: false,
-		mergedBranchForNestedPatches: false,
-	});
+	stubCloneSeam({ baseline: "omit" });
 }
 
 function spyOverlapBarrier(count: number): { maxInFlight: () => number } {
@@ -1500,8 +1488,15 @@ describe("runEvalAgent clone dispositions", () => {
 	it("skips the merge phase for a discard run and captures nothing", async () => {
 		mockAgents();
 		mockIsolationContext();
+		// Even a buggy runner that hands capture fields back for a discard run
+		// must see them dropped: discard neither captures nor integrates.
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, { output: "done" }),
+			singleResult(opts.baseOptions, {
+				output: "done",
+				patchPath: `/artifacts/${opts.agentId}.patch`,
+				branchName: `omp/task/${opts.agentId}`,
+				nestedPatches: [{ relativePath: "sub/nested", patch: "diff --git a/file b/file\n" }],
+			}),
 		);
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "",
@@ -1516,7 +1511,8 @@ describe("runEvalAgent clone dispositions", () => {
 		expect(result.details.isolated).toBe(true);
 		expect(result.details.cloneDisposition).toBe("discard");
 		expect(result.details.changesApplied).toBeNull();
-		// Discard never captures: no patch, no branch, no nested patches.
+		// Discard never captures: no patch, no branch, no nested patches — even
+		// when the runner (incorrectly) produced them.
 		expect(result.details.patchPath).toBeUndefined();
 		expect(result.details.branchName).toBeUndefined();
 		expect(result.details.nestedPatches).toBeUndefined();
@@ -1560,5 +1556,95 @@ describe("runEvalAgent clone dispositions", () => {
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
 		expect(removedArtifactsDir).toBe(false);
+	});
+});
+
+describe("runEvalAgent launch pinning", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		AgentRegistry.resetGlobalForTests();
+		resetRegisteredArtifactDirsForTests();
+		await Promise.all([...jobManagers].map(manager => manager.dispose()));
+		jobManagers.clear();
+	});
+
+	/**
+	 * The first discovery call serves `runEvalAgent`'s preflight; the job
+	 * body's launch-time recheck then waits on a gate, so the test can change
+	 * the definition ceiling between pinning and actual launch.
+	 */
+	function gatedDiscovery(initial: AgentDefinition[]): {
+		swap: (agents: AgentDefinition[]) => void;
+		releaseLaunch: () => void;
+		calls: () => number;
+	} {
+		let current = initial;
+		let calls = 0;
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(taskDiscovery, "discoverAgents").mockImplementation(async () => {
+			calls++;
+			if (calls > 1) await gate.promise;
+			return { agents: current, projectAgentsDir: null };
+		});
+		return {
+			swap: agents => {
+				current = agents;
+			},
+			releaseLaunch: () => gate.resolve(),
+			calls: () => calls,
+		};
+	}
+
+	it("fails a merge-pinned eval job when the definition ceiling tightens before launch", async () => {
+		const discovery = gatedDiscovery([taskAgent]);
+		stubCloneSeam({ baseline: "omit" });
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession();
+
+		// Preflight resolves the fixture's mutable ceiling: merge is pinned.
+		const handle = await runEvalAgent({ prompt: "merge job" }, { session });
+		discovery.swap([{ ...taskAgent, mutable: false }]);
+		discovery.releaseLaunch();
+
+		const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, { session });
+		const snapshot = waited.items[0];
+		expect(snapshot?.status).toBe("failed");
+		expect(snapshot?.error).toContain('Agent "task" does not permit mutable execution');
+		// Preflight plus the launch-time recheck: the tightened ceiling was
+		// actually re-read.
+		expect(discovery.calls()).toBe(2);
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps a discard-pinned eval job discarding when the ceiling loosens before launch", async () => {
+		const discovery = gatedDiscovery([{ ...taskAgent, mutable: false }]);
+		stubCloneSeam({ baseline: "omit" });
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const isolatedSpy = vi
+			.spyOn(isolationRunner, "runIsolatedSubprocess")
+			.mockImplementation(async opts => singleResult(opts.baseOptions, { output: "done" }));
+		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const session = makeSession();
+
+		// The false ceiling pins discard; loosening the definition before
+		// launch must not promote the queued job to merge.
+		const handle = await runEvalAgent({ prompt: "discard job" }, { session });
+		discovery.swap([taskAgent]);
+		discovery.releaseLaunch();
+
+		const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, { session });
+		const snapshot = waited.items[0];
+		if (!snapshot || snapshot.status === "running") throw new Error(`Agent handle ${handle.id} did not settle`);
+		if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+			throw new Error(snapshot.error || `Agent handle ${handle.id} failed`);
+		}
+		const result = session.asyncJobManager?.getJob(handle.id)?.latestDetails?.evalResult;
+		if (!isEvalAgentResult(result)) throw new Error(`Agent handle ${handle.id} returned no eval result`);
+		expect(discovery.calls()).toBe(2);
+		expect(isolatedSpy).toHaveBeenCalledTimes(1);
+		expect(isolatedSpy.mock.calls[0]?.[0].discard).toBe(true);
+		expect(result.details.cloneDisposition).toBe("discard");
+		expect(result.details.changesApplied).toBeNull();
+		expect(mergeSpy).not.toHaveBeenCalled();
 	});
 });

@@ -41,7 +41,12 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import { OBSOLETE_SUBAGENT_CONTROL_MESSAGE, resolveSubagentToolNames, SubagentToolPolicyError } from "./tool-policy";
+import {
+	hasObsoleteSubagentControl,
+	OBSOLETE_SUBAGENT_CONTROL_MESSAGE,
+	resolveSubagentToolNames,
+	SubagentToolPolicyError,
+} from "./tool-policy";
 import { type AgentDefinition, canSpawnAtDepth, type ManagedSubagentExecution } from "./types";
 import type {
 	AgentProgress,
@@ -237,10 +242,8 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 
 /** Reject the removed isolation request controls by own-key presence, even for false/null/undefined values. */
 function assertNoObsoleteControls(request: StructuredSubagentRequest): void {
-	for (const key of ["isolated", "apply", "merge", "readOnly", "isolation"]) {
-		if (Object.hasOwn(request, key)) {
-			throw new StructuredSubagentError("preflight", OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
-		}
+	if (hasObsoleteSubagentControl(request)) {
+		throw new StructuredSubagentError("preflight", OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
 	}
 	if (request.mutable !== undefined && typeof request.mutable !== "boolean") {
 		throw new StructuredSubagentError("preflight", "`mutable` must be a boolean.");
@@ -783,6 +786,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
 		if (clone && result.cloneDisposition === undefined) result.cloneDisposition = clone.disposition;
+		// Discard runs never capture: strip any runner-supplied capture fields so
+		// they cannot leak into caller-visible details or recovery bookkeeping.
+		if (clone?.disposition === "discard") {
+			delete result.patchPath;
+			delete result.hasRootChanges;
+			delete result.branchName;
+			delete result.nestedPatches;
+			delete result.nestedPatchPaths;
+		}
 		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
 		requiresRecoveryArtifacts =
 			clone !== undefined &&

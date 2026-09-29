@@ -24,12 +24,12 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { COMMON_SUBAGENT_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/task/tool-policy";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -380,20 +380,7 @@ describe("task.batch spawning", () => {
 		// Ordinary spawns always clone: stub the clone seam so runs delegate to
 		// the (separately mocked) executor without a real Git checkout, and the
 		// mutable task fixture's merge disposition resolves to a clean no-op.
-		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot: "/tmp",
-			baseline: null,
-		} as never);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			executorModule.runSubprocess(opts.baseOptions),
-		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-			summary: "",
-			changesApplied: true,
-			hadAnyChanges: false,
-			mergedBranchForNestedPatches: false,
-		});
+		stubCloneSeam({ repoRoot: "/tmp" });
 	});
 
 	afterEach(async () => {

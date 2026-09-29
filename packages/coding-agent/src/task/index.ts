@@ -31,7 +31,7 @@ import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { formatTaskResultSummary } from "./result-summary";
+import { formatTaskResultSummary, isSubagentResumable } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import {
@@ -53,7 +53,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
-import { OBSOLETE_SUBAGENT_CONTROL_MESSAGE } from "./tool-policy";
+import { hasObsoleteSubagentControl, OBSOLETE_SUBAGENT_CONTROL_MESSAGE } from "./tool-policy";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -126,6 +126,8 @@ interface TaskDescriptionOptions {
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
+	/** Plan mode or host-managed execution: children run in place, and `mutable` is rejected. */
+	nonCloneExecution: boolean;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -145,7 +147,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
-		appliesChanges: agent.mutable === true,
+		appliesChanges: !options.nonCloneExecution && agent.mutable === true,
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -161,6 +163,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
+		nonCloneExecution: options.nonCloneExecution,
 	});
 }
 
@@ -172,13 +175,6 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 }
 
 /**
- * Request-control keys removed with the `mutable` contract. Rejected by
- * own-key presence — even `false`/`null`/`undefined` — so stale calls fail
- * loudly instead of silently losing their intent.
- */
-const OBSOLETE_SUBAGENT_CONTROL_KEYS = ["isolated", "apply", "merge", "readOnly", "isolation"] as const;
-
-/**
  * Reject legacy fields and shape/configuration combinations the current tool
  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
  * `schema` remains an eval-only alias and is rejected. Removed isolation
@@ -186,7 +182,7 @@ const OBSOLETE_SUBAGENT_CONTROL_KEYS = ["isolated", "apply", "merge", "readOnly"
  * tool description or preflight work happens.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
-	if (OBSOLETE_SUBAGENT_CONTROL_KEYS.some(key => Object.hasOwn(params, key))) {
+	if (hasObsoleteSubagentControl(params)) {
 		return OBSOLETE_SUBAGENT_CONTROL_MESSAGE;
 	}
 	if (Object.hasOwn(params, "schema")) {
@@ -239,7 +235,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item !== "object" || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			if (OBSOLETE_SUBAGENT_CONTROL_KEYS.some(key => Object.hasOwn(item, key))) {
+			if (hasObsoleteSubagentControl(item)) {
 				return OBSOLETE_SUBAGENT_CONTROL_MESSAGE;
 			}
 			if (Object.hasOwn(item, "mutable") && typeof item.mutable !== "boolean") {
@@ -621,6 +617,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			nonCloneExecution:
+				this.session.getPlanModeState?.()?.enabled === true || this.session.managedSubagentExecution !== undefined,
 		});
 	}
 	private constructor(
@@ -1110,16 +1108,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			aborted: boolean,
 			cloneDisposition: SubagentCloneDisposition | undefined,
 		): Promise<string> => {
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
-			const discarded = cloneDisposition === "discard";
+			const ref = AgentRegistry.global().get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
-				discarded,
+				discarded: cloneDisposition === "discard",
 				mergeRetained: cloneDisposition === "merge",
 				ircEnabled,
-				resumable:
-					!discarded && cloneDisposition === undefined && (ref?.status === "idle" || ref?.status === "parked"),
+				resumable: isSubagentResumable({ aborted, cloneDisposition, status: ref?.status }),
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};

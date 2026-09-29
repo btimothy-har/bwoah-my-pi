@@ -29,6 +29,7 @@ import {
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
@@ -106,17 +107,14 @@ function mockDiscovery(agent: AgentDefinition = AGENT): void {
 }
 
 /**
- * Route an ordinary clone dispatch into a test double: the clone setup is
+ * Route an ordinary clone dispatch into a test double: the clone seam is
  * stubbed and the isolated runner delegates to the executor options directly,
  * so assertions see the same ExecutorOptions a real child run would receive.
  */
 function mockCloneDispatch(
 	impl: (baseOptions: executorModule.ExecutorOptions) => Promise<SingleResult> | SingleResult,
 ): void {
-	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-		repoRoot: "/tmp",
-		baseline: null,
-	} as unknown as isolationRunner.IsolationContext);
+	stubCloneSeam({ repoRoot: "/tmp" });
 	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => impl(baseOptions));
 }
 
@@ -1170,5 +1168,62 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+});
+
+describe("nested clone beneath a discard parent", () => {
+	// Real Git fixture, real isolation runner: only the leaf executor is
+	// doubled. A mutable child spawned inside a discard parent's clone merges
+	// into that clone; the discarded parent never forwards it to the outer
+	// checkout.
+	it("merges a mutable child into the parent's discarded clone without touching the outer checkout", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-discard-"));
+		try {
+			await $`git init -q -b main`.cwd(repoRoot);
+			await $`git config user.email repro@example.com`.cwd(repoRoot);
+			await $`git config user.name Repro`.cwd(repoRoot);
+			await Bun.write(path.join(repoRoot, "parent.txt"), "parent\n");
+			await $`git add parent.txt`.cwd(repoRoot);
+			await $`git commit -q -m seed`.cwd(repoRoot);
+
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [{ ...AGENT, mutable: true }],
+				projectAgentsDir: null,
+			});
+			const childBytes = "child wrote this\n";
+			const runCalls: string[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				const worktree = options.worktree ?? options.cwd;
+				runCalls.push(worktree);
+				if (runCalls.length === 1) {
+					// Parent run, inside the parent's own clone: spawn the mutable
+					// child against the clone as its checkout.
+					const nested = await runStructuredSubagent(
+						request({ session: session({ cwd: worktree }), mutable: true }),
+					);
+					expect(nested.result.exitCode).toBe(0);
+					expect(nested.result.cloneDisposition).toBe("merge");
+					// The child's merge landed in the parent's clone.
+					expect(await Bun.file(path.join(worktree, "child.txt")).text()).toBe(childBytes);
+					return { ...result(), id: options.id ?? "Parent" };
+				}
+				// Child run, inside the child's clone: write exact bytes.
+				await Bun.write(path.join(worktree, "child.txt"), childBytes);
+				return { ...result(), id: options.id ?? "Child" };
+			});
+
+			const settled = await runStructuredSubagent(request({ session: session({ cwd: repoRoot }), mutable: false }));
+
+			expect(settled.result.exitCode).toBe(0);
+			expect(settled.result.cloneDisposition).toBe("discard");
+			expect(runCalls).toHaveLength(2);
+			// The outer checkout is byte-identical: the discarded parent clone
+			// never forwarded the nested merge.
+			expect(await $`git status --porcelain=v1`.cwd(repoRoot).text()).toBe("");
+			expect(await Bun.file(path.join(repoRoot, "parent.txt")).text()).toBe("parent\n");
+			expect(await Bun.file(path.join(repoRoot, "child.txt")).exists()).toBe(false);
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
 	});
 });
