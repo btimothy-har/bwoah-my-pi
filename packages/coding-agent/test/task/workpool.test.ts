@@ -30,8 +30,9 @@ const AGENT: AgentDefinition = {
 };
 
 // The default pool policy is an ordinary discard clone: workers are retained
-// and reused across batches. Merge (readOnly: false) pools override this with
-// `discardChanges: false`, which flips the pool to fresh one-shot workers.
+// and reused across batches. A pool whose agent definition declares
+// `readOnly: false` resolves `discardChanges: false` instead, which flips the
+// pool to fresh one-shot workers so every item is applied.
 const POLICY = {
 	discovery: { agents: [AGENT], projectAgentsDir: null },
 	agentName: "scout",
@@ -48,21 +49,12 @@ const POLICY = {
 	enableIrc: true,
 } satisfies EffectiveSubagentPolicy;
 
-/** Policy for a caller that spawned the pool with readOnly: false. */
+/** Policy for a pool whose agent definition declares readOnly: false. */
 const MERGE_POLICY = {
 	...POLICY,
 	discardChanges: false,
 	cloneDisposition: "merge",
 	applyChanges: true,
-} satisfies EffectiveSubagentPolicy;
-
-/** Plan-mode policy: no clone, no caller disposition to forward. */
-const PLAN_MODE_POLICY = {
-	...POLICY,
-	planMode: true,
-	isIsolated: false,
-	discardChanges: false,
-	cloneDisposition: undefined,
 } satisfies EffectiveSubagentPolicy;
 
 /** Host-managed pool policy: no clone; carries the workflow's own contract. */
@@ -458,25 +450,9 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.status().freshAgents).toBe(true);
 		expect(runSpy).toHaveBeenCalledTimes(2);
 		expect(runSpy.mock.calls.every(([request]) => request.keepAlive === false)).toBe(true);
-		expect(runSpy.mock.calls.every(([request]) => request.readOnly === false)).toBe(true);
 		expect(followSpy).not.toHaveBeenCalled();
 		expect(workpool.batches.map(batch => batch.agentId)).toEqual(["isolated-apply-1", "isolated-apply-2"]);
 		expect(workpool.peek().batches.every(batch => batch.output?.includes("Applied isolated changes."))).toBe(true);
-	});
-
-	it("omits readOnly for plan-mode workers instead of manufacturing an explicit false", async () => {
-		const session = makeSession([], 1);
-		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			return execution(request.identity?.id ?? "missing");
-		});
-		const workpool = new WorkPool(session, { name: "plan-pool", policy: PLAN_MODE_POLICY });
-		workpool.push(["one"]);
-		await finishPool(session, workpool);
-
-		// Plan mode rejects an explicit readOnly: false at dispatch; the pool must
-		// forward nothing rather than derive one from its non-isolated policy.
-		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(Object.hasOwn(runSpy.mock.calls[0]![0], "readOnly")).toBe(false);
 	});
 
 	it("forwards the managed execution contract without a clone disposition", async () => {
@@ -490,7 +466,6 @@ describe("WorkPool dispatch", () => {
 
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		const [request] = runSpy.mock.calls[0]!;
-		expect(Object.hasOwn(request, "readOnly")).toBe(false);
 		expect(request.managedSubagentExecution).toEqual({ spawns: [] });
 	});
 
@@ -503,7 +478,7 @@ describe("WorkPool dispatch", () => {
 			await $`git -c commit.gpgsign=false -c user.name=Probe -c user.email=probe@example.test commit -qm init`
 				.cwd(repo)
 				.quiet();
-			const agent = { ...AGENT, name: "task" };
+			const agent = { ...AGENT, name: "task", readOnly: false };
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 			vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
 				const file = options.assignment?.includes("first") ? "first.txt" : "second.txt";
@@ -520,7 +495,6 @@ describe("WorkPool dispatch", () => {
 				invocationKind: "eval",
 				agent: "task",
 				assignment: "workpool",
-				readOnly: false,
 			});
 			const workpool = new WorkPool(session, { name: "real-isolated", policy });
 			workpool.push(["first", "second"]);
@@ -562,9 +536,8 @@ describe("WorkPool dispatch", () => {
 			workpool.push(["first", "second"]);
 			await finishPool(session, workpool);
 
-			// Discard pools reuse their worker: one spawn (readOnly: true), one follow-up turn.
+			// Discard pools reuse their worker: one spawn, one follow-up turn.
 			expect(isolated).toHaveBeenCalledTimes(1);
-			expect(runSpy.mock.calls[0]?.[0].readOnly).toBe(true);
 			expect(runSpy.mock.calls[0]?.[0].keepAlive).toBe(true);
 			expect(follow).toHaveBeenCalledTimes(1);
 			expect(workpool.peek().batches.map(batch => batch.status)).toEqual(["completed", "completed"]);

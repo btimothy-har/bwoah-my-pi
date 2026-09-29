@@ -54,7 +54,6 @@ describe("eval js agent() handle", () => {
 			agent: "reviewer",
 			label: "Legacy",
 			schema,
-			readOnly: false,
 			schemaMode: "strict",
 			tools: ["read"],
 		});
@@ -64,7 +63,6 @@ describe("eval js agent() handle", () => {
 			agent: "reviewer",
 			label: "Legacy",
 			schema,
-			readOnly: false,
 			schemaMode: "strict",
 			tools: ["read"],
 		});

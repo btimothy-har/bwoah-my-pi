@@ -388,13 +388,6 @@ export class WorkPool {
 							outputSchema,
 							schemaMode: "strict",
 							workPoolYieldItems,
-							// Pin the creation-time disposition: the pool's fresh/reuse/keepAlive
-							// decision was made from this policy, and the launch re-resolves live
-							// settings. Plan-mode workers omit readOnly (plan mode forbids an
-							// explicit false); managed workers carry their own contract.
-							...(this.policy.cloneDisposition !== undefined && !this.policy.planMode
-								? { readOnly: this.policy.cloneDisposition === "discard" }
-								: {}),
 							...(this.policy.managedSubagentExecution !== undefined
 								? { managedSubagentExecution: this.policy.managedSubagentExecution }
 								: {}),

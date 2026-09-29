@@ -512,9 +512,6 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
-		if (item?.readOnly === false) {
-			line += theme.fg("dim", " [merge]");
-		}
 		lines.push(line);
 	}
 	if (cap < tasks.length) {
@@ -579,7 +576,6 @@ function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSe
  * Render the tool call arguments.
  */
 export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: Theme): Component {
-	const showMerge = "readOnly" in args && args.readOnly === false;
 	// Dispatch glyph from the first frame: spawning is non-blocking, so a
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
@@ -617,7 +613,6 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 
 		return {
 			header,
-			headerMeta: showMerge ? "merge" : undefined,
 			sections,
 			phase: "pending",
 			borderColor: "borderMuted",
@@ -1734,11 +1729,6 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
-	/**
-	 * Clone disposition for this spawn: omitted/true = isolated clone, changes
-	 * discarded; false = isolated clone, successful initial changes applied back.
-	 */
-	readOnly?: boolean;
 }
 
 /**
@@ -1766,8 +1756,6 @@ export interface TaskParams {
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
-	/** Clone disposition (flat form; per-item in batch form): omitted/true = discard clone changes, false = apply them. */
-	readOnly?: boolean;
 }
 
 /**

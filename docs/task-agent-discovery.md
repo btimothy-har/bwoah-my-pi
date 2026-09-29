@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readOnly`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -42,6 +42,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
+- `readOnly` is a boolean owning clone disposition: absent/true (the default) discards the isolated clone's changes on release; `readOnly: false` merges the initial assignment's successful changes back to the parent checkout via `task.isolation.merge` (patch or branch) and `task.isolation.commits`. The bundled `task` and `sonic` agents declare `readOnly: false`; every other bundled agent discards.
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
 - `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
@@ -202,7 +203,7 @@ Lookup is exact-name linear search:
 3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
 4. rediscovers agents with `discoverAgents(session.cwd)`, appends user-tagged session agents, and performs exact lookup
 5. checks `task.disabledAgents`
-6. resolves plan-mode restrictions, output schema, model policy, and clone disposition (`readOnly`)
+6. resolves plan-mode restrictions, output schema, model policy, and clone disposition (from the definition's `readOnly` frontmatter)
 
 A missing name fails preflight with `Unknown agent "...". Available: ...`; no subprocess runs.
 
@@ -241,7 +242,7 @@ Runtime output schema precedence is:
 
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
 
-Every ordinary task/eval spawn runs in an isolated clone of the checkout. The caller-selected `readOnly` field resolves the disposition once (`request.readOnly ?? true`): omitted/true skips change capture and discards the clone on release; `false` captures the baseline and applies the initial assignment's successful changes back according to `task.isolation.merge` (patch or branch) and `task.isolation.commits`. There are no `isolated`/`apply`/`merge` spawn arguments and no agent frontmatter `isolation` field. Ordinary spawns require a Git checkout and fail preflight without one; plan mode keeps its strict read-only contract, uses no clone, and rejects `readOnly: false`. Clone policy governs harness apply-back only — it is not a filesystem or network sandbox: absolute paths and external systems remain accessible. Project/user agents of the same name override bundled ones.
+Every ordinary task/eval spawn runs in an isolated clone of the checkout. The agent definition's `readOnly` frontmatter resolves the disposition once (`agent.readOnly ?? true`): absent/true skips change capture and discards the clone on release; `false` (the bundled `task`/`sonic`) captures the baseline and applies the initial assignment's successful changes back according to `task.isolation.merge` (patch or branch) and `task.isolation.commits`. There are no `isolated`/`apply`/`merge`/`readOnly` spawn arguments and no separate agent frontmatter `isolation` field. Ordinary spawns require a Git checkout and fail preflight without one; plan mode keeps its strict read-only contract, uses no clone, and resolves no disposition. Clone policy governs harness apply-back only — it is not a filesystem or network sandbox: absolute paths and external systems remain accessible. Project/user agents of the same name override bundled ones.
 
 Isolated children resolve the parent's `workspace.related` entry as read-only reference material, including shared context files. They do not inherit session-added `/add-dir` roots, which may be writable and would fall outside change capture.
 
@@ -293,4 +294,4 @@ When parent plan mode is enabled, `resolveEffectiveSubagentPolicy()` builds an `
 - clears child spawns
 - clears `prewalk` (read-only exploration must not receive the prewalk plan/implement nudges)
 
-Plan mode also rejects `readOnly: false`. The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.
+Plan mode resolves no clone disposition: the `effectiveAgent` runs directly in the parent checkout with its read-only tool subset, so a definition's `readOnly: false` has no clone to merge from. The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.

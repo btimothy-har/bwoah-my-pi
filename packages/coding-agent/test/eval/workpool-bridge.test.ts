@@ -78,16 +78,13 @@ describe("runEvalWorkpool", () => {
 		);
 	});
 
-	it("rejects obsolete spawn keys and non-boolean readOnly at create", async () => {
+	it("rejects obsolete spawn keys at create", async () => {
 		const session = await makeSession();
-		for (const key of ["isolated", "apply", "merge"]) {
+		for (const key of ["isolated", "apply", "merge", "readOnly"]) {
 			await expect(runEvalWorkpool({ op: "create", agent: "scout", [key]: true }, { session })).rejects.toThrow(
-				`workpool create does not accept "${key}"`,
+				`workpool create does not accept "${key}". Clone disposition is owned by the agent definition (readOnly: false merges back); isolated/apply/merge/readOnly are no longer spawn arguments.`,
 			);
 		}
-		await expect(runEvalWorkpool({ op: "create", agent: "scout", readOnly: "yes" }, { session })).rejects.toThrow(
-			"workpool readOnly must be a boolean",
-		);
 	});
 
 	it("creates unique default names and validates push and peek arguments", async () => {

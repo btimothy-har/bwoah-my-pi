@@ -13,7 +13,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 
 # Task Design
 - **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Exploratory research fits `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
-- **Disposition:** Every spawn runs in an isolated clone and can write scratch files there. Default (`readOnly` omitted/true) discards the clone's changes — the result is the deliverable. Pass `readOnly: false` for work that must land in your checkout.
+- **Disposition:** Every spawn runs in an isolated clone and can write scratch files there. The agent definition's `readOnly` frontmatter decides the clone's disposition: `readOnly: false` (bundled `task`/`sonic`) merges successful changes back into your checkout — the merge mechanism comes from the `task.isolation.merge` setting; every other definition discards the clone — the result is the deliverable.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a scout only when affected files are genuinely unknown.{{/if}}
 - **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
@@ -35,7 +35,6 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
-  - `readOnly`: Omitted/true: agent runs in an isolated clone; its file changes are discarded — result text is the deliverable. Pass `false` to apply successful changes back.
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
@@ -48,7 +47,6 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
-- `readOnly`: Omitted/true: agent runs in an isolated clone; its file changes are discarded — result text is the deliverable. Pass `false` to apply successful changes back.
 {{/if}}
 
 # Communication
@@ -73,7 +71,7 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 Agent spawning is currently disabled.
 {{else}}
 Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
-Every agent shares the same coding toolset (a definition's `tools:` adds extras on top) and may delegate; `readOnly` alone decides whether its edits land.
+Every agent shares the same coding toolset (a definition's `tools:` adds extras on top) and may delegate; its definition's `readOnly` frontmatter decides whether its edits land.
 {{#if hasModelMentions}}
 Agents named `m<N>` are models the user tagged in this conversation (`<model agent="m<N>" name="…"/>` in their message): the general-purpose task agent pinned to that model. Spawn one only when the user's request names it; never substitute it for a specialist on your own.
 {{/if}}

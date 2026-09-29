@@ -173,9 +173,9 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * flag must fail loudly rather than silently default to discard.
  */
 const OBSOLETE_ISOLATION_MESSAGE =
-	"The `isolated` field was removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+	"The `isolated` field was removed: every spawn runs in a clone. Clone disposition is owned by the agent definition — `readOnly: false` frontmatter (task/sonic) merges successful changes back; other agents discard.";
 const OBSOLETE_APPLY_MERGE_MESSAGE =
-	"The `apply`/`merge` fields were removed. Use `readOnly`: omitted or true runs in a clone and discards its changes; false applies successful changes back.";
+	"The `apply`/`merge` fields were removed: every spawn runs in a clone. Clone disposition is owned by the agent definition — `readOnly: false` frontmatter (task/sonic) merges successful changes back; other agents discard.";
 
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
 	if (Object.hasOwn(params, "schema")) {
@@ -187,13 +187,6 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	if (Object.hasOwn(params, "apply") || Object.hasOwn(params, "merge")) {
 		return OBSOLETE_APPLY_MERGE_MESSAGE;
 	}
-	const readOnlyError = validateReadOnly(params.readOnly, "The call");
-	if (readOnlyError) return readOnlyError;
-	// Batch shape has no batch-wide disposition: a schema-bypassing payload with a
-	// top-level readOnly must not silently apply to every item.
-	if (Array.isArray(params.tasks) && params.tasks.length > 0 && Object.hasOwn(params, "readOnly")) {
-		return "Batch calls take `readOnly` per item in `tasks[]`; there is no batch-wide override.";
-	}
 	for (const [index, item] of (params.tasks ?? []).entries()) {
 		if (Object.hasOwn(item, "isolated")) {
 			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_ISOLATION_MESSAGE}`;
@@ -201,8 +194,6 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		if (Object.hasOwn(item, "apply") || Object.hasOwn(item, "merge")) {
 			return `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}: ${OBSOLETE_APPLY_MERGE_MESSAGE}`;
 		}
-		const itemError = validateReadOnly(item.readOnly, `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
-		if (itemError) return itemError;
 	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
@@ -211,12 +202,6 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		}
 	}
 	return undefined;
-}
-
-/** Reject a non-boolean `readOnly` on internal/stale-transcript calls that bypass the wire schema. */
-function validateReadOnly(readOnly: boolean | undefined, label: string): string | undefined {
-	if (readOnly === undefined || typeof readOnly === "boolean") return undefined;
-	return `${label} has an invalid \`readOnly\` value ${JSON.stringify(readOnly)}. Use true (discard clone changes) or false (apply them).`;
 }
 
 /**
@@ -280,9 +265,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 
 /**
  * Normalize a validated call into its spawn list: the `tasks[]` batch when
- * provided, otherwise the single top-level spawn. The flat form's `readOnly`
- * flag is only materialized when the caller sent one — `#runSpawn`
- * distinguishes an absent key from an explicit value.
+ * provided, otherwise the single top-level spawn.
  */
 function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
@@ -293,7 +276,6 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
-	if ("readOnly" in params) item.readOnly = params.readOnly;
 	return [item];
 }
 
@@ -302,10 +284,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * item's identity substituted in. Each spawn's `agent` resolves here —
  * the item's own value, else `defaultAgent` from the session spawn policy.
  * `tasks` never leaks into a spawn; the shared `context` rides along
- * unchanged. Keys are only materialized when present — `#runSpawn`
- * distinguishes an absent `readOnly` from an explicit one. Batch calls may not
- * carry a top-level `readOnly`: validateShapeParams rejects them before this runs,
- * so the fallback only ever serves the flat form.
+ * unchanged. Keys are only materialized when present.
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
@@ -316,11 +295,6 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
-	if (item.readOnly !== undefined) {
-		spawn.readOnly = item.readOnly;
-	} else if ("readOnly" in params) {
-		spawn.readOnly = params.readOnly;
-	}
 	return spawn;
 }
 
@@ -675,7 +649,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...(Object.hasOwn(params, "readOnly") ? { readOnly: params.readOnly } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -1526,7 +1499,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...(Object.hasOwn(params, "readOnly") ? { readOnly: params.readOnly } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

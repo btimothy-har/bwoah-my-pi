@@ -32,7 +32,6 @@ const agentArgsSchema = type({
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
-	"readOnly?": "boolean",
 	"tools?": "string[]",
 	"+": "reject",
 });
@@ -43,7 +42,6 @@ interface EvalAgentArgs {
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
-	readOnly?: boolean;
 	tools?: string[];
 }
 
@@ -184,7 +182,6 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	const customTools = parsed.tools?.length
 		? createEvalCustomTools(options.session, await describeEvalTools(options.session, parsed.tools, options.signal))
 		: undefined;
-	const readOnly = Object.hasOwn(parsed, "readOnly") ? { readOnly: parsed.readOnly } : {};
 
 	try {
 		const policy = await resolveEffectiveSubagentPolicy({
@@ -194,7 +191,6 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
-			...readOnly,
 			...(customTools ? { customTools } : {}),
 		});
 		const manager = options.session.asyncJobManager;
@@ -218,7 +214,6 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 						identity: { id, label: parsed.label },
-						...readOnly,
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
 						keepAlive: true,

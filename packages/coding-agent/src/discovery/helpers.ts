@@ -293,6 +293,8 @@ export interface ParsedAgentFields {
 	spawns?: string[] | "*";
 	model?: string[];
 	output?: unknown;
+	/** Clone disposition: absent/true = discard on release; false = apply the initial assignment's changes back. */
+	readOnly?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
@@ -363,6 +365,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const thinkingLevel = parseConfiguredThinkingLevel(rawThinkingLevel);
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
+	const readOnly = parseBoolean(frontmatter.readOnly);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
 	// prewalk: true → hand off to the default target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
@@ -386,6 +389,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns,
 		model,
 		output,
+		readOnly,
 		thinkingLevel,
 		blocking,
 		autoloadSkills,

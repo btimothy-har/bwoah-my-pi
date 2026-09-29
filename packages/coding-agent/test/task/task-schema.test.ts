@@ -41,22 +41,20 @@ describe("task schema (single-spawn)", () => {
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it("retains caller outputSchema, schemaMode, readOnly, and eval tool names", () => {
+	it("retains caller outputSchema, schemaMode, and eval tool names", () => {
 		const outputSchema = { type: "object", properties: { answer: { type: "string" } } };
 		const parsed = taskSchema({
 			agent: "scout",
-			task: "Map the auth module.",
+			task: "Summarize the report",
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],
-			readOnly: false,
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.outputSchema).toEqual(outputSchema);
 			expect(parsed.schemaMode).toBe("strict");
 			expect(parsed.tools).toEqual(["word_count"]);
-			expect(parsed.readOnly).toBe(false);
 		}
 	});
 

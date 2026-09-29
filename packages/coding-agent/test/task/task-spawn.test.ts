@@ -182,8 +182,8 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		// Default (readOnly omitted) spawns are one-shot discard clones: no
-		// idle agent remains to message, only the transcript.
+		// Definitions without `readOnly: false` (this mock) are one-shot discard
+		// clones: no idle agent remains to message, only the transcript.
 		expect(job!.resultText).toContain("Spawnling ran isolated and cannot be resumed or messaged");
 		expect(job!.resultText).not.toContain("is now idle");
 		expect(job!.resultText).toContain("history://Spawnling");
@@ -240,7 +240,7 @@ describe("task spawn routing", () => {
 	]) {
 		it(label, async () => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-				agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+				agents: [{ ...taskAgent, readOnly: false, model: ["anthropic/claude-sonnet-4"] }],
 				projectAgentsDir: null,
 			});
 			const repoRoot = "/repo-root";
@@ -271,7 +271,6 @@ describe("task spawn routing", () => {
 				agent: "task",
 				name: "Sandboxed",
 				task: "Do the thing.",
-				readOnly: false,
 			} as TaskParams);
 			const job = manager.getJob(result.details?.async?.jobId ?? "");
 			await job!.promise;

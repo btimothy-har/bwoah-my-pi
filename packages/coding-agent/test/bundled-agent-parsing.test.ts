@@ -63,7 +63,7 @@ describe("bundled agent parsing", () => {
 		}
 	});
 
-	it("resolves unpacked agents through the caller's readOnly, never the definition", async () => {
+	it("round-trips the definition-owned readOnly through unpack and resolves disposition from it", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
@@ -78,7 +78,9 @@ describe("bundled agent parsing", () => {
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
 			};
-			for (const name of ["task", "sonic", "conventions-specialist", "devils-advocate"]) {
+			// task/sonic declare readOnly: false; the frontmatter must survive the
+			// unpack/parse round-trip so the project shadow still merges.
+			for (const name of ["task", "sonic"]) {
 				const policy = await resolveEffectiveSubagentPolicy({
 					session,
 					invocationKind: "task",
@@ -86,22 +88,8 @@ describe("bundled agent parsing", () => {
 					agent: name,
 				});
 				expect(policy.agent.source).toBe("project");
-				// Omitted readOnly: every ordinary spawn is a discard clone.
+				expect(policy.agent.readOnly).toBe(false);
 				expect(policy).toMatchObject({
-					isIsolated: true,
-					discardChanges: true,
-					applyChanges: false,
-					cloneDisposition: "discard",
-				});
-
-				const merging = await resolveEffectiveSubagentPolicy({
-					session,
-					invocationKind: "task",
-					assignment: "Do the work",
-					agent: name,
-					readOnly: false,
-				});
-				expect(merging).toMatchObject({
 					isIsolated: true,
 					discardChanges: false,
 					applyChanges: true,
@@ -109,12 +97,22 @@ describe("bundled agent parsing", () => {
 				});
 			}
 
+			// Every other agent omits readOnly: the unpack output carries no
+			// readOnly key and their project shadows discard.
 			for (const name of ["conventions-specialist", "devils-advocate"]) {
 				const policy = await resolveEffectiveSubagentPolicy({
 					session,
 					invocationKind: "task",
 					assignment: "Review the change",
 					agent: name,
+				});
+				expect(policy.agent.source).toBe("project");
+				expect(policy.agent.readOnly).toBeUndefined();
+				expect(policy).toMatchObject({
+					isIsolated: true,
+					discardChanges: true,
+					applyChanges: false,
+					cloneDisposition: "discard",
 				});
 				expect(policy.schema.source).toBe("none");
 			}

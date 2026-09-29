@@ -43,6 +43,18 @@ const reviewerAgent = {
 	model: ["@smol"],
 } satisfies AgentDefinition;
 
+// Clone disposition is definition-owned: only `readOnly: false` frontmatter
+// merges the clone's changes back; every other definition discards.
+const writerAgent = {
+	name: "writer",
+	description: "Writer agent",
+	systemPrompt: "Run the task and edit files.",
+	source: "bundled",
+	spawns: "*",
+	model: ["@task"],
+	readOnly: false,
+} satisfies AgentDefinition;
+
 const jobManagers = new Set<AsyncJobManager>();
 
 function isEvalAgentResult(value: unknown): value is EvalAgentResult {
@@ -121,7 +133,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 	};
 }
 
-function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): void {
+function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent, writerAgent]): void {
 	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 }
 
@@ -343,10 +355,6 @@ describe("runEvalAgent", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
-		await expect(
-			runEvalAgentAndWait({ prompt: "unsafe", readOnly: false }, { session: makeSession({ planMode: true }) }),
-		).rejects.toThrow("readOnly: false is unavailable in plan mode.");
-		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("passes parent execution options and only sets outputSchema when schema is supplied", async () => {
@@ -1138,14 +1146,21 @@ describe("runEvalAgent isolation", () => {
 		return { repoRoot };
 	}
 
-	it("rejects removed isolated/apply/merge spawn arguments before spawning", async () => {
+	it("rejects removed isolated/apply/merge/readOnly spawn arguments before spawning", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const prepSpy = vi.spyOn(isolationRunner, "prepareIsolationContext");
 
 		const session = makeSession();
 
-		for (const removed of [{ isolated: true }, { isolated: false }, { apply: false }, { merge: true }]) {
+		for (const removed of [
+			{ isolated: true },
+			{ isolated: false },
+			{ apply: false },
+			{ merge: true },
+			{ readOnly: true },
+			{ readOnly: false },
+		]) {
 			await expect(runEvalAgentAndWait({ prompt: "do work", ...removed }, { session })).rejects.toThrow(
 				"agent() received invalid arguments",
 			);
@@ -1154,7 +1169,7 @@ describe("runEvalAgent isolation", () => {
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("discards by default and applies initial changes when readOnly is false", async () => {
+	it("discards by default and applies initial changes for a readOnly: false definition", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const isolatedSpy = vi
@@ -1177,15 +1192,16 @@ describe("runEvalAgent isolation", () => {
 		expect(defaultResult.details.cloneDisposition).toBe("discard");
 		expect(mergeSpy).not.toHaveBeenCalled();
 
+		// A definition without `readOnly: false` frontmatter also discards.
 		const explicitDiscard = await runEvalAgentAndWait(
-			{ prompt: "discard", readOnly: true },
+			{ prompt: "discard", agent: "reviewer" },
 			{ session: isolatedSession() },
 		);
 		expect(isolatedSpy).toHaveBeenCalledTimes(2);
 		expect(explicitDiscard.details.cloneDisposition).toBe("discard");
 		expect(mergeSpy).not.toHaveBeenCalled();
 
-		const merged = await runEvalAgentAndWait({ prompt: "merge", readOnly: false }, { session: isolatedSession() });
+		const merged = await runEvalAgentAndWait({ prompt: "merge", agent: "writer" }, { session: isolatedSession() });
 		expect(isolatedSpy).toHaveBeenCalledTimes(3);
 		expect(merged.details.changesApplied).toBe(true);
 		expect(merged.details.cloneDisposition).toBe("merge");
@@ -1226,7 +1242,7 @@ describe("runEvalAgent isolation", () => {
 
 		// The configured merge mode reaches the runner from settings.
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgentAndWait({ prompt: "migration", readOnly: false }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "migration", agent: "writer" }, { session });
 
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
 		const isolatedCall = isolatedSpy.mock.calls[0]?.[0];
@@ -1257,7 +1273,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		await runEvalAgentAndWait(
-			{ prompt: "migration", readOnly: false },
+			{ prompt: "migration", agent: "writer" },
 			{
 				session: isolatedSession(),
 				emitStatus: event => {
@@ -1306,7 +1322,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		await runEvalAgentAndWait(
-			{ prompt: "scout", readOnly: false },
+			{ prompt: "scout", agent: "writer" },
 			{
 				session: isolatedSession(),
 				emitStatus: event => {
@@ -1343,7 +1359,7 @@ describe("runEvalAgent isolation", () => {
 		const result = await runEvalAgentAndWait(
 			{
 				prompt: "structured",
-				readOnly: false,
+				agent: "writer",
 				schema: {
 					type: "object",
 					properties: { status: { type: "string" } },
@@ -1379,7 +1395,7 @@ describe("runEvalAgent isolation", () => {
 			runEvalAgentAndWait(
 				{
 					prompt: "structured",
-					readOnly: false,
+					agent: "writer",
 					schema: {
 						type: "object",
 						properties: { status: { type: "string" } },
@@ -1404,7 +1420,7 @@ describe("runEvalAgent isolation", () => {
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgentAndWait({ prompt: "scout", readOnly: false }, { session })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "scout", agent: "writer" }, { session })).rejects.toThrow(
 			/Merge failed.*garbage at end of loose object.*Captured patch preserved at \/artifacts\//s,
 		);
 		expect(mergeSpy).not.toHaveBeenCalled();
@@ -1427,7 +1443,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgentAndWait({ prompt: "scout", readOnly: false }, { session })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "scout", agent: "writer" }, { session })).rejects.toThrow(
 			/isolated apply failed.*Branch merge failed.*Captured branch preserved as omp\/task\//s,
 		);
 	});
@@ -1452,7 +1468,7 @@ describe("runEvalAgent isolation", () => {
 
 		let caught: Error | undefined;
 		try {
-			await runEvalAgentAndWait({ prompt: "scout", readOnly: false }, { session: isolatedSession() });
+			await runEvalAgentAndWait({ prompt: "scout", agent: "writer" }, { session: isolatedSession() });
 		} catch (err) {
 			caught = err as Error;
 		}
@@ -1491,7 +1507,7 @@ describe("runEvalAgent isolation", () => {
 			runEvalAgentAndWait(
 				{
 					prompt: "structured",
-					readOnly: false,
+					agent: "writer",
 					schema: {
 						type: "object",
 						properties: { status: { type: "string" } },
@@ -1519,7 +1535,7 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		await runEvalAgentAndWait({ prompt: "scout", readOnly: false }, { session: isolatedSession() });
+		await runEvalAgentAndWait({ prompt: "scout", agent: "writer" }, { session: isolatedSession() });
 
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),

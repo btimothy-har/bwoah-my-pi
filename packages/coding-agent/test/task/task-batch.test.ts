@@ -2,7 +2,7 @@
  * Contracts: task.batch gating (batch spawning + shared context).
  *
  * 1. The wire schema is shape-swapped by `task.batch`: `{ context, tasks[] }`
- *    when on (per-spawn fields — including `readOnly`, `outputSchema`, and
+ *    when on (per-spawn fields — including `outputSchema` and
  *    `schemaMode` — live in the items), the flat form exposes those fields
  *    directly. The stale `schema` field is never accepted.
  * 2. Shape validation rejects stale `schema`, `tasks`/`context` while batch
@@ -178,68 +178,51 @@ describe("task.batch schema gating", () => {
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 	});
 
-	it("exposes readOnly as a boolean in the batch item schema and drops obsolete isolation fields", async () => {
+	it("exposes no disposition fields in the batch item schema; the definition owns readOnly", async () => {
 		mockDiscovery();
 
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		const properties = getSchemaProperties(tool);
 		expect(properties.isolated).toBeUndefined();
 		const itemProperties = getBatchItemProperties(tool);
-		const readOnlySchema = itemProperties.readOnly;
-		if (!readOnlySchema || typeof readOnlySchema !== "object" || !("type" in readOnlySchema)) {
-			throw new Error("Expected readOnly to be a boolean schema");
-		}
-		expect(readOnlySchema.type).toBe("boolean");
+		expect(itemProperties.readOnly).toBeUndefined();
 		expect(itemProperties.isolated).toBeUndefined();
 		expect(itemProperties.apply).toBeUndefined();
 		expect(itemProperties.merge).toBeUndefined();
 	});
 
-	it("rejects the removed isolated field with the readOnly migration error", async () => {
+	it("rejects the removed isolated field with the definition-disposition migration error", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
 
 		const flat = await tool.execute("tc-obsolete-flat", { task: "Work.", isolated: true } as unknown as TaskParams);
-		expect(getFirstText(flat)).toContain("The `isolated` field was removed.");
-		expect(getFirstText(flat)).toContain("readOnly");
+		expect(getFirstText(flat)).toContain("The `isolated` field was removed:");
+		expect(getFirstText(flat)).toContain("agent definition");
 
 		const batched = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		const batch = await batched.execute("tc-obsolete-batch", {
 			context: "ctx",
 			tasks: [{ name: "Legacy", task: "Work.", isolated: false }],
 		} as unknown as TaskParams);
-		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `isolated` field was removed.");
+		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `isolated` field was removed:");
 	});
 
-	it("rejects the removed apply/merge fields with the readOnly migration error", async () => {
+	it("rejects the removed apply/merge fields with the definition-disposition migration error", async () => {
 		mockDiscovery();
 		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
 		const flatResult = await flat.execute("tc-obsolete-apply", {
 			task: "Work.",
 			apply: true,
 		} as unknown as TaskParams);
-		expect(getFirstText(flatResult)).toContain("The `apply`/`merge` fields were removed.");
-		expect(getFirstText(flatResult)).toContain("readOnly");
+		expect(getFirstText(flatResult)).toContain("The `apply`/`merge` fields were removed:");
+		expect(getFirstText(flatResult)).toContain("agent definition");
 
 		const batched = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 		const batch = await batched.execute("tc-obsolete-merge", {
 			context: "ctx",
 			tasks: [{ name: "Legacy", task: "Work.", merge: "branch" }],
 		} as unknown as TaskParams);
-		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `apply`/`merge` fields were removed.");
-	});
-
-	it("rejects a batch-wide readOnly override; disposition is per item", async () => {
-		// The batch wire schema carries readOnly only per item; a schema-bypassing
-		// payload must not let a top-level flag silently flip every item to merge.
-		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
-		const result = await tool.execute("tc-batch-readonly", {
-			context: "ctx",
-			tasks: [{ task: "Work." }],
-			readOnly: false,
-		} as unknown as TaskParams);
-		expect(getFirstText(result)).toContain("no batch-wide override");
+		expect(getFirstText(batch)).toContain("Task 1 (`Legacy`): The `apply`/`merge` fields were removed:");
 	});
 
 	it("exposes outputSchema but never the stale schema field", async () => {
@@ -530,8 +513,11 @@ describe("task.batch spawning", () => {
 		expect(reviewerSpawn?.outputSchemaOverridesAgent).toBe(true);
 	});
 
-	it("resolves each spawn's clone disposition from its own readOnly flag", async () => {
-		mockDiscovery();
+	it("resolves each spawn's clone disposition from its agent definition", async () => {
+		// `readOnly: false` on the definition merges; every other agent discards.
+		// The wire carries no disposition field, so mixed batches mix
+		// dispositions purely by agent choice.
+		mockDiscovery([taskAgent, { ...taskAgent, name: "writer", readOnly: false }]);
 		const dispositions: Record<string, "discard" | "merge" | undefined> = {};
 		mockIsolatedDispatch(options => {
 			dispositions[options.id ?? "?"] = options.cloneDisposition;
@@ -552,23 +538,22 @@ describe("task.batch spawning", () => {
 			context: "Shared context.",
 			tasks: [
 				{ name: "Defaulted", task: "Do A." },
-				{ name: "Discarded", task: "Do B.", readOnly: true },
-				{ name: "Merged", task: "Do C.", readOnly: false },
+				{ name: "AlsoDefault", agent: "task", task: "Do B." },
+				{ name: "Merged", agent: "writer", task: "Do C." },
 			],
 		} as TaskParams);
 		expect(getFirstText(result)).toContain("Spawned 3 background agents");
-		await Promise.all(["Defaulted", "Discarded", "Merged"].map(id => manager.getJob(id)!.promise));
+		await Promise.all(["Defaulted", "AlsoDefault", "Merged"].map(id => manager.getJob(id)!.promise));
 
 		expect(dispositions["Defaulted"]).toBe("discard");
-		expect(dispositions["Discarded"]).toBe("discard");
+		expect(dispositions["AlsoDefault"]).toBe("discard");
 		expect(dispositions["Merged"]).toBe("merge");
 
-		// The flat form's top-level flag materializes the same way.
+		// The flat form resolves identically from the definition.
 		const flat = await tool.execute("tc-flat-disposition", {
-			agent: "task",
+			agent: "writer",
 			name: "FlatMerge",
 			task: "Do D.",
-			readOnly: false,
 		} as TaskParams);
 		await manager.getJob(flat.details!.async!.jobId!)!.promise;
 		expect(dispositions["FlatMerge"]).toBe("merge");

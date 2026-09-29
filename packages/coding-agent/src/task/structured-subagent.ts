@@ -95,12 +95,6 @@ export interface StructuredSubagentRequest {
 	detached?: boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
-	/**
-	 * Clone disposition for ordinary spawns: omitted/true = isolated clone,
-	 * changes discarded; false = isolated clone, successful initial changes
-	 * applied back. Definitions never select this. Rejected in plan mode.
-	 */
-	readOnly?: boolean;
 	/** Host-managed execution contract for product-owned workflows; never parsed from task/eval arguments. */
 	managedSubagentExecution?: ManagedSubagentExecution;
 	/** The parent agent name forbidden from recursively spawning itself. */
@@ -232,9 +226,6 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	if (request.customTools?.length) {
 		throw new StructuredSubagentError("preflight", "Eval-defined tools are unavailable in plan mode.");
 	}
-	if (request.readOnly === false) {
-		throw new StructuredSubagentError("preflight", "readOnly: false is unavailable in plan mode.");
-	}
 }
 
 function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
@@ -354,7 +345,10 @@ export async function resolveEffectiveSubagentPolicy(
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	let cloneDisposition: SubagentCloneDisposition | undefined;
 	if (!planMode && managed === undefined) {
-		const readOnly = request.readOnly ?? true;
+		// The definition owns the disposition: absent/true discards the clone's
+		// changes on release; only an explicit frontmatter `readOnly: false`
+		// (task/sonic) merges the initial assignment's changes back.
+		const readOnly = agent.readOnly ?? true;
 		const probe = await probeIsolationRepoRoot(request.session.cwd);
 		if (!("repoRoot" in probe)) {
 			throw new StructuredSubagentError(

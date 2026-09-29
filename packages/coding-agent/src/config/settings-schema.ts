@@ -4985,7 +4985,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Isolate Subagents (inert)",
 			description:
-				"No longer applied: ordinary subagents always run in an isolated clone. Kept so existing configs remain valid; control apply-back per spawn with `readOnly`.",
+				"No longer applied: ordinary subagents always run in an isolated clone. Kept so existing configs remain valid; apply-back follows the agent definition's `readOnly` frontmatter (task/sonic merge back).",
 		},
 	},
 
@@ -5056,7 +5056,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Apply Isolated Changes (inert)",
 			description:
-				"No longer applied: readOnly: false always applies successful changes back. Kept so existing configs remain valid; retention-on-failure recovery artifacts are unaffected.",
+				"No longer applied: definitions with `readOnly: false` frontmatter (task/sonic) always apply successful changes back. Kept so existing configs remain valid; retention-on-failure recovery artifacts are unaffected.",
 		},
 	},
 
@@ -5069,7 +5069,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Isolation Merge Strategy",
 			description:
-				"How isolated task changes are integrated when spawned with readOnly: false (patch apply or branch merge)",
+				"How isolated task changes are integrated for agents whose definition declares readOnly: false (patch apply or branch merge)",
 			options: [
 				{ value: "patch", label: "Patch", description: "Combine diffs and git apply" },
 				{ value: "branch", label: "Branch", description: "Commit per task, merge with --no-ff" },

@@ -65,7 +65,6 @@ describe("task renderer: streaming call preview", () => {
 	it("always renders the full task markdown, collapsed or expanded", () => {
 		const taskLines = Array.from({ length: 6 }, (_, i) => `Step ${i + 1}: do the thing.`);
 		const args: TaskParams = {
-			agent: "task",
 			name: "Worker",
 			task: taskLines.join("\n"),
 		};
@@ -79,22 +78,6 @@ describe("task renderer: streaming call preview", () => {
 		const expanded = render(args, true);
 		expect(expanded).toContain("Step 1");
 		expect(expanded).toContain("Step 6");
-	});
-
-	it("surfaces the merge opt-in in the header bar", () => {
-		const args: TaskParams = {
-			agent: "task",
-			readOnly: false,
-			name: "Only",
-			task: "...",
-		};
-		const out = render(args);
-		const lines = out.split("\n");
-
-		expect(out).toContain("Only");
-		// The merge opt-in is surfaced as header meta in the frame's top bar
-		// (first line), not as a trailing child row under the task list.
-		expect(lines[0]).toContain("merge");
 	});
 
 	// The batch schema streams `context` before `tasks`, and `renderResult`

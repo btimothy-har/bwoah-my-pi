@@ -52,7 +52,6 @@ const taskItemFields = {
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"readOnly?": "boolean",
 	"+": "reject",
 } as const;
 
@@ -99,7 +98,6 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
-		"readOnly?": "boolean",
 		"+": "reject",
 	});
 	if (options.batchEnabled) {
@@ -165,6 +163,12 @@ export interface AgentDefinition {
 	/** Additive built-in extras on top of the common subagent toolset. */
 	tools?: string[];
 	spawns?: string[] | "*";
+	/**
+	 * Clone disposition: absent/true = isolated clone, changes discarded on
+	 * release; false = isolated clone, the initial assignment's successful
+	 * changes apply back. Owned by the definition, never the spawn caller.
+	 */
+	readOnly?: boolean;
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;

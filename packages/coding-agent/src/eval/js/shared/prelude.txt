@@ -433,8 +433,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		judgeBatchFrom(await globalThis.__omp_call_tool__("__judge_batch__", { op: "attach", id: String(id) }));
 
 	// Spawn helpers accept ONLY a trailing options object: the removed
-	// isolated/apply/merge positional slots must fail loudly rather than be
-	// silently reinterpreted as readOnly.
+	// isolated/apply/merge/readOnly positional slots must fail loudly.
 	const spawnOptionsArg = (name, value, rest, example) => {
 		if (isNil(value) && rest.every(isNil)) return {};
 		if (isPlainObject(value)) {
@@ -452,7 +451,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const agent = (prompt, opts, ...rest) => {
 		const promise = (async () => {
-			const options = spawnOptionsArg("agent", opts, rest, "{ agent, label, schema, schemaMode, readOnly, tools }");
+			const options = spawnOptionsArg("agent", opts, rest, "{ agent, label, schema, schemaMode, tools }");
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
 			return new AgentHandle(result.id, result.agent, options.schema);
@@ -510,7 +509,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			opts = agentName;
 			agentName = undefined;
 		}
-		const options = spawnOptionsArg("workpool", opts, rest, "{ name, context, readOnly, tools }");
+		const options = spawnOptionsArg("workpool", opts, rest, "{ name, context, tools }");
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",
 			...(agentName === undefined ? {} : { agent: agentName }),

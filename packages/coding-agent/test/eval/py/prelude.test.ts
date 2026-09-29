@@ -36,23 +36,29 @@ async function runPrelude(
 }
 
 describe("python prelude", () => {
-	it("rejects a non-boolean read_only for agent() and workpool()", async () => {
+	it("rejects the removed read_only kwarg for agent() and workpool()", async () => {
 		const result = await runPrelude(
 			[
-				"for call in (lambda: agent('x', read_only='yes'), lambda: workpool(read_only=1)):",
+				"for call in (lambda: agent('x', read_only=True), lambda: workpool(read_only=True)):",
 				"    try:",
 				"        call()",
 				"    except TypeError as error:",
 				"        print(str(error))",
+				"    else:",
+				"        print('accepted read_only')",
 			].join("\n"),
 			{},
 		);
 
 		expect(result.exitCode).toBe(0);
-		expect(result.stdout.trim().split("\n")).toEqual([
-			"agent() read_only must be a bool",
-			"workpool() read_only must be a bool",
-		]);
+		// The kwarg is gone entirely: clone disposition is owned by the agent
+		// definition, so passing it raises an unexpected-keyword TypeError.
+		const lines = result.stdout.trim().split("\n");
+		expect(lines).toHaveLength(2);
+		for (const line of lines) {
+			expect(line).toContain("unexpected keyword argument");
+			expect(line).toContain("read_only");
+		}
 	});
 
 	it("infers eval tool schemas and replaces definitions by name", async () => {

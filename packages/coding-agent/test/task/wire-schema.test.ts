@@ -7,10 +7,10 @@ import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-// Contract: the task tool's wire shape is flat `{ name?, agent?, task, readOnly? }`
+// Contract: the task tool's wire shape is flat `{ name?, agent?, task }`
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
-// `description`) are rejected by the schema's `+: "reject"`.
+// `description`, `readOnly`) are rejected by the schema's `+: "reject"`.
 
 describe("oneLineLabel", () => {
 	it("returns short text unchanged", () => {
@@ -92,19 +92,13 @@ describe("task wire schema", () => {
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it("accepts per-item readOnly in the batch shape", () => {
+	it("rejects readOnly as an obsolete disposition key in both shapes", () => {
+		// Clone disposition moved to the agent definition's frontmatter; the wire
+		// field never shipped, so stale payloads must fail loudly, not strip.
+		expect(taskSchema({ task: "x", readOnly: false }) instanceof type.errors).toBe(true);
 		const batch = getTaskSchema({ batchEnabled: true });
-		const items = parsedItems(
-			batch({
-				context: "ctx",
-				tasks: [
-					{ task: "x", readOnly: true },
-					{ task: "y", readOnly: false },
-				],
-			}),
-		);
-		expect(items[0]?.readOnly).toBe(true);
-		expect(items[1]?.readOnly).toBe(false);
+		const parsed = batch({ context: "ctx", tasks: [{ task: "x", readOnly: true }] });
+		expect(parsed instanceof type.errors).toBe(true);
 	});
 });
 

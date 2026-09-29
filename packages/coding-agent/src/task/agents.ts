@@ -29,6 +29,8 @@ interface AgentFrontmatter {
 	name: string;
 	description: string;
 	spawns?: string;
+	/** Clone disposition; only `false` (merge back) is rendered. */
+	readOnly?: boolean;
 	model?: string | string[];
 	thinkingLevel?: string;
 	blocking?: boolean;
@@ -45,7 +47,12 @@ interface EmbeddedAgentDef {
 function buildAgentContent(def: EmbeddedAgentDef): string {
 	const body = prompt.render(def.template);
 	if (!def.frontmatter) return body;
-	return prompt.render(agentFrontmatterTemplate, { ...def.frontmatter, body });
+	return prompt.render(agentFrontmatterTemplate, {
+		...def.frontmatter,
+		// `false` is falsy in Handlebars conditionals; the flag renders it.
+		mergesChanges: def.frontmatter.readOnly === false,
+		body,
+	});
 }
 
 const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
@@ -57,8 +64,9 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		frontmatter: {
 			name: "task",
 			description:
-				"General-purpose subagent for delegated multi-step work; runs in a clone, discarding changes by default and applying them when spawned with readOnly: false",
+				"General-purpose subagent for delegated multi-step work; runs in a clone and applies the initial assignment's successful changes back",
 			spawns: "*",
+			readOnly: false,
 			model: "@task",
 			thinkingLevel: AUTO_THINKING,
 			// No `prewalk` frontmatter: the generic task hand-off (strong model
@@ -73,8 +81,9 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		frontmatter: {
 			name: "sonic",
 			description:
-				"Fast general-purpose subagent for narrowly scoped delegated work; runs in a clone, discarding changes by default and applying them when spawned with readOnly: false",
+				"Fast general-purpose subagent for narrowly scoped delegated work; runs in a clone and applies the initial assignment's successful changes back",
 			spawns: "*",
+			readOnly: false,
 			model: "@smol",
 			thinkingLevel: Effort.Medium,
 		},
