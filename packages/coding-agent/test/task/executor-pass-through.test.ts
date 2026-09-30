@@ -203,7 +203,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("does not inject hub into read-only subagents", async () => {
+	it("gates hub and task injection on the agent's declared contract", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -237,7 +237,18 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
 		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
-		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
+		// Bundled specialists delegate (`spawns: "*"`), so they are no longer
+		// read-only-classified: task + hub auto-join their declared extras.
+		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual([
+			"read",
+			"find",
+			"grep",
+			"glob",
+			"ast_grep",
+			"yield",
+			"task",
+			"hub",
+		]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -248,10 +259,10 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
 		const specialistPrompt = promptText(3);
-		expect(specialistPrompt.includes("# Peers")).toBe(false);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
 		expect(writablePrompt.includes("# Peers")).toBe(true);
 		expect(spawningPrompt.includes("# Peers")).toBe(true);
+		expect(specialistPrompt.includes("# Peers")).toBe(true);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -368,17 +379,25 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "write", "yield"] }));
 	});
 
-	it("retains inherited MCP proxy tools for normal children", async () => {
+	it("retains MCP proxy tools when a child explicitly opts in", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
 
-		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
+		// Default: no ambient inheritance — passing a manager alone is not a grant.
+		const ambientResult = await runSubprocess({ ...baseOptions, id: "ambient-child", mcpManager });
+		expect(ambientResult.exitCode).toBe(0);
+		const ambient = spy.mock.calls[0]?.[0];
+		expect(ambient?.enableMCP).toBe(false);
+		expect(ambient?.customTools).toBeUndefined();
+
+		// Explicit opt-in retains the proxies for the child session.
+		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager, enableMCP: true });
 
 		expect(result.exitCode).toBe(0);
-		const forwarded = spy.mock.calls[0]?.[0];
+		const forwarded = spy.mock.calls[1]?.[0];
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
