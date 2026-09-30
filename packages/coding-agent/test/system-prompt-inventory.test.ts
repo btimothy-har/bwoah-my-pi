@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt as buildSdkSystemPrompt } from "@oh-my-pi/pi-coding-agent/sdk";
-import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	buildSystemPrompt,
 	buildSystemPromptToolMetadata,

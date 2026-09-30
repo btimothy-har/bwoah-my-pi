@@ -2137,8 +2137,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			)
 		: [...MEMORY_BACKEND_TOOL_NAMES];
 	const memoryToolsEnabled = !restrictToolNames || requestedMemoryNames.length > 0;
-	// Explicit IRC opt-in is independent of the tool-list restriction:
-	// restricted sessions admit hub only on an explicit IRC opt-in.
+	// Peer messaging follows the tool-list restriction: restricted sessions
+	// default to IRC off unless explicitly enabled.
 	const enableIrc = options.enableIrc ?? !restrictToolNames;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;

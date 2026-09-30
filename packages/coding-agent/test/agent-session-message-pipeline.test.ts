@@ -2428,7 +2428,9 @@ describe("AgentSession message pipeline", () => {
 				}
 				return undefined;
 			};
-			const developerTexts = contexts[1]?.messages.filter(message => message.role === "developer").map(developerText);
+			const developerTexts = contexts[1]?.messages
+				.filter(message => message.role === "developer")
+				.map(developerText);
 			expect(developerTexts?.some(text => text?.includes(expectedText))).toBe(true);
 			const persistedTexts = session.agent.state.messages
 				.filter(message => message.role === "developer")
@@ -2551,8 +2553,14 @@ describe("AgentSession message pipeline", () => {
 				}
 				return undefined;
 			};
-			const developerTexts = contexts[1]?.messages.filter(message => message.role === "developer").map(developerText);
-			expect(developerTexts?.some(text => text?.includes("Use the delegated tool output before running another command."))).toBe(true);
+			const developerTexts = contexts[1]?.messages
+				.filter(message => message.role === "developer")
+				.map(developerText);
+			expect(
+				developerTexts?.some(text =>
+					text?.includes("Use the delegated tool output before running another command."),
+				),
+			).toBe(true);
 			// The native bash actually ran the wrapper's command, not the model's.
 			expect(delegatedText).toContain("from-wrapper");
 			expect(delegatedText).not.toContain("from-model");

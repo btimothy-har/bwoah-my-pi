@@ -646,7 +646,11 @@ describe("collision handling", () => {
 				cwd: project,
 				customDirectories: [second],
 			});
-			expect(authoredSkills(skills).map(skill => skill.name).sort()).toEqual(["calendar", "claude/calendar"]);
+			expect(
+				authoredSkills(skills)
+					.map(skill => skill.name)
+					.sort(),
+			).toEqual(["calendar", "claude/calendar"]);
 			expect(skills.find(skill => skill.name === "calendar")?.filePath).toBe(
 				path.join(second, "calendar", "SKILL.md"),
 			);
@@ -746,7 +750,11 @@ describe("collision handling", () => {
 			await fs.mkdir(path.join(selfNamed, "calendar"), { recursive: true });
 			await fs.copyFile(path.join(second, "calendar", "SKILL.md"), path.join(selfNamed, "calendar", "SKILL.md"));
 			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [first, selfNamed] });
-			expect(authoredSkills(skills).map(skill => skill.name).sort()).toEqual(["calendar", "calendar/calendar"]);
+			expect(
+				authoredSkills(skills)
+					.map(skill => skill.name)
+					.sort(),
+			).toEqual(["calendar", "calendar/calendar"]);
 			const handler = new SkillProtocolHandler();
 			const bareSkill = await handler.resolve(parseInternalUrl("skill://calendar")!, { skills });
 			expect(bareSkill.content).toContain("Calendar (First)");
@@ -763,11 +771,11 @@ describe("collision handling", () => {
 			...DISABLE_ALL_BUILTIN_SKILLS,
 			customDirectories: [first, second, nested],
 		});
-		expect(authoredSkills(skills).map(skill => skill.name).sort()).toEqual([
-			"calendar",
-			"second/calendar",
-			"second/calendar~2",
-		]);
+		expect(
+			authoredSkills(skills)
+				.map(skill => skill.name)
+				.sort(),
+		).toEqual(["calendar", "second/calendar", "second/calendar~2"]);
 		expect(skills.find(skill => skill.name === "calendar")?.filePath).toBe(path.join(first, "calendar", "SKILL.md"));
 		expect(skills.find(skill => skill.name === "second/calendar~2")?.filePath).toBe(
 			path.join(nested, "calendar", "SKILL.md"),
@@ -788,13 +796,11 @@ describe("collision handling", () => {
 			...DISABLE_ALL_BUILTIN_SKILLS,
 			customDirectories: [tildeMain, tildeSecond, tildeThird],
 		});
-		expect(authoredSkills(skills).map(skill => skill.name).sort()).toEqual([
-			"foo",
-			"foo~2",
-			"tilde-second/foo",
-			"tilde-second/foo~2",
-			"tilde-third/foo",
-		]);
+		expect(
+			authoredSkills(skills)
+				.map(skill => skill.name)
+				.sort(),
+		).toEqual(["foo", "foo~2", "tilde-second/foo", "tilde-second/foo~2", "tilde-third/foo"]);
 		expect(skills.find(skill => skill.name === "foo")?.filePath).toBe(path.join(tildeMain, "foo", "SKILL.md"));
 		expect(skills.find(skill => skill.name === "foo~2")?.filePath).toBe(path.join(tildeMain, "foo-raw", "SKILL.md"));
 		expect(skills.find(skill => skill.name === "tilde-second/foo~2")?.filePath).toBe(
@@ -812,7 +818,11 @@ describe("collision handling", () => {
 			...DISABLE_ALL_BUILTIN_SKILLS,
 			customDirectories: [squatter, first, second],
 		});
-		expect(authoredSkills(skills).map(skill => skill.name).sort()).toEqual(["calendar", "second/calendar"]);
+		expect(
+			authoredSkills(skills)
+				.map(skill => skill.name)
+				.sort(),
+		).toEqual(["calendar", "second/calendar"]);
 		expect(skills.find(skill => skill.name === "second/calendar")?.filePath).toBe(
 			path.join(second, "calendar", "SKILL.md"),
 		);
