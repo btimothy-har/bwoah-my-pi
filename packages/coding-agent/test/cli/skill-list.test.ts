@@ -55,9 +55,10 @@ describe("runSkillsCommand", () => {
 			// custom-directory listing is exactly the two fixture skills. The
 			// fork additionally ships bundled builtin skills (omp-builtin:user);
 			// they are outside this listing contract, so scope the pin.
-			expect(
-				result.skills.filter(skill => skill.source === "custom:user").map(skill => skill.name),
-			).toEqual(["calendar", "reviewer"]);
+			expect(result.skills.filter(skill => skill.source === "custom:user").map(skill => skill.name)).toEqual([
+				"calendar",
+				"reviewer",
+			]);
 			const reviewer = result.skills.find(skill => skill.name === "reviewer");
 			expect(reviewer?.description).toBe("Review code.");
 			expect(reviewer?.filePath).toBe(path.join(skillsRoot, "second", "reviewer", "SKILL.md"));
