@@ -696,21 +696,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
-		return new SpawnRun(
-			this.#permit,
-			run =>
-				this.#runSpawn(
-					spawn.toolCallId,
-					spawn.params,
-					run.signal,
-					run.onUpdate,
-					spawn.agentId,
-					spawn.index,
-					spawn.detached,
-					run.timing,
-					spawn.detached ? run.onArtifactsRetained : undefined,
-				),
-			{ agentId: spawn.agentId, detached: spawn.detached },
+		return new SpawnRun(this.#permit, run =>
+			this.#runSpawn(
+				spawn.toolCallId,
+				spawn.params,
+				run.signal,
+				run.onUpdate,
+				spawn.agentId,
+				spawn.index,
+				spawn.detached,
+				run.timing,
+				spawn.detached ? run.onArtifactsRetained : undefined,
+			),
 		);
 	}
 

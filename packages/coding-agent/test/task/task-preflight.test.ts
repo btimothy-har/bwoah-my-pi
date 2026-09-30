@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -144,6 +145,16 @@ describe("task async preflight", () => {
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("AlsoInvalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it("declares no speculation stream policy, so no child can launch before whole-call admission", async () => {
+		// The agent loop opens speculative stream sessions only for tools with a
+		// `speculation.stream` policy. Reintroducing one (upstream's deleted
+		// TaskLaunchSession launched each item as its JSON object closed) would
+		// silently break whole-batch admission: abort cannot undo an apply-back.
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ manager: manager(), settings: { "task.batch": true } }));
+		expect((tool as AgentTool).speculation).toBeUndefined();
 	});
 
 	it("rejects an invalid synchronous batch before running any item", async () => {

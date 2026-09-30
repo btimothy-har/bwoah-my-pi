@@ -31,12 +31,6 @@ export interface SpawnRunBody {
 	onArtifactsRetained: (cleanup: () => Promise<void>) => void;
 }
 
-/** Launch-time identity an adopter checks: the pre-claimed agent id and whether the run is job-detached. */
-export interface SpawnIdentity {
-	agentId?: string;
-	detached: boolean;
-}
-
 /** Owner bindings applied when a run is adopted. */
 export interface SpawnRunOwner {
 	signal?: AbortSignal;
@@ -50,18 +44,13 @@ export class SpawnRun {
 	#lastUpdate: AgentToolResult<TaskToolDetails> | undefined;
 	#onArtifactsRetained: ((cleanup: () => Promise<void>) => void) | undefined;
 	#retainedCleanup: (() => Promise<void>) | undefined;
-	#discarded = false;
 	/** Resolves once the permit is held; rejects with the acquire error when aborted first. */
 	readonly started: Promise<SpawnLaunchTiming>;
 	/** The run's payload; rejects only when `started` does. */
 	readonly result: Promise<AgentToolResult<TaskToolDetails>>;
 
 	/** Acquire a permit, then run `body` and release the permit when it settles. */
-	constructor(
-		permit: SpawnPermit,
-		body: (run: SpawnRunBody) => Promise<AgentToolResult<TaskToolDetails>>,
-		readonly identity: SpawnIdentity,
-	) {
+	constructor(permit: SpawnPermit, body: (run: SpawnRunBody) => Promise<AgentToolResult<TaskToolDetails>>) {
 		const invokedAt = Date.now();
 		this.started = permit.acquire(this.#controller.signal).then(() => ({ invokedAt, acquiredAt: Date.now() }));
 		this.result = this.started.then(async timing => {
@@ -75,7 +64,6 @@ export class SpawnRun {
 					},
 					onArtifactsRetained: cleanup => {
 						if (this.#onArtifactsRetained) this.#onArtifactsRetained(cleanup);
-						else if (this.#discarded) void cleanup();
 						else this.#retainedCleanup = cleanup;
 					},
 				});
@@ -83,7 +71,7 @@ export class SpawnRun {
 				permit.release();
 			}
 		});
-		// Owners await these only after adoption; a discarded run is never awaited.
+		// Owners await these only after adoption.
 		void this.result.catch(() => undefined);
 	}
 
@@ -101,14 +89,5 @@ export class SpawnRun {
 			if (owner.onArtifactsRetained) owner.onArtifactsRetained(retained);
 			else void retained();
 		}
-	}
-
-	/** Abort an unadopted run and drop anything it retained; nothing ever consumes its result. */
-	discard(reason: string): void {
-		this.#discarded = true;
-		this.#controller.abort(new Error(reason));
-		const retained = this.#retainedCleanup;
-		this.#retainedCleanup = undefined;
-		if (retained) void retained();
 	}
 }
