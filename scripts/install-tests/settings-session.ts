@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { $ } from "bun";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -48,6 +49,14 @@ const server = Bun.serve({
 
 try {
 	await Promise.all([cwd, agentDir, path.join(work, "home")].map(dir => fs.mkdir(dir, { recursive: true })));
+	// Ordinary subagent spawns always run in an isolated clone; preflight probes
+	// the session cwd for a Git checkout, so the fixture project must be one.
+	await $`git init -q -b main`.cwd(cwd).quiet();
+	await Bun.write(path.join(cwd, "seed.txt"), "seed\n");
+	await $`git add seed.txt`.cwd(cwd).quiet();
+	await $`git -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm init`
+		.cwd(cwd)
+		.quiet();
 	for (const name of ["a", "b"]) {
 		const agents = path.join(work, `extension-${name}`, "agents");
 		await Bun.write(
@@ -95,7 +104,7 @@ export default function (api) {
 						cwd: fixture.cwd, agentDir: fixture.agentDir,
 						overrides: {
 							"async.enabled": false, "task.batch": false,
-							"task.isolation.enabled": false, "task.enableLsp": false,
+							"task.enableLsp": false,
 							"modelRoles": { default: "fixture/fallback", tiny: "fixture/fallback" },
 						},
 					});
