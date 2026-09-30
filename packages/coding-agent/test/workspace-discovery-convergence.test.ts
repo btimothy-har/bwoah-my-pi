@@ -187,7 +187,7 @@ describe("workspace discovery convergence: TUI task roster", () => {
 			contextWindow: 4096,
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 
 		const { session } = await createAgentSession({
@@ -455,7 +455,7 @@ describe("workspace discovery convergence: TUI MCP publication", () => {
 			contextWindow: 4096,
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 
 		// The stdio transport spawns children at the process project dir; pin it
@@ -759,7 +759,7 @@ describe("workspace discovery convergence: ACP real sessions", () => {
 			contextWindow: 4096,
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 		await Settings.init({ inMemory: true, cwd: cwdA });
 

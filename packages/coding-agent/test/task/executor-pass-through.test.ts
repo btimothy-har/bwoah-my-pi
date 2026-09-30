@@ -18,6 +18,7 @@ import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -235,10 +236,12 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spawningResult.exitCode).toBe(0);
 		expect(specialistResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
-		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
+		// wait joins only when the child can start work (task/bash); a bare
+		// read/write child has nothing to block on.
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
 		// Bundled specialists delegate (`spawns: "*"`), so they are no longer
-		// read-only-classified: task + hub auto-join their declared extras.
+		// read-only-classified: task + wait auto-join their declared extras.
 		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual([
 			"read",
 			"find",
@@ -247,9 +250,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			"ast_grep",
 			"yield",
 			"task",
-			"hub",
+			"wait",
 		]);
-
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
 			const resolved = typeof prompt === "function" ? prompt(["default"]) : prompt;
@@ -260,9 +262,11 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const spawningPrompt = promptText(2);
 		const specialistPrompt = promptText(3);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
+		// Outbound peer coordination requires write: a spawning child without
+		// write cannot message peers, so no # Peers section.
 		expect(writablePrompt.includes("# Peers")).toBe(true);
-		expect(spawningPrompt.includes("# Peers")).toBe(true);
-		expect(specialistPrompt.includes("# Peers")).toBe(true);
+		expect(spawningPrompt.includes("# Peers")).toBe(false);
+		expect(specialistPrompt.includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -610,9 +614,9 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		const sessionOptions = spy.mock.calls[0]?.[0];
 		expect(sessionOptions?.resolveServiceTierByFamily).toBeUndefined();
 		expect([
-			sessionOptions?.settings?.get("tier.openai"),
-			sessionOptions?.settings?.get("tier.anthropic"),
-			sessionOptions?.settings?.get("tier.google"),
+			sessionOptions?.settings ? cfgTierOpenai.get(sessionOptions.settings) : undefined,
+			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions.settings) : undefined,
+			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions.settings) : undefined,
 		]).toEqual(["flex", "none", "flex"]);
 	});
 

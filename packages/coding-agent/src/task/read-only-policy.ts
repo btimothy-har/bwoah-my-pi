@@ -2,9 +2,9 @@ import type { AgentDefinition } from "./types";
 
 // Only tools safe without ambient session setup may trigger a restricted child.
 // Memory-backed readers need backend state that restricted sessions do not initialize.
-// `hub` is deliberately absent: it declares `approval = hubApproval`, a
-// parameter-dependent function that returns "exec" for start/stop/restart,
-// process-stdin `send`, unrecognized ops and malformed params. Do not re-add it.
+// `wait` is deliberately absent: blocking on jobs/peers is not needed by a
+// read-only child, and admitting it would widen restricted sessions. Do not
+// re-classify memory mutators (retain/reflect/memory_edit) as read-only.
 export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"grep",

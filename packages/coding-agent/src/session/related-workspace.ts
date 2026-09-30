@@ -23,7 +23,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { loadCapability } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
-import type { RelatedWorkspaceEntry } from "../config/settings-schema";
+import type { RelatedWorkspaceEntry } from "./context-settings";
 import { expandAtImports } from "../discovery/at-imports";
 import { normalizePromptPath } from "../utils/prompt-path";
 import { normalizeWorkspaceDirectory } from "./session-workspace";

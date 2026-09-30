@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { RelatedWorkspaceEntry } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import type { RelatedWorkspaceEntry } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 // Registers all discovery providers with the capability registry;
 // listRelatedContextFiles resolves context files through the "context-files" capability.
 import "@oh-my-pi/pi-coding-agent/discovery";

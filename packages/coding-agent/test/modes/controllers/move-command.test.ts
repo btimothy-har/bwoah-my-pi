@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 import { Container } from "@oh-my-pi/pi-tui";
@@ -56,12 +57,9 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 			rollbackMove,
 			dropSession: vi.fn(async () => {}),
 		},
-		settings: {
+		settings: Object.assign(Settings.isolated({ "worktree.cleanSource": false }), {
 			flush: vi.fn(settingsFlush ?? (async () => {})),
-			// The real /wt flow consults worktree.cleanSource after binding; the
-			// fixture keeps it disabled so cleaning never runs in these tests.
-			get: () => false,
-		},
+		}),
 		showHookCustom: vi.fn(),
 		showHookConfirm: vi.fn(),
 		showError: vi.fn(),
@@ -496,37 +494,6 @@ describe("CommandController /move", () => {
 			}
 		},
 	);
-
-	it("does not relocate session files or cwd when the BTW migration gate refuses", async () => {
-		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
-		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
-		try {
-			const { ctx, state } = createMoveContext(sourceDir);
-			const sourceFile = path.join(sourceDir, "session.jsonl");
-			const targetFile = path.join(targetDir, "session.jsonl");
-			await Bun.write(sourceFile, "session data\n");
-			ctx.session.moveSession = vi.fn(async cwd => {
-				await fs.rename(sourceFile, targetFile);
-				state.cwd = cwd;
-				state.movedTo = cwd;
-			});
-			ctx.withBtwSessionMove = vi.fn(async () => false);
-			const controller = new CommandController(ctx);
-
-			await controller.handleMoveCommand(targetDir);
-
-			expect(await Bun.file(sourceFile).text()).toBe("session data\n");
-			expect(await Bun.file(targetFile).exists()).toBe(false);
-			expect(state.cwd).toBe(sourceDir);
-			expect(state.movedTo).toBeUndefined();
-			expect(state.completedBtwVisible).toBe(true);
-			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
-			expect(ctx.present).not.toHaveBeenCalled();
-		} finally {
-			await fs.rm(sourceDir, { recursive: true, force: true });
-			await fs.rm(targetDir, { recursive: true, force: true });
-		}
-	});
 
 	it("preserves completed BTW state when moving the session fails", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));

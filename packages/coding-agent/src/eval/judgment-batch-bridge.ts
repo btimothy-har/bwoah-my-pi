@@ -12,8 +12,7 @@
  * as an error from `drain()`.
  *
  * Each batch registers as an async job under its id so completion auto-delivers
- * a summary to the agent and `hub wait ids:[id]` / `hub cancel` address it. The
- * batch survives kernel resets (`attach(id)`) until `close()` or its owner
+ * a summary to the agent and `read proc://<id>` / `wait` address it. The
  * session releases it.
  */
 import type { JudgmentState, Question } from "@oh-my-pi/pi-ai";

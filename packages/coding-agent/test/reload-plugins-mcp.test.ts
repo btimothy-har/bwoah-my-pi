@@ -78,7 +78,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		mcpManager,
 		session,
 		sessionManager: { getCwd: () => cwd },
-		settings,
+		settings: Settings.isolated(settingsValues),
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),
 		showStatus: vi.fn(() => {}),

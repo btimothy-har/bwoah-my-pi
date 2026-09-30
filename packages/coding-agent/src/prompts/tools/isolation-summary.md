@@ -1,12 +1,12 @@
 {{#when kind "==" "captured"}}
 {{#if branchName}}
-Isolation: changes captured on branch `{{branchName}}` (apply=false). Not merged.
+Isolation: changes captured on branch `{{branchName}}`; captured, not applied. The apply-back decision belongs to the parent.
 {{else}}
 {{#if rootPatchPath}}
-Isolation: changes captured at `{{rootPatchPath}}` (apply=false). Not applied.
+Isolation: changes captured at `{{rootPatchPath}}`; captured, not applied. The apply-back decision belongs to the parent.
 {{else}}
 {{#if nestedCount}}
-Isolation: changes captured for {{pluralize nestedCount "nested repository" "nested repositories"}} (apply=false). Not applied.
+Isolation: changes captured for {{pluralize nestedCount "nested repository" "nested repositories"}}; captured, not applied. The apply-back decision belongs to the parent.
 {{else}}
 Isolation: no changes captured.
 {{/if}}

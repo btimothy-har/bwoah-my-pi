@@ -29,7 +29,7 @@ export const COMMON_SUBAGENT_TOOL_NAMES = [
 	"eval",
 	"yield",
 	"task",
-	"hub",
+	"wait",
 ] as const;
 
 const COMMON_SUBAGENT_TOOL_SET: Record<string, true> = Object.fromEntries(

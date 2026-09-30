@@ -1,5 +1,4 @@
-PROJECT
-
+<project-context>
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
@@ -59,6 +58,10 @@ Read-only reference repositories related to the working directory. This CURRENT 
 Session-added roots: `/add-dir`, `/remove-dir`; `/dirs` lists every root with its source.
 </related-directories>
 {{/if}}
+{{#if activeRepoContext}}
+{{activeRepoContext}}
+{{/if}}
+</project-context>
 
 <critical>
 - Each response MUST advance the task; completion only stopping condition.

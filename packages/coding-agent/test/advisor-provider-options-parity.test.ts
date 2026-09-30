@@ -23,6 +23,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgProvidersOpenaiWebsockets } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
  *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
  *  labels stay local-only (telemetry, transcripts). */
@@ -47,7 +49,7 @@ describe("AgentSession advisor provider-options parity", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -92,7 +94,6 @@ describe("AgentSession advisor provider-options parity", () => {
 			modelRegistry,
 			advisorTools: [],
 			advisorStreamFn,
-			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -168,7 +169,6 @@ describe("AgentSession advisor provider-options parity", () => {
 			onResponse,
 			onSseEvent,
 			createProviderContextTransform,
-			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -176,6 +176,8 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
+		// Flipped after the advisor exists: the websocket hint is read per request.
+		cfgProvidersOpenaiWebsockets.set(session.settings, "on");
 		await advisor.prompt("ping").catch(() => {});
 
 		expect(capturedStreamOptions.length).toBeGreaterThan(0);
@@ -228,7 +230,7 @@ describe("AgentSession advisor provider-options parity", () => {
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
 		const capturedModels: Model[] = [];
 		let requestCount = 0;

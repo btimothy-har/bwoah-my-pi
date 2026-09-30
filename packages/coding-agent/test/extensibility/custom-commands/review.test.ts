@@ -820,6 +820,38 @@ describe("ReviewCommand", () => {
 		}
 	});
 
+	it("freezes large diffs into the acquiring session's storage and never a replacement's", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(21)));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		let currentSession = { sessionId: "review-session", cwd: dir };
+		const artifactStores: Record<string, string[]> = { "review-session": [], replacement: [] };
+		const base = createContext();
+		// Observable storage whose save simulates newSession() replacing the
+		// session identity mid-persist (the reset hazard the helper guards).
+		const sessionManager = {
+			getSessionId: () => currentSession.sessionId,
+			getCwd: () => currentSession.cwd,
+			getEntries: () => [],
+			getBranch: () => [],
+			getArtifactManager: () => ({
+				save: async (content: string, toolType: string) => {
+					artifactStores[currentSession.sessionId].push(`${toolType}:${content.length}`);
+					currentSession = { sessionId: "replacement", cwd: dir };
+					return `art-${artifactStores["review-session"].length}`;
+				},
+			}),
+		};
+		const ownedCtx = { ...base, sessionManager } as unknown as HookCommandContext;
+
+		// The save lands in the ACQUIRING session's bucket; after the switch the
+		// prompt is suppressed — a replacement session never sees this review.
+		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ownedCtx);
+		expect(result).toBeUndefined();
+		expect(artifactStores["review-session"]).toEqual([expect.stringMatching(/^code-review-diff:\d+$/)]);
+		expect(artifactStores.replacement).toEqual([]);
+	});
+
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
 		const ctx = createContext({ hasUI: false });

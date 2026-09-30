@@ -278,7 +278,7 @@ describe("workspace reminder on the provider wire", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const authStorage = await AuthStorage.create(path.join(root, `auth-${Snowflake.next()}.db`));
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 		const { session } = await createAgentSession({
 			cwd: manager.getSessionHome(),

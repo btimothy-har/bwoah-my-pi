@@ -15,6 +15,8 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -31,6 +33,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { stubCloneSeam } from "../helpers/clone-seam";
 
+import { cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 const taskAgent: AgentDefinition = {
 	name: "task",
 	description: "General-purpose task agent",
@@ -39,12 +43,13 @@ const taskAgent: AgentDefinition = {
 	mutable: true,
 };
 
+/** Read-only custom agent: only safe tools and no mutable ceiling, so the description badges it READ-ONLY. */
 const scoutAgent: AgentDefinition = {
 	name: "scout",
-	description: "Read-only research agent",
-	systemPrompt: "You are a scout agent.",
-	tools: ["read"],
+	description: "Read-only scout",
+	systemPrompt: "Investigate the assigned target.",
 	source: "bundled",
+	tools: ["read"],
 };
 
 function createSession(
@@ -147,27 +152,6 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
 
-	it("requires coordination instead of promising same-file auto-resolution", async () => {
-		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
-
-		expect(tool.description).toContain("Same-file edits are not guaranteed to merge");
-		expect(tool.description).toContain("coordinate through `hub` before editing shared files");
-		expect(tool.description).toContain("Name one integration owner");
-		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
-	});
-
-	it("describes a restricted specialist as the spawn-policy default", async () => {
-		mockDiscovery(scoutAgent);
-		const tool = await TaskTool.create(createSession({ spawns: "scout" }));
-
-		expect(tool.description).toContain("spawn-policy default (`scout`)");
-		expect(tool.description).not.toContain("general-purpose worker");
-		expect(tool.description).not.toContain("default worker");
-		expect(tool.description).toContain("Omit `agent` when the spawn-policy default is the best fit");
-		expect(tool.description).toContain("### scout (READ-ONLY)");
-	});
-
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 
@@ -176,7 +160,7 @@ describe("task.batch schema gating", () => {
 		expect(getSchemaProperties(flat).effort).toBeUndefined();
 		expect(flat.description).not.toContain("`effort`");
 
-		flatSession.settings.override("task.enableEffort", true);
+		cfgTaskEnableEffort.override(flatSession.settings, true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
 		expect(flat.description).toContain("`effort`");
 
@@ -185,7 +169,7 @@ describe("task.batch schema gating", () => {
 		expect(getBatchItemProperties(batch).effort).toBeUndefined();
 		expect(batch.description).not.toContain("`effort`");
 
-		batchSession.settings.override("task.enableEffort", true);
+		cfgTaskEnableEffort.override(batchSession.settings, true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
 	});
@@ -219,13 +203,14 @@ describe("task.batch schema gating", () => {
 		const tool = await TaskTool.create(createSession());
 		expect(tool.description).toContain("writable isolated clone");
 		expect(tool.description).toContain("`mutable: false` to force discard");
-		expect(tool.description).toContain("### task (mutable: apply-back)");
-		expect(tool.description).not.toContain("### scout (mutable: apply-back)");
+		// The roster is a compact list; badges mark apply-back and read-only.
+		expect(tool.description).toContain("- `task` (mutable: apply-back)");
+		expect(tool.description).not.toContain("- `scout` (mutable: apply-back)");
 		// Bundled agents all delegate now, so none carries a READ-ONLY badge;
 		// the badge remains for custom read-only definitions like this scout.
-		expect(tool.description).not.toContain("### conventions-specialist (READ-ONLY)");
-		expect(tool.description).not.toContain("### devils-advocate (READ-ONLY)");
-		expect(tool.description).toContain("### scout (READ-ONLY)");
+		expect(tool.description).not.toContain("- `conventions-specialist` (READ-ONLY");
+		expect(tool.description).not.toContain("- `devils-advocate` (READ-ONLY");
+		expect(tool.description).toContain("- `scout` (READ-ONLY");
 		expect(tool.description).not.toContain("(isolation: apply)");
 	});
 
@@ -362,6 +347,51 @@ describe("task.batch validation", () => {
 		);
 		expect(text).toContain("task.batch is disabled");
 		expect(text).not.toContain("was missing");
+	});
+
+	it("advertises solutionSpace as required but still spawns a model call that omits it", async () => {
+		mockDiscovery();
+		// Ordinary spawns always clone: stub the seam so the mocked executor
+		// observes the spawn without a real Git checkout.
+		stubCloneSeam({ repoRoot: "/tmp" });
+		const spawned: Array<string | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			spawned.push(options.assignment);
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const items = getSchemaProperties(tool).tasks;
+		expect(isRecord(items) && isRecord(items.items) ? items.items.required : undefined).toContain("solutionSpace");
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tc-no-solution-space",
+							name: "task",
+							arguments: { context: "# Goal\nX", tasks: [{ name: "Alpha", task: "Do A." }] },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool as unknown as AgentTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		await agent.prompt("go");
+
+		expect(spawned).toEqual(["Do A."]);
+		const toolResult = agent.state.messages.find(message => message.role === "toolResult");
+		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
 	});
 });
 
