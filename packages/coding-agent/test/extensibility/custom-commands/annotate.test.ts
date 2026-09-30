@@ -282,6 +282,80 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor).not.toHaveBeenCalled();
 	});
 
+	it("suppresses the review when the session switches during PR acquisition", async () => {
+		// Ownership baseline is captured before the first await; a switch inside
+		// the network-bound acquisition window must cancel the review instead of
+		// pointing the replacement session at a target it never acquired.
+		const session = { sessionId: "session-1", cwd: "/workspace" };
+		const pasteToEditor = vi.fn();
+		const notify = vi.fn();
+		const ctx = {
+			hasUI: true,
+			cwd: "/workspace",
+			sessionManager: {
+				getSessionId: () => session.sessionId,
+				getCwd: () => session.cwd,
+				getBranch: () => [],
+			},
+			ui: { pasteToEditor, notify },
+		} as unknown as CustomCommandContext;
+		const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff");
+		const resolvePrReviewTarget = vi.fn(async () => {
+			session.sessionId = "replacement";
+			return target;
+		});
+		const showCodeReviewOverlay = vi.fn();
+
+		const prompt = await runAnnotateCommand(API, "code-review https://github.com/acme/project/pull/42", ctx, {
+			resolvePrReviewTarget,
+			showCodeReviewOverlay,
+		});
+
+		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
+		expect(prompt).toBeUndefined();
+		expect(showCodeReviewOverlay).not.toHaveBeenCalled();
+		expect(pasteToEditor).not.toHaveBeenCalled();
+	});
+
+	it("suppresses the review result when the session switches while the overlay is open", async () => {
+		const session = { sessionId: "session-1", cwd: "/workspace" };
+		const pasteToEditor = vi.fn();
+		const ctx = {
+			hasUI: true,
+			cwd: "/workspace",
+			sessionManager: {
+				getSessionId: () => session.sessionId,
+				getCwd: () => session.cwd,
+				getBranch: () => [],
+			},
+			ui: { select: vi.fn(async () => "2. Review uncommitted changes"), pasteToEditor, notify: vi.fn() },
+		} as unknown as CustomCommandContext;
+		const target = localTarget();
+		const annotation: CodeReviewAnnotation = {
+			scope: "line",
+			path: "src/value.ts",
+			occurrence: 1,
+			hunkHeader: "@@ -1 +1 @@",
+			oldLine: 1,
+			newLine: 1,
+			rawLine: "+const value = 2;",
+			note: "should never surface",
+		};
+		const showCodeReviewOverlay = vi.fn(async () => {
+			session.sessionId = "replacement";
+			return { action: "review" as const, annotations: [annotation] };
+		});
+
+		const prompt = await runAnnotateCommand(API, "code-review", ctx, {
+			resolveLocalReviewTarget: vi.fn(async () => target),
+			showCodeReviewOverlay,
+		});
+
+		expect(showCodeReviewOverlay).toHaveBeenCalledTimes(1);
+		expect(prompt).toBeUndefined();
+		expect(pasteToEditor).not.toHaveBeenCalled();
+	});
+
 	it("pastes the latest reply as a text annotation and never auto-submits it", async () => {
 		const latestText = "The latest answer";
 		const { ctx, pasteToEditor } = createContext({

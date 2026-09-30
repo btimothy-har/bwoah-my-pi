@@ -182,6 +182,7 @@ async function finishCodeReview(
 	target: ResolvedReviewTarget,
 	focus: string | undefined,
 	showOverlay: CodeReviewDependencies["showCodeReviewOverlay"],
+	invocation: { sessionId: string | undefined; cwd: string },
 ): Promise<string | undefined> {
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
@@ -190,6 +191,11 @@ async function finishCodeReview(
 	}
 	const result = await showOverlay(ctx, target);
 	if (!result) return undefined;
+	// A session or CWD switch while the overlay was open must not point the
+	// replacement session at a review of bytes it never acquired.
+	if (ctx.sessionManager.getSessionId() !== invocation.sessionId || ctx.sessionManager.getCwd() !== invocation.cwd) {
+		return undefined;
+	}
 	const annotations = formatCodeReviewAnnotations(result.annotations, {
 		forReviewer: result.action === "review",
 		supplementalInstructions: focus,
@@ -213,6 +219,7 @@ export async function runCodeReviewCommand(
 	const cwd = liveCommandCwd(api, ctx);
 	const parsed = extractReviewPrRefFromArgs(splitReviewArgs(args));
 	const focus = parsed.extraInstructions || undefined;
+	const invocation = { sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.sessionManager.getCwd() };
 	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx);
 	if (!choice) return undefined;
 	const acquired =
@@ -222,7 +229,6 @@ export async function runCodeReviewCommand(
 	if (!acquired) return undefined;
 	// Freeze large diffs into this session's storage before the overlay opens;
 	// the overlay and the resulting review prompt share the same frozen bytes.
-	const invocation = { sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.sessionManager.getCwd() };
 	const target = await persistReviewDiffSnapshot(acquired, ctx.sessionManager).catch(error => {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		return undefined;
@@ -231,7 +237,7 @@ export async function runCodeReviewCommand(
 	if (ctx.sessionManager.getSessionId() !== invocation.sessionId || ctx.sessionManager.getCwd() !== invocation.cwd) {
 		return undefined;
 	}
-	return finishCodeReview(ctx, target, focus, resolved.showCodeReviewOverlay);
+	return finishCodeReview(ctx, target, focus, resolved.showCodeReviewOverlay, invocation);
 }
 
 /** Run `/annotate` text sources; all resulting feedback is pasted, never submitted. */

@@ -263,7 +263,7 @@ export class ReviewCommand implements CustomCommand {
 		if (parsedArgs.prRef) {
 			try {
 				const target = await resolvePrReviewTarget(cwd, ctx, parsedArgs.prRef);
-				const persisted = target ? await persistTargetForSession(target, ctx) : undefined;
+				const persisted = target ? await persistTargetForSession(target, ctx, invocation) : undefined;
 				const result = persisted
 					? reviewTargetPrompt(ctx, persisted, parsedArgs.extraInstructions || undefined)
 					: undefined;
@@ -283,7 +283,7 @@ export class ReviewCommand implements CustomCommand {
 		if (!selectedChoice) return undefined;
 		if (selectedChoice.kind === "pr") {
 			const target = await resolvePrReviewTarget(cwd, ctx, selectedChoice.ref);
-			const persisted = target ? await persistTargetForSession(target, ctx) : undefined;
+			const persisted = target ? await persistTargetForSession(target, ctx, invocation) : undefined;
 			return finish(persisted ? reviewTargetPrompt(ctx, persisted, extraInstructions) : undefined);
 		}
 		if (selectedChoice.kind === "custom") {
@@ -299,6 +299,7 @@ export class ReviewCommand implements CustomCommand {
 				const persisted = await persistTargetForSession(
 					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…` },
 					ctx,
+					invocation,
 				).catch(() => undefined);
 				if (!persisted) return undefined;
 				return finish(reviewTargetPrompt(ctx, persisted, instructions));
@@ -306,21 +307,28 @@ export class ReviewCommand implements CustomCommand {
 			return finish(buildCustomReviewPrompt(instructions));
 		}
 		const target = await resolveLocalReviewTarget(selectedChoice.kind, cwd, ctx.ui);
-		const persisted = target ? await persistTargetForSession(target, ctx) : undefined;
+		const persisted = target ? await persistTargetForSession(target, ctx, invocation) : undefined;
 		return finish(persisted ? reviewTargetPrompt(ctx, persisted, extraInstructions) : undefined);
 	}
 }
 
 /**
  * Freeze large reviewable diffs into the acquiring session's storage so the
- * chair and annotation overlay read the same bytes. `finish` (ownership)
- * surrounds every await in the caller; this helper only persists.
+ * chair and annotation overlay read the same bytes. Ownership is rechecked
+ * here: a session or CWD switch while the target was being acquired must
+ * never route old bytes into a replacement session's artifact store.
  */
 async function persistTargetForSession(
 	target: ResolvedReviewTarget,
 	ctx: HookCommandContext,
+	invocation: { sessionId: string | undefined; cwd: string },
 ): Promise<ResolvedReviewTarget | undefined> {
-	if (!ctx.sessionManager) return target;
+	if (ctx.sessionManager.getSessionId() !== invocation.sessionId || ctx.sessionManager.getCwd() !== invocation.cwd) {
+		if (ctx.hasUI) {
+			ctx.ui.notify("Session or working directory changed during review setup; review cancelled", "warning");
+		}
+		return undefined;
+	}
 	try {
 		return await persistReviewDiffSnapshot(target, ctx.sessionManager);
 	} catch (error) {

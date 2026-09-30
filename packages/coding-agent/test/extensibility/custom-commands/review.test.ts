@@ -852,6 +852,43 @@ describe("ReviewCommand", () => {
 		expect(artifactStores.replacement).toEqual([]);
 	});
 
+	it("never persists when the session switches during PR acquisition", async () => {
+		const dir = await createTempDir();
+		let switched = false;
+		const currentSession = { sessionId: "review-session", cwd: dir };
+		// The network-bound acquisition window: the session is replaced inside
+		// the diff fetch, before persistTargetForSession runs. No bucket may
+		// receive bytes — the acquiring session is gone and the replacement
+		// never acquired this target.
+		spyOn(gh, "getOrFetchPrDiff").mockImplementation(async () => {
+			switched = true;
+			currentSession.sessionId = "replacement";
+			return makePrDiffLookup(makeManyFileDiff(21));
+		});
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const artifactStores: Record<string, string[]> = { "review-session": [], replacement: [] };
+		const base = createContext();
+		const sessionManager = {
+			getSessionId: () => currentSession.sessionId,
+			getCwd: () => currentSession.cwd,
+			getEntries: () => [],
+			getBranch: () => [],
+			getArtifactManager: () => ({
+				save: async (content: string, toolType: string) => {
+					artifactStores[currentSession.sessionId].push(`${toolType}:${content.length}`);
+					return `art-${artifactStores[currentSession.sessionId].length}`;
+				},
+			}),
+		};
+		const ownedCtx = { ...base, sessionManager } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ownedCtx);
+		expect(switched).toBe(true);
+		expect(result).toBeUndefined();
+		expect(artifactStores["review-session"]).toEqual([]);
+		expect(artifactStores.replacement).toEqual([]);
+	});
+
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
 		const ctx = createContext({ hasUI: false });
