@@ -1008,8 +1008,8 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("one read-only scout while working is allowed");
-		expect(withoutScout).not.toContain("read-only scout");
+		expect(withScout).toContain("scout while working is allowed");
+		expect(withoutScout).not.toContain("scout while working is allowed");
 	});
 
 	it("omits todo workflow guidance when the todo tool is absent", async () => {
