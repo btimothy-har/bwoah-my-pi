@@ -737,7 +737,6 @@ async function findReclaimableOccupant(
 	return existing;
 }
 
-
 /** Flip the record to `detached: true` after `detachGitDir` succeeds. */
 export async function markIsolationDetached(root: string, baseDir: string): Promise<void> {
 	await withIsolationMetadataLock(root, async () => {
