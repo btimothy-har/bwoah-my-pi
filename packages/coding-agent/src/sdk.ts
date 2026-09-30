@@ -29,7 +29,7 @@ import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/opena
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag } from "@oh-my-pi/pi-utils/env";
-import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { getAgentDir, getModelDbPath, getProjectDir, getWorktreesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
@@ -201,6 +201,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { collectIsolationCleanup } from "./task/isolation-cleanup";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
@@ -260,6 +261,7 @@ import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
 import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
+import { drainLateCleanups } from "./utils/late-cleanup";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -384,7 +386,13 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 	}
 }
 
-// Types
+/**
+ * Exit-time budget for joining late subagent cleanups and reclaiming this
+ * process's released isolation generations. Bounded: overruns leave durable
+ * cleanup records for the next launch's background sweep.
+ */
+const SESSION_ISOLATION_CLEANUP_BUDGET_MS = 30_000;
+
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
@@ -4352,8 +4360,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let unregisterMcpPostmortem: (() => void) | undefined;
 
 		{
+			// Snapshot the configured worktree root at creation time: a delayed
+			// callback must not follow another session's later override.
+			const worktreesRoot = getWorktreesDir();
 			const originalDispose = session.dispose.bind(session);
 			session.dispose = async () => {
+				const isolationCleanupDeadlineAt = Date.now() + SESSION_ISOLATION_CLEANUP_BUDGET_MS;
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -4379,6 +4391,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 					await originalDispose();
 				} finally {
+					if (agentKind === "main") {
+						// The lifecycle deadline releases only the foreground budget;
+						// late cleanups (final snapshots, trash moves) keep running.
+						// Join them, then reclaim this process's released generations
+						// — bounded by the same budget, never unblocking session exit.
+						try {
+							await drainLateCleanups(isolationCleanupDeadlineAt);
+							await collectIsolationCleanup(worktreesRoot, {
+								owner: "released-current",
+								deadlineAt: isolationCleanupDeadlineAt,
+							});
+						} catch (error) {
+							logger.warn("Isolation cleanup at session exit failed", { error: String(error) });
+						}
+					}
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
 					unsubscribeMcpNotifications?.();

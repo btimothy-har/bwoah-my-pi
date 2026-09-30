@@ -23,7 +23,13 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+import {
+	hasLiveIsolationOwner,
+	ISOLATION_OWNER_FILE,
+	readIsolationCleanup,
+	readRetainedMountBackend,
+} from "../task/isolation-ownership";
+import { hasManagedDependents, ISOLATION_TRASH_DIR, removeAuthorizedWrapper } from "../task/isolation-cleanup";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
@@ -211,7 +217,12 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 
 	const results: { path: string; ok: boolean; error?: string }[] = [];
 	const parentsToPrune = new Set<string>();
-	for (const target of targets) {
+	// Dependents before sources: a trash child sorts deeper than its original
+	// slot, and a removed dependent unpins its source for this same pass.
+	const ordered = [...targets].sort(
+		(a, b) => b.path.split(path.sep).length - a.path.split(path.sep).length,
+	);
+	for (const target of ordered) {
 		try {
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
@@ -222,6 +233,20 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					await fs.rm(target.path, { recursive: true, force: true });
 					parentsToPrune.add(target.parentRepo);
 				}
+			} else if (target.kind === "task-isolation" && (await readIsolationCleanup(target.path).catch(() => undefined))?.authorization) {
+				// New-format entry: claim-based teardown with backend/generation
+				// checks. A source pinned by a surviving dependent is refused.
+				const root = path.resolve(getWorktreesDir());
+				const pinned = await hasManagedDependents(root, target.path);
+				if (pinned) {
+					results.push({
+						path: target.path,
+						ok: false,
+						error: "workspace is the source of a surviving dependent clone; remove the dependent first",
+					});
+					continue;
+				}
+				await removeAuthorizedWrapper(root, target.path);
 			} else {
 				if (target.kind === "task-isolation") await stopRetainedMount(target.path);
 				await fs.rm(target.path, { recursive: true, force: true });
@@ -277,8 +302,25 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	}
 
 	const entries: WorktreeEntry[] = [];
+
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
+		// GC bookkeeping: the metadata lock is not a worktree entry.
+		if (name.startsWith(".isolation-gc")) continue;
+		// The trash container holds already-release-authorized wrappers: list
+		// them as individual entries and never classify the container itself
+		// as a removable stray.
+		if (name === ISOLATION_TRASH_DIR) {
+			for (const child of await fs.readdir(dir).catch(() => [])) {
+				if (child.startsWith(".")) continue;
+				const childDir = path.join(dir, child);
+				const childStat = await fs.lstat(childDir).catch(() => null);
+				if (!childStat?.isDirectory() || childStat.isSymbolicLink()) continue;
+				const childClassified = await classifyDir(childDir);
+				if (childClassified) entries.push(childClassified);
+			}
+			continue;
+		}
 		const stat = await fs.stat(dir).catch(() => null);
 		if (!stat?.isDirectory()) continue;
 

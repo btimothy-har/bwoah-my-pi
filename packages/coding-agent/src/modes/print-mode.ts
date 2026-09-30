@@ -7,7 +7,8 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { scheduleIsolationCleanup } from "../task/isolation-cleanup";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
@@ -153,6 +154,9 @@ async function runPrintModeCore(
 			process.stderr.write(`Extension error (${err.extensionPath}): ${err.error}\n`);
 		},
 	});
+	// Reclaim dead-owner isolation leftovers off the output path; the sweep is
+	// never awaited and writes nothing to stdout.
+	scheduleIsolationCleanup(getWorktreesDir());
 
 	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
 	// human can review the plan before it executes. Headless print mode has no
