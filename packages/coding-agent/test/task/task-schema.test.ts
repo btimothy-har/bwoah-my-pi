@@ -31,20 +31,32 @@ describe("task schema (single-spawn)", () => {
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it("removes eval tool names from the wire shape when eval.tools.enabled is off", () => {
+	it("rejects eval tool names in the wire shape when eval.tools.enabled is off", () => {
 		const schema = getTaskSchema({
-			isolationEnabled: false,
 			batchEnabled: false,
 			evalToolsEnabled: false,
 		});
-		const parsed = schema({ agent: "scout", task: "Map the auth module.", tools: ["word_count"] });
+		// The `tools` field is absent from the strict shape entirely, so a stale
+		// caller's key fails loudly instead of being stripped.
+		expect(schema({ agent: "scout", task: "Map the auth module.", tools: ["word_count"] })).toBeInstanceOf(
+			type.errors,
+		);
+		const parsed = schema({ agent: "scout", task: "Map the auth module." });
 		expect(parsed instanceof type.errors).toBe(false);
-		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
-			expect("tools" in parsed).toBe(false);
-		}
 	});
 
-	it("retains caller outputSchema, schemaMode, and eval tool names while stripping stale keys", () => {
+	it("accepts a per-spawn mutable boolean", () => {
+		for (const mutable of [true, false]) {
+			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", mutable });
+			expect(parsed instanceof type.errors).toBe(false);
+			if (!(parsed instanceof type.errors)) {
+				expect(parsed.mutable).toBe(mutable);
+			}
+		}
+		expect(taskSchema({ agent: "scout", task: "x", mutable: "yes" }) instanceof type.errors).toBe(true);
+	});
+
+	it("retains caller outputSchema, schemaMode, and eval tool names", () => {
 		const outputSchema = { type: "object", properties: { answer: { type: "string" } } };
 		const parsed = taskSchema({
 			agent: "scout",
@@ -52,18 +64,28 @@ describe("task schema (single-spawn)", () => {
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],
-			context: "shared background",
-			tasks: [{ name: "A", task: "..." }],
-			schema: '{"properties":{}}',
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.outputSchema).toEqual(outputSchema);
 			expect(parsed.schemaMode).toBe("strict");
 			expect(parsed.tools).toEqual(["word_count"]);
-			expect("tasks" in parsed).toBe(false);
-			expect("context" in parsed).toBe(false);
-			expect("schema" in parsed).toBe(false);
+		}
+	});
+
+	it("rejects stale and removed keys instead of silently dropping them", () => {
+		// The strict `+: "reject"` shape keeps removed isolation controls and
+		// stale batch fields visible to validation rather than stripped away.
+		for (const stale of [
+			{ context: "shared background" },
+			{ tasks: [{ name: "A", task: "..." }] },
+			{ schema: '{"properties":{}}' },
+			{ isolated: true },
+			{ apply: false },
+			{ merge: true },
+			{ readOnly: false },
+		]) {
+			expect(taskSchema({ agent: "scout", task: "x", ...stale }) instanceof type.errors).toBe(true);
 		}
 	});
 });
@@ -77,7 +99,7 @@ describe("task spawn validation", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": false }),
+			settings: Settings.isolated({ "task.batch": false }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;

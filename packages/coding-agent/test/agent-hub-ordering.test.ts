@@ -722,6 +722,30 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+	it("renders the recorded clone disposition in the Changes pane", () => {
+		geometry = stubStdoutGeometry(140);
+		geometry.setRows(28);
+		const renderWithDisposition = (cloneDisposition: "discard" | "merge"): string => {
+			const agents = new AgentRegistry();
+			agents.register({
+				id: "Worker",
+				displayName: "Worker",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				history: { cloneDisposition },
+			});
+			const hub = makeHub(agents);
+			try {
+				return Bun.stripANSI(hub.render(140).join("\n"));
+			} finally {
+				hub.dispose();
+			}
+		};
+
+		expect(renderWithDisposition("discard")).toContain("Clone · discarded on completion");
+		expect(renderWithDisposition("merge")).toContain("Clone · initial changes eligible for merge");
+	});
 	it("shows dense measured usage for running and completed progress with aggregate coverage", () => {
 		geometry = stubStdoutGeometry(160);
 		geometry.setRows(32);

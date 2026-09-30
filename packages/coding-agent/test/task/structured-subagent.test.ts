@@ -22,16 +22,20 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import {
+	COMMON_SUBAGENT_TOOL_NAMES,
+	OBSOLETE_SUBAGENT_CONTROL_MESSAGE,
+} from "@oh-my-pi/pi-coding-agent/task/tool-policy";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
 	description: "Test worker",
 	systemPrompt: "Do the assigned work.",
 	source: "bundled",
-	isolation: "apply",
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
@@ -43,8 +47,6 @@ function session(
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
-		isolationEnabled?: boolean;
-		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
 	} = {},
@@ -57,11 +59,9 @@ function session(
 			options.settings ??
 			Settings.isolated({
 				"task.maxRecursionDepth": options.maxDepth ?? 2,
-				"task.isolation.enabled": options.isolationEnabled ?? false,
 				"isolation.backend": "rcopy",
 				"task.enableLsp": true,
 				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 				...(options.agentServiceTierOverrides
 					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
 					: {}),
@@ -101,6 +101,21 @@ function result(): SingleResult {
 
 function mockDiscovery(agent: AgentDefinition = AGENT): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+	// Ordinary execution always clones; tests that are not about Git probing
+	// stub the probe instead of creating a real repository.
+	vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
+}
+
+/**
+ * Route an ordinary clone dispatch into a test double: the clone seam is
+ * stubbed and the isolated runner delegates to the executor options directly,
+ * so assertions see the same ExecutorOptions a real child run would receive.
+ */
+function mockCloneDispatch(
+	impl: (baseOptions: executorModule.ExecutorOptions) => Promise<SingleResult> | SingleResult,
+): void {
+	stubCloneSeam({ repoRoot: "/tmp" });
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => impl(baseOptions));
 }
 
 afterEach(() => {
@@ -187,23 +202,33 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
-	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
+	it("attenuates plan-mode agents and rejects mutable true before discovery", async () => {
 		mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: session({ planMode: true }), enableLsp: true, enableIrc: true }),
 		);
+		expect(policy.execution).toEqual({ kind: "plan" });
 		expect(policy.effectiveAgent.tools).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(policy.effectiveAgent.spawns).toBeUndefined();
 		expect(policy.enableLsp).toBe(false);
 		expect(policy.enableIrc).toBe(false);
 
+		// Plan mode accepts omitted/false mutable and stays a non-clone execution.
+		const narrowed = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ planMode: true }), mutable: false }),
+		);
+		expect(narrowed.execution).toEqual({ kind: "plan" });
+
 		vi.restoreAllMocks();
 		const discover = vi.spyOn(discoveryModule, "discoverAgents");
 		await expect(
-			resolveEffectiveSubagentPolicy(
-				request({ session: session({ planMode: true }), isolation: { requested: false } }),
-			),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+			resolveEffectiveSubagentPolicy(request({ session: session({ planMode: true }), mutable: true })),
+		).rejects.toThrow("Mutable subagent execution is unavailable in plan mode.");
+
+		// Removed isolation request controls reject everywhere, plan mode included.
+		const obsoleteRequest = request({ session: session({ planMode: true }) });
+		(obsoleteRequest as unknown as Record<string, unknown>).isolation = { requested: false };
+		await expect(resolveEffectiveSubagentPolicy(obsoleteRequest)).rejects.toThrow(OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
 
 		const planSession = session({ planMode: true });
 		const customTools = createEvalCustomTools(planSession, [
@@ -219,55 +244,57 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("isolates discovered agents by default but applies only when their frontmatter opts in", async () => {
-		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-policy-"));
+	it("clones discovered agents by default and lets mutable definitions opt into apply-back", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clone-policy-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
-			const original = { ...AGENT, name: "reviewer", isolation: undefined };
-			const applying = { ...AGENT, name: "m1", isolation: "apply" as const };
+			const original = { ...AGENT, name: "reviewer" };
+			const applying = { ...AGENT, name: "m1", mutable: true };
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 				agents: [original, applying],
 				projectAgentsDir: null,
 			});
-			const enabled = session({ cwd: repo, isolationEnabled: true });
+			const enabled = session({ cwd: repo });
 			const discarded = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
-			expect(discarded).toMatchObject({ isIsolated: true, discardChanges: true, applyChanges: false });
+			expect(discarded.execution).toEqual({ kind: "clone", disposition: "discard", mergeMode: "patch" });
 			const retained = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "m1" }));
-			expect(retained).toMatchObject({ isIsolated: true, discardChanges: false, applyChanges: true });
-			const direct = await resolveEffectiveSubagentPolicy(
-				request({ session: enabled, agent: "m1", isolation: { requested: false } }),
+			expect(retained.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
+			const narrowed = await resolveEffectiveSubagentPolicy(
+				request({ session: enabled, agent: "m1", mutable: false }),
 			);
-			expect(direct.isIsolated).toBe(false);
+			expect(narrowed.execution).toEqual({ kind: "clone", disposition: "discard", mergeMode: "patch" });
+			// The definition ceiling is hard: a caller can narrow, never widen.
 			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({ session: enabled, agent: "reviewer", isolation: { requested: false } }),
-				),
-			).rejects.toThrow("discards its file changes");
+				resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer", mutable: true })),
+			).rejects.toThrow('Agent "reviewer" does not permit mutable execution; omit mutable or pass mutable: false.');
 			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({ session: enabled, agent: "reviewer", isolation: { apply: true } }),
-				),
-			).rejects.toThrow("discards its file changes");
+				resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "m1", mutable: true })),
+			).resolves.toMatchObject({ execution: { kind: "clone", disposition: "merge" } });
 		} finally {
 			await fs.rm(repo, { recursive: true, force: true });
 		}
 	});
 
-	it("reports unavailable default isolation instead of losing agents outside Git", async () => {
-		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
+	it("rejects ordinary execution outside a Git checkout instead of running directly", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...AGENT, name: "reviewer" }],
+			projectAgentsDir: null,
+		});
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nongit-agent-"));
 		try {
-			const enabled = session({ cwd, isolationEnabled: true });
-			const fallback = await resolveEffectiveSubagentPolicy(request({ session: enabled, agent: "reviewer" }));
-			expect(fallback.isIsolated).toBe(false);
-			expect(fallback.isolationUnavailable).toContain("Git repository not found");
 			await expect(
-				runStructuredSubagent(request({ session: enabled, agent: "reviewer", isolation: { requested: true } })),
-			).rejects.toThrow("Git repository not found for isolated task execution");
-			const disabled = await resolveEffectiveSubagentPolicy(
-				request({ session: session({ cwd, isolationEnabled: false }), agent: "reviewer" }),
+				resolveEffectiveSubagentPolicy(request({ session: session({ cwd }), agent: "reviewer" })),
+			).rejects.toThrow(
+				"Subagent execution requires an isolated clone, but this workspace cannot provide one: Git repository not found",
 			);
-			expect(disabled.isolationUnavailable).toBe("task.isolation.enabled is false");
+			await expect(runStructuredSubagent(request({ session: session({ cwd }), agent: "reviewer" }))).rejects.toThrow(
+				"Subagent execution requires an isolated clone",
+			);
+			// Plan-mode runs stay in-place and never need a clone.
+			const plan = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ cwd, planMode: true }), agent: "reviewer" }),
+			);
+			expect(plan.execution).toEqual({ kind: "plan" });
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
@@ -288,6 +315,7 @@ describe("structured subagent primitive", () => {
 			cwd: projectDir,
 			settings: liveSettings,
 		} as ToolSession;
+		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: projectDir });
 
 		try {
 			await Bun.write(
@@ -354,7 +382,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			dispatched.push(options);
 			return { ...result(), modelRole: options.modelRole };
 		});
@@ -371,7 +399,7 @@ describe("structured subagent primitive", () => {
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -473,7 +501,7 @@ describe("structured subagent primitive", () => {
 			return { model: "openai/gpt-4o", note: "pool test" };
 		};
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -505,10 +533,12 @@ describe("structured subagent primitive", () => {
 		const blockedSession = session();
 		blockedSession.emitBeforeSubagentSpawn = async () => ({ block: true, reason: "pool exhausted" });
 		const run = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
 		const error = await runStructuredSubagent(request({ session: blockedSession })).catch((cause: unknown) => cause);
 		expect(error).toBeInstanceOf(StructuredSubagentError);
 		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
 		expect(run).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
@@ -516,7 +546,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
 		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			dispatched.push(options);
 			return result();
 		});
@@ -534,7 +564,7 @@ describe("structured subagent primitive", () => {
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(async options => {
 			artifactsDir = options.artifactsDir;
 			expect(await fs.stat(options.artifactsDir ?? "")).toBeDefined();
 			return result();
@@ -561,14 +591,12 @@ describe("structured subagent primitive", () => {
 		// directory is already gone by the time the model follows that URL
 		// (PR #10625 review).
 		mockDiscovery();
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
-			return {
-				...result(),
-				exitCode: 1,
-				error: "runtime limit exceeded",
-				structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
-			};
-		});
+		mockCloneDispatch(() => ({
+			...result(),
+			exitCode: 1,
+			error: "runtime limit exceeded",
+			structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+		}));
 
 		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
 		expect(settled.result.exitCode).toBe(1);
@@ -588,6 +616,7 @@ describe("structured subagent primitive", () => {
 	it("rejects an invalid caller schema before executor dispatch in both modes", async () => {
 		mockDiscovery();
 		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedDispatch = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
 
 		for (const schemaMode of ["permissive", "strict"] as const) {
 			await expect(runStructuredSubagent(request({ outputSchema: false, schemaMode }))).rejects.toThrow(
@@ -597,12 +626,13 @@ describe("structured subagent primitive", () => {
 			);
 		}
 		expect(dispatch).not.toHaveBeenCalled();
+		expect(isolatedDispatch).not.toHaveBeenCalled();
 	});
 
 	it("does not return unavailable structured metadata without an effective schema", async () => {
 		const unstructuredAgent = { ...AGENT, output: undefined };
 		mockDiscovery(unstructuredAgent);
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+		mockCloneDispatch(() => {
 			const completed = result();
 			completed.structuredOutput = { source: "none", mode: "permissive", status: "unavailable" };
 			return completed;
@@ -664,15 +694,13 @@ describe("structured subagent primitive", () => {
 		await fs.rm(parent, { recursive: true, force: true });
 	});
 
-	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
+	it("cleans ephemeral artifacts when clone setup fails without recovery", async () => {
 		mockDiscovery();
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
 
-		await expect(
-			runStructuredSubagent(
-				request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-			),
-		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
+		await expect(runStructuredSubagent(request())).rejects.toThrow(
+			"Isolated subagent execution could not be prepared: not a repository",
+		);
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
@@ -680,7 +708,7 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const sharedSession = session();
 		const ids: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			ids.push(options.id);
 			return result();
 		});
@@ -699,7 +727,7 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
+	it("suppresses ambient capabilities on every execution kind while preserving host propagation", async () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
@@ -716,7 +744,7 @@ describe("structured subagent primitive", () => {
 		>;
 		const planSession = session({ planMode: true });
 		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
-		const nonPlanSession = session();
+		const cloneSession = session();
 		let explicitRoot = "/plugins/explicit";
 		const extensionRoots = () => ({
 			explicit: [explicitRoot],
@@ -724,15 +752,14 @@ describe("structured subagent primitive", () => {
 			configured: ["/plugins/configured"],
 			configuredLevel: "project" as const,
 		});
-		Object.assign(nonPlanSession, {
+		Object.assign(cloneSession, {
 			mcpManager,
 			extensionPaths,
 			customToolPaths,
 			preparedExtensions,
 			effectiveExtensionRoots: extensionRoots,
+			getEvalSessionId: () => "parent-eval-kernel",
 		});
-		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
 		const restrictedSession = session();
 		const getApiKey = async () => "exact-account-key";
 		Object.assign(restrictedSession, {
@@ -747,14 +774,16 @@ describe("structured subagent primitive", () => {
 			options.push(executorOptions);
 			return result();
 		});
+		mockCloneDispatch(baseOptions => {
+			options.push(baseOptions);
+			return result();
+		});
 
 		const planRun = await runStructuredSubagent(request({ session: planSession, retainArtifacts: true }));
-		const nonPlanRun = await runStructuredSubagent(request({ session: nonPlanSession, retainArtifacts: true }));
-		const mcpDisabledRun = await runStructuredSubagent(
-			request({ session: mcpDisabledSession, retainArtifacts: true }),
-		);
+		const cloneRun = await runStructuredSubagent(request({ session: cloneSession, retainArtifacts: true }));
 		const restrictedRun = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
 
+		// Plan execution runs directly with its attenuated tool set.
 		expect(options[0]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
@@ -762,34 +791,35 @@ describe("structured subagent primitive", () => {
 			preloadedCustomToolPaths: [],
 		});
 		expect(options[0]?.mcpManager).toBeUndefined();
+		// Ordinary clones never inherit ambient MCP, extension, or custom-tool
+		// sources, and they own their eval kernel rather than sharing the parent's.
 		expect(options[1]).toMatchObject({
-			enableMCP: true,
-			mcpManager,
-			preloadedExtensionPaths: extensionPaths,
+			enableMCP: false,
+			restrictToolNames: true,
+			preloadedExtensionPaths: [],
 			preloadedPreparedExtensions: preparedExtensions,
-			preloadedCustomToolPaths: customToolPaths,
+			preloadedCustomToolPaths: [],
+			cloneDisposition: "discard",
 		});
-		expect(options[1]?.restrictToolNames).toBe(false);
+		expect(options[1]?.mcpManager).toBeUndefined();
+		expect(options[1]?.parentEvalSessionId).toBeUndefined();
 		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
 		explicitRoot = "/plugins/explicit-after-spawn";
 		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
-		expect(options[2]).toMatchObject({ enableMCP: false });
-		expect(options[2]?.mcpManager).toBeUndefined();
-		expect(options[3]).toMatchObject({
+		expect(options[2]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
 			preloadedExtensionPaths: [],
 			preloadedCustomToolPaths: [],
 		});
-		expect(options[3]?.mcpManager).toBeUndefined();
-		expect(options[3]?.getApiKey).toBe(getApiKey);
+		expect(options[2]?.mcpManager).toBeUndefined();
+		expect(options[2]?.getApiKey).toBe(getApiKey);
 		await fs.rm(planRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
+		await fs.rm(cloneRun.artifactsDir, { recursive: true, force: true });
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("restricts read-only specialists before ambient tools reach the child", async () => {
+	it("gates ambient capabilities while granting the common coding toolset", async () => {
 		const specialist = getBundledAgent("conventions-specialist");
 		if (!specialist) throw new Error("Missing bundled conventions specialist");
 		mockDiscovery(specialist);
@@ -802,8 +832,8 @@ describe("structured subagent primitive", () => {
 			>,
 		});
 		const options: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
+		mockCloneDispatch(baseOptions => {
+			options.push(baseOptions);
 			return result();
 		});
 
@@ -817,15 +847,18 @@ describe("structured subagent primitive", () => {
 			preloadedCustomToolPaths: [],
 		});
 		expect(options[0]?.mcpManager).toBeUndefined();
+		// A report-only specialist still receives the shared scratch-clone
+		// toolset; its role constraint, not the tool list, keeps it read-only.
+		expect(options[0]?.agent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("keeps explicit memory readers on the backend-initializing path", async () => {
-		const reader = { ...AGENT, name: "memory-reader", isolation: undefined, tools: ["read", "recall", "yield"] };
+		const reader = { ...AGENT, name: "memory-reader", tools: ["read", "recall", "yield"] };
 		mockDiscovery(reader);
 		const options: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
+		mockCloneDispatch(baseOptions => {
+			options.push(baseOptions);
 			return result();
 		});
 
@@ -836,7 +869,7 @@ describe("structured subagent primitive", () => {
 				retainArtifacts: true,
 			}),
 		);
-		expect(options[0]?.restrictToolNames).toBe(false);
+		expect(options[0]?.restrictToolNames).toBe(true);
 		expect(options[0]?.agent.tools).toContain("recall");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
@@ -874,10 +907,10 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 	});
 
-	it("cleans failed nonisolated handle artifacts", async () => {
+	it("cleans failed clone handle artifacts without recovery payloads", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			artifactsDir = options.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed" };
 		});
@@ -897,13 +930,13 @@ describe("structured subagent primitive", () => {
 		// provider's, and the partial prose is not presented as data.
 		mockDiscovery();
 		const error = "Anthropic stream envelope error: stream ended before message_stop";
-		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue({
+		mockCloneDispatch(() => ({
 			...result(),
 			exitCode: 1,
 			output: "I'll systematically investigate the codebase",
 			stderr: error,
 			error,
-		});
+		}));
 
 		const settled = await runStructuredSubagent(request());
 
@@ -924,7 +957,7 @@ describe("structured subagent primitive", () => {
 		// agent://<id> or history://<id> (PR #10625 review).
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		mockCloneDispatch(options => {
 			artifactsDir = options.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed" };
 		});
@@ -938,37 +971,44 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("returns a discard agent's report without retaining an unapplied patch", async () => {
-		mockDiscovery({ ...AGENT, name: "reviewer", isolation: undefined });
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp", baseline: null });
+	it("returns a discard clone's report without capturing or retaining changes", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer" });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+			baseline: null,
+		} as unknown as isolationRunner.IsolationContext);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue({
 			...result(),
 			agent: "reviewer",
 			isolated: true,
 		});
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
-		const settled = await runStructuredSubagent(
-			request({ agent: "reviewer", session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request({ agent: "reviewer" }));
 
+		expect(merge).not.toHaveBeenCalled();
 		expect(settled.mergeSummary).toContain("Isolation: ran in a discarded worktree; file changes were not kept");
 		expect(settled.changesApplied).toBeNull();
+		expect(settled.result.cloneDisposition).toBe("discard");
+		expect(settled.result.changesApplied).toBeNull();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(settled.artifactsDir)).rejects.toThrow();
 	});
 
-	it("retains isolated failure artifacts needed for recovery", async () => {
-		mockDiscovery();
+	it("retains clone failure artifacts needed for recovery", async () => {
+		// A merge-disposition run captures patches on failure; a discard run
+		// never captures, so recovery retention only applies here.
+		mockDiscovery({ ...AGENT, mutable: true });
 		let artifactsDir: string | undefined;
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+		} as unknown as isolationRunner.IsolationContext);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
 			artifactsDir = baseOptions.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed", patchPath: "/recovery/Worker.patch" };
 		});
 
-		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request());
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
@@ -976,8 +1016,10 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("names the preserved branch when nested persistence fails after a branch commit", async () => {
-		mockDiscovery();
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		mockDiscovery({ ...AGENT, mutable: true });
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+		} as unknown as isolationRunner.IsolationContext);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async () => ({
 			...result(),
 			branchName: "omp/task/Worker",
@@ -986,61 +1028,202 @@ describe("structured subagent primitive", () => {
 			error: "Nested patch capture failed: ENOSPC. Isolation workspace retained at /wt/abc.",
 		}));
 
-		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
+		const settled = await runStructuredSubagent(request());
 
+		expect(settled.result.cloneDisposition).toBe("merge");
 		expect(settled.mergeSummary).toContain("omp/task/Worker");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("defaults task isolation to auto-apply and lets config retain artifacts", async () => {
+	it("resolves the clone disposition from the definition ceiling and per-call narrowing", async () => {
 		mockDiscovery();
-		const defaultPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
-		);
-		expect(defaultPolicy.applyChanges).toBe(true);
+		const defaultPolicy = await resolveEffectiveSubagentPolicy(request());
+		expect(defaultPolicy.execution).toEqual({ kind: "clone", disposition: "discard", mergeMode: "patch" });
 
-		const capturePolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(capturePolicy.applyChanges).toBe(false);
+		const narrowed = await resolveEffectiveSubagentPolicy(request({ mutable: false }));
+		expect(narrowed.execution).toEqual({ kind: "clone", disposition: "discard", mergeMode: "patch" });
 
-		const evalPolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				invocationKind: "eval",
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
+		await expect(resolveEffectiveSubagentPolicy(request({ mutable: true }))).rejects.toThrow(
+			'Agent "worker" does not permit mutable execution; omit mutable or pass mutable: false.',
 		);
-		expect(evalPolicy.applyChanges).toBe(true);
+
+		mockDiscovery({ ...AGENT, mutable: true });
+		const mergeByDefault = await resolveEffectiveSubagentPolicy(request());
+		expect(mergeByDefault.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
+
+		const branchMode = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ settings: Settings.isolated({ "task.isolation.merge": "branch" }) }) }),
+		);
+		expect(branchMode.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "branch" });
+
+		// Task and eval invocations resolve identically.
+		const evalPolicy = await resolveEffectiveSubagentPolicy(request({ invocationKind: "eval", mutable: true }));
+		expect(evalPolicy.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
 	});
 
-	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {
+	it("rejects malformed mutable values and removed isolation controls before dispatch", async () => {
 		mockDiscovery();
+		const dispatch = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+
+		await expect(resolveEffectiveSubagentPolicy(request({ mutable: "yes" as never }))).rejects.toThrow(
+			"`mutable` must be a boolean.",
+		);
+		for (const key of ["isolated", "apply", "merge", "readOnly", "isolation"] as const) {
+			for (const value of [true, false, null, undefined]) {
+				const stale = request();
+				(stale as unknown as Record<string, unknown>)[key] = value;
+				await expect(resolveEffectiveSubagentPolicy(stale)).rejects.toThrow(OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
+			}
+		}
+		expect(dispatch).not.toHaveBeenCalled();
+	});
+
+	it("resolves host-managed execution and refuses a mutable argument for it", async () => {
+		mockDiscovery();
+		const managedSession = session();
+		managedSession.managedSubagentExecution = { toolNames: ["read", "grep"], spawns: [] };
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: managedSession }));
+		expect(policy.execution).toEqual({ kind: "managed", contract: { toolNames: ["read", "grep"], spawns: [] } });
+		// An explicit empty spawn list erases the definition's authority.
+		expect(policy.effectiveAgent.spawns).toBeUndefined();
+		expect(policy.effectiveAgent.tools).toEqual(["read", "grep"]);
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: managedSession, mutable: false })),
+		).rejects.toThrow("mutable applies only to ordinary cloned subagents.");
+	});
+
+	it("grants the common coding toolset and rejects MCP or unknown definition extras", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(request());
+		expect(policy.effectiveAgent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
+
+		mockDiscovery({ ...AGENT, tools: ["web_search"] });
+		const withExtra = await resolveEffectiveSubagentPolicy(request());
+		expect(withExtra.effectiveAgent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES, "web_search"]);
+
+		mockDiscovery({ ...AGENT, tools: ["mcp__server__search"] });
+		await expect(resolveEffectiveSubagentPolicy(request())).rejects.toThrow(
+			'Agent "worker" declares MCP tool "mcp__server__search" in tools; MCP tools are not available to subagents.',
+		);
+
+		mockDiscovery({ ...AGENT, tools: ["definitely_not_a_tool"] });
+		await expect(resolveEffectiveSubagentPolicy(request())).rejects.toThrow(
+			'Agent "worker" declares unknown tool "definitely_not_a_tool" in tools; extras must be built-in tool names.',
+		);
+	});
+
+	it("integrates a successful merge run and reports the applied outcome", async () => {
+		mockDiscovery({ ...AGENT, mutable: true });
 		let artifactsDir: string | undefined;
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+		} as unknown as isolationRunner.IsolationContext);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
 			artifactsDir = baseOptions.artifactsDir;
 			return { ...result(), patchPath: "/recovery/Worker.patch" };
 		});
-		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "\n\nApplied 1 file.",
+			changesApplied: true,
+			hadAnyChanges: true,
+			mergedBranchForNestedPatches: false,
+		});
+		vi.spyOn(isolationRunner, "applyEligibleNestedPatches").mockResolvedValue("");
 
-		const settled = await runStructuredSubagent(
-			request({
-				session: session({ isolationEnabled: true, isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
+		const settled = await runStructuredSubagent(request());
 
-		expect(merge).not.toHaveBeenCalled();
-		expect(settled.changesApplied).toBeNull();
-		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
+		expect(merge).toHaveBeenCalledTimes(1);
+		expect(settled.changesApplied).toBe(true);
+		expect(settled.mergeSummary).toContain("Applied 1 file.");
+		expect(settled.result.cloneDisposition).toBe("merge");
+		expect(settled.result.changesApplied).toBe(true);
+		// A clean merge needs no recovery artifacts.
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
+	});
+
+	it("retains recovery artifacts when a merge run cannot apply its changes", async () => {
+		mockDiscovery({ ...AGENT, mutable: true });
+		let artifactsDir: string | undefined;
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp",
+		} as unknown as isolationRunner.IsolationContext);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
+			artifactsDir = baseOptions.artifactsDir;
+			return { ...result(), patchPath: "/recovery/Worker.patch" };
+		});
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "\n\n<system-notification>Patch apply failed: conflict.</system-notification>",
+			changesApplied: false,
+			hadAnyChanges: true,
+			mergedBranchForNestedPatches: false,
+		});
+
+		const settled = await runStructuredSubagent(request());
+
+		expect(settled.changesApplied).toBe(false);
+		expect(settled.mergeSummary).toContain("Patch apply failed");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+});
+
+describe("nested clone beneath a discard parent", () => {
+	// Real Git fixture, real isolation runner: only the leaf executor is
+	// doubled. A mutable child spawned inside a discard parent's clone merges
+	// into that clone; the discarded parent never forwards it to the outer
+	// checkout.
+	it("merges a mutable child into the parent's discarded clone without touching the outer checkout", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-discard-"));
+		try {
+			await $`git init -q -b main`.cwd(repoRoot);
+			await $`git config user.email repro@example.com`.cwd(repoRoot);
+			await $`git config user.name Repro`.cwd(repoRoot);
+			await Bun.write(path.join(repoRoot, "parent.txt"), "parent\n");
+			await $`git add parent.txt`.cwd(repoRoot);
+			await $`git commit -q -m seed`.cwd(repoRoot);
+
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [{ ...AGENT, mutable: true }],
+				projectAgentsDir: null,
+			});
+			const childBytes = "child wrote this\n";
+			const runCalls: string[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				const worktree = options.worktree ?? options.cwd;
+				runCalls.push(worktree);
+				if (runCalls.length === 1) {
+					// Parent run, inside the parent's own clone: spawn the mutable
+					// child against the clone as its checkout.
+					const nested = await runStructuredSubagent(
+						request({ session: session({ cwd: worktree }), mutable: true }),
+					);
+					expect(nested.result.exitCode).toBe(0);
+					expect(nested.result.cloneDisposition).toBe("merge");
+					// The child's merge landed in the parent's clone.
+					expect(await Bun.file(path.join(worktree, "child.txt")).text()).toBe(childBytes);
+					return { ...result(), id: options.id ?? "Parent" };
+				}
+				// Child run, inside the child's clone: write exact bytes.
+				await Bun.write(path.join(worktree, "child.txt"), childBytes);
+				return { ...result(), id: options.id ?? "Child" };
+			});
+
+			const settled = await runStructuredSubagent(request({ session: session({ cwd: repoRoot }), mutable: false }));
+
+			expect(settled.result.exitCode).toBe(0);
+			expect(settled.result.cloneDisposition).toBe("discard");
+			expect(runCalls).toHaveLength(2);
+			// The outer checkout is byte-identical: the discarded parent clone
+			// never forwarded the nested merge.
+			expect(await $`git status --porcelain=v1`.cwd(repoRoot).text()).toBe("");
+			expect(await Bun.file(path.join(repoRoot, "parent.txt")).text()).toBe("parent\n");
+			expect(await Bun.file(path.join(repoRoot, "child.txt")).exists()).toBe(false);
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
 	});
 });

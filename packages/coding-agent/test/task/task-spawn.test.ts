@@ -26,14 +26,25 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
-	isolation: "apply",
+	mutable: true,
 };
+
+/**
+ * Ordinary spawns always execute in a clone now. Stub the clone seam so the
+ * run reaches the (separately mocked) executor: the probe/preparation succeed
+ * vacuously, the isolated runner delegates to `runSubprocess`, and merges
+ * report a clean no-op apply-back.
+ */
+function mockCloneSupport(): void {
+	stubCloneSeam({ repoRoot: "/tmp" });
+}
 
 function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
 	return {
@@ -105,6 +116,7 @@ describe("task spawn routing", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
+		mockCloneSupport();
 	});
 
 	afterEach(async () => {
@@ -124,7 +136,9 @@ describe("task spawn routing", () => {
 		const gate = deferred();
 		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			await gate.promise;
-			return makeResult(options.id ?? "?");
+			// A real clone run reports `isolated`: its worktree is merged and torn
+			// down, so the follow-up hint never offers messaging.
+			return makeResult(options.id ?? "?", { isolated: true, cloneDisposition: "discard" });
 		});
 
 		const manager = createManager();
@@ -152,8 +166,7 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
+		expect(job!.resultText).toContain("Spawnling ran in a discarded clone and cannot be resumed or messaged");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
@@ -220,26 +233,24 @@ describe("task spawn routing", () => {
 			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
 				...makeResult(opts.agentId),
 				isolated: true,
+				cloneDisposition: "discard",
 				patchPath: `${opts.artifactsDir}/${opts.agentId}.patch`,
 				...runnerOverrides,
 			}));
 
 			const manager = createManager();
-			const tool = await TaskTool.create(
-				createSession({ manager, settings: { "task.isolation.enabled": true, "task.isolation.apply": false } }),
-			);
+			const tool = await TaskTool.create(createSession({ manager }));
 
 			const result = await tool.execute("tc-isolated", {
 				agent: "task",
 				name: "Sandboxed",
 				task: "Do the thing.",
-				isolated: true,
 			} as TaskParams);
 			const job = manager.getJob(result.details?.async?.jobId ?? "");
 			await job!.promise;
 
 			const delivered = `${job!.resultText ?? ""}${job!.errorText ?? ""}`;
-			expect(delivered).toContain("Sandboxed ran isolated and cannot be resumed or messaged");
+			expect(delivered).toContain("Sandboxed ran in a discarded clone and cannot be resumed or messaged");
 			expect(delivered).toContain("history://Sandboxed");
 			expect(delivered).not.toContain("is now idle");
 			expect(delivered).not.toContain("message it via");

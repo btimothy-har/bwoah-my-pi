@@ -2,6 +2,7 @@
 name: scout
 description: MUST be used for exploratory codebase research, rapid code analysis, and broad pattern searches. Fast read-only scout returning compressed context for handoff.
 tools: read, find, grep, glob, web_search
+spawns: "*"
 model: "@default"
 thinking-level: medium
 read-summarize: false
@@ -58,6 +59,6 @@ You MUST infer the thoroughness from the task; default to medium:
 </procedure>
 
 <critical>
-You MUST operate as read-only. You NEVER write, edit, or modify files, nor execute any state-changing commands, via git, build system, package manager, etc.
+Report findings via `yield`; your definition discards your file changes — nothing you write reaches the parent's checkout. You MAY create scratch files and run commands inside your clone to confirm a suspicion, but the report is the deliverable.
 You MUST keep going until complete.
 </critical>

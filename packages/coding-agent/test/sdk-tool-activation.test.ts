@@ -2087,8 +2087,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				reportSendError: vi.fn(),
 				reportRuntimeError: vi.fn(),
 			});
-			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "yield"]);
-			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "yield"]);
+			// The explicit IRC opt-in (`hub` in toolNames + enableIrc) is honored
+			// independently of the restriction; every other capability stays out.
+			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
+			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
 			for (const name of [
 				"generate_image",
 				"tts",
@@ -2102,7 +2104,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}

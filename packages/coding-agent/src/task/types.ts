@@ -45,60 +45,30 @@ const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
-export const taskItemSchema = type({
+const taskItemFields = {
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"mutable?": "boolean",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"+": "delete",
-});
-const taskItemSchemaIsolated = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"isolated?": "boolean",
-	"+": "delete",
-});
+	"+": "reject",
+} as const;
 
-export const taskSchema = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"isolated?": "boolean",
-	"+": "delete",
-});
-const taskSchemaNoIsolation = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
-	"+": "delete",
-});
+export const taskItemSchema = type(taskItemFields);
+
+export const taskSchema = type(taskItemFields);
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
-	"+": "delete",
-});
-const taskSchemaBatchNoIsolation = type({
-	context: "string",
 	tasks: taskItemSchema.array(),
-	"+": "delete",
+	"+": "reject",
 });
-const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaBatch] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
-/** Active task tool parameter schema for the current isolation / batch flags */
+/** Active task tool parameter schema for the current batch and capability flags */
 export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
 
 const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -113,7 +83,6 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 }
 
 function createTaskSchema(options: {
-	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	defaultAgent: string;
 	effortEnabled: boolean;
@@ -122,69 +91,29 @@ function createTaskSchema(options: {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				...effortField,
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				...toolsField,
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
-		const item = type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"+": "delete",
-		});
-		return type.raw({
-			context: "string",
-			tasks: item.array(),
-			"+": "delete",
-		});
-	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"isolated?": "boolean",
-			"+": "delete",
-		});
-	}
-	return type.raw({
+	const item = type.raw({
 		"name?": "string",
 		agent,
 		task: "string",
 		...effortField,
+		"mutable?": "boolean",
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
-		"+": "delete",
+		"+": "reject",
 	});
+	if (options.batchEnabled) {
+		return type.raw({
+			context: "string",
+			tasks: item.array(),
+			"+": "reject",
+		});
+	}
+	return item;
 }
 
 /** Build the task wire schema for the current settings and spawn policy. */
 export function getTaskSchema(options: {
-	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
@@ -195,10 +124,9 @@ export function getTaskSchema(options: {
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled) {
-		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
-		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+		return options.batchEnabled ? taskSchemaBatch : taskSchema;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
+	const key = `${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent });
@@ -225,8 +153,13 @@ export interface AgentDefinition {
 	model?: string[];
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
-	/** Isolated file changes: apply via task isolation settings, or discard (the default). */
-	isolation?: "apply" | "discard";
+	/**
+	 * Apply-back ceiling for cloned executions: `true` permits the harness to
+	 * integrate the agent's changes into the parent checkout when the caller
+	 * requests it. Absent means `false`; a caller may narrow this ceiling with
+	 * `mutable: false` but never exceed it.
+	 */
+	mutable?: boolean;
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
@@ -237,4 +170,15 @@ export interface AgentDefinition {
 	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
+}
+
+/**
+ * Host-only managed execution contract: runs the subagent directly in the
+ * parent's working tree with the supplied capability ceilings. Never parsed
+ * from agent frontmatter or accepted from public task/eval arguments;
+ * supplied properties replace the definition's own contract.
+ */
+export interface ManagedSubagentExecution {
+	toolNames?: string[];
+	spawns?: string[] | "*";
 }

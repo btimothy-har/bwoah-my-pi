@@ -7,6 +7,7 @@ import * as discovery from "../../src/task/discovery";
 import type { AgentDefinition } from "../../src/task/types";
 import { WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const SCOUT: AgentDefinition = {
 	name: "scout",
@@ -26,7 +27,6 @@ function makeSession(): ToolSession {
 		settings: Settings.isolated({
 			"task.maxConcurrency": 2,
 			"task.maxRecursionDepth": 2,
-			"task.isolation.enabled": false,
 			"task.enableLsp": false,
 		}),
 		asyncJobManager: manager,
@@ -35,6 +35,13 @@ function makeSession(): ToolSession {
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => null,
 	};
+}
+
+function mockCreateSupport(agents: AgentDefinition[] = [SCOUT]): void {
+	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	// Pool creation preflights an ordinary clone; the seam needs no real repo.
+	// Workers never launch in these tests, so the runner/merge stubs stay inert.
+	stubCloneSeam({ repoRoot: "/tmp" });
 }
 
 afterEach(async () => {
@@ -66,7 +73,7 @@ describe("runEvalWorkpool", () => {
 	});
 
 	it("creates unique default names and validates push and peek arguments", async () => {
-		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		mockCreateSupport();
 		const session = makeSession();
 		const events: Array<Record<string, unknown>> = [];
 		const first = await runEvalWorkpool(
@@ -87,5 +94,30 @@ describe("runEvalWorkpool", () => {
 		await expect(runEvalWorkpool({ op: "wait", name: "scout-pool" }, { session })).rejects.toThrow(
 			'unknown workpool operation "wait"',
 		);
+	});
+
+	it("validates mutable and rejects removed isolation controls at creation", async () => {
+		mockCreateSupport();
+		const session = makeSession();
+
+		await expect(runEvalWorkpool({ op: "create", agent: "scout", mutable: "yes" }, { session })).rejects.toThrow(
+			"workpool mutable must be a boolean",
+		);
+		for (const key of ["isolated", "apply", "merge", "readOnly", "isolation"] as const) {
+			await expect(runEvalWorkpool({ op: "create", agent: "scout", [key]: true }, { session })).rejects.toThrow(
+				"Subagent isolation controls were removed",
+			);
+		}
+		// Scout's definition permits no apply-back: creation fails before any pool exists.
+		await expect(runEvalWorkpool({ op: "create", agent: "scout", mutable: true }, { session })).rejects.toThrow(
+			'Agent "scout" does not permit mutable execution',
+		);
+		await expect(runEvalWorkpool({ op: "status", name: "scout-pool" }, { session })).rejects.toThrow(
+			'unknown workpool "scout-pool"',
+		);
+
+		// Narrowing to discard is accepted and creates the pool.
+		const created = await runEvalWorkpool({ op: "create", agent: "scout", mutable: false }, { session });
+		expect(created).toEqual({ name: "scout-pool", agent: "scout", limit: 2 });
 	});
 });

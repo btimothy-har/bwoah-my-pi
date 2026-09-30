@@ -350,6 +350,10 @@ async function readPersistedAgentMetadata(
 						typeof record.modelRole === "string" ? record.modelRole : (history.modelRole ?? inferred.modelRole),
 					resolvedModel: typeof record.resolvedModel === "string" ? record.resolvedModel : history.resolvedModel,
 					readOnly: typeof record.readOnly === "boolean" ? record.readOnly : inferred.readOnly,
+					cloneDisposition:
+						record.cloneDisposition === "discard" || record.cloneDisposition === "merge"
+							? record.cloneDisposition
+							: undefined,
 				};
 				return false;
 			},

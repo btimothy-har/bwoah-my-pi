@@ -13,7 +13,6 @@ import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides 
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
-import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -21,6 +20,7 @@ import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-h
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
+import { normalizeToolNames } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -41,13 +41,20 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import {
+	hasObsoleteSubagentControl,
+	OBSOLETE_SUBAGENT_CONTROL_MESSAGE,
+	resolveSubagentToolNames,
+	SubagentToolPolicyError,
+} from "./tool-policy";
+import { type AgentDefinition, canSpawnAtDepth, type ManagedSubagentExecution } from "./types";
 import type {
 	AgentProgress,
 	SingleResult,
 	StructuredSubagentOutput,
 	StructuredSubagentSchemaMode,
 	StructuredSubagentSchemaSource,
+	SubagentCloneDisposition,
 } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
@@ -66,12 +73,11 @@ export interface StructuredSubagentSchemaResolution {
 	outputSchemaOverridesAgent: boolean;
 }
 
-/** Isolation controls shared by the task and eval surfaces. */
-export interface StructuredSubagentIsolationControls {
-	requested?: boolean;
-	merge?: "patch" | "branch";
-	apply?: boolean;
-}
+/** How a validated subagent run executes once dispatched. */
+export type SubagentExecutionPolicy =
+	| { kind: "clone"; disposition: SubagentCloneDisposition; mergeMode: "patch" | "branch" }
+	| { kind: "managed"; contract: ManagedSubagentExecution }
+	| { kind: "plan" };
 
 /** Identity and presentation metadata supplied by the calling surface. */
 export interface StructuredSubagentIdentity {
@@ -100,7 +106,14 @@ export interface StructuredSubagentRequest {
 	detached?: boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
-	isolation?: StructuredSubagentIsolationControls;
+	/**
+	 * Requested clone disposition: `true` asks for apply-back (merge), `false`
+	 * asks to discard. Omitted resolves to the definition's `mutable` ceiling.
+	 * Never exceeds that ceiling; host-managed and plan-mode runs reject it.
+	 */
+	mutable?: boolean;
+	/** Host-managed execution contract for product-owned workflows; never parsed from task/eval arguments. */
+	managedSubagentExecution?: ManagedSubagentExecution;
 	/** The parent agent name forbidden from recursively spawning itself. */
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
@@ -115,7 +128,7 @@ export interface StructuredSubagentRequest {
 	onArtifactsRetained?: (cleanup: () => Promise<void>) => void;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
-	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
+	/** Host-managed runs share their parent's eval kernel by default; ordinary clones never do. */
 	shareEvalSession?: boolean;
 	/** Task frontends may inherit LSP; eval frontends normally set this false. */
 	enableLsp?: boolean;
@@ -146,14 +159,10 @@ export interface EffectiveSubagentPolicy {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
-	planMode: boolean;
-	isIsolated: boolean;
-	/** Discard isolated file changes instead of capturing a patch or branch. */
-	discardChanges: boolean;
-	/** Reason default isolation could not run for a discard agent. */
-	isolationUnavailable?: string;
-	mergeMode: "patch" | "branch";
-	applyChanges: boolean;
+	/** How this run executes: ordinary clone (with its disposition), host-managed, or plan-attenuated. */
+	execution: SubagentExecutionPolicy;
+	/** LSP mutation policy forwarded to child session construction; `false` grants writable LSP to ordinary clones. */
+	lspReadOnly?: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
 }
@@ -226,15 +235,18 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	if (request.customTools?.length) {
 		throw new StructuredSubagentError("preflight", "Eval-defined tools are unavailable in plan mode.");
 	}
-	const isolation = request.isolation;
-	if (
-		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
-	) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolation, apply, and merge controls are unavailable in plan mode.",
-		);
+	if (request.mutable === true) {
+		throw new StructuredSubagentError("preflight", "Mutable subagent execution is unavailable in plan mode.");
+	}
+}
+
+/** Reject the removed isolation request controls by own-key presence, even for false/null/undefined values. */
+function assertNoObsoleteControls(request: StructuredSubagentRequest): void {
+	if (hasObsoleteSubagentControl(request)) {
+		throw new StructuredSubagentError("preflight", OBSOLETE_SUBAGENT_CONTROL_MESSAGE);
+	}
+	if (request.mutable !== undefined && typeof request.mutable !== "boolean") {
+		throw new StructuredSubagentError("preflight", "`mutable` must be a boolean.");
 	}
 }
 
@@ -271,6 +283,7 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
+	assertNoObsoleteControls(request);
 	await request.session.settings.reloadFromDisk();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
@@ -296,7 +309,37 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// Plan-mode attenuation wins over every other execution contract.
+	const managed = planMode
+		? undefined
+		: (request.managedSubagentExecution ?? request.session.managedSubagentExecution);
+	if (managed !== undefined && request.mutable !== undefined) {
+		throw new StructuredSubagentError("preflight", "mutable applies only to ordinary cloned subagents.");
+	}
+	let effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	if (!planMode && managed === undefined) {
+		// Ordinary spawns share one coding toolset; the definition's `tools` are
+		// additive built-in extras on top, joined by caller-supplied eval tools.
+		try {
+			effectiveAgent = { ...agent, tools: resolveSubagentToolNames(agent, request.customTools ?? []) };
+		} catch (error) {
+			if (error instanceof SubagentToolPolicyError) {
+				throw new StructuredSubagentError("preflight", error.message, { cause: error });
+			}
+			throw error;
+		}
+	} else if (managed !== undefined) {
+		// An explicit empty spawn list means no authority. The key must be
+		// materialized with value undefined — spreading nothing would leak the
+		// definition's own spawns through — and downstream presence checks key
+		// off `=== undefined`, so the explicit undefined is exactly "absent".
+		const managedSpawns = managed.spawns === "*" || (managed.spawns?.length ?? 0) > 0 ? managed.spawns : undefined;
+		effectiveAgent = {
+			...agent,
+			...(managed.toolNames !== undefined ? { tools: normalizeToolNames(managed.toolNames) } : {}),
+			...(managed.spawns !== undefined ? { spawns: managedSpawns } : {}),
+		};
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -326,39 +369,36 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
-	const applies = agent.isolation === "apply";
-	const requested = request.isolation?.requested;
-	if (
-		!applies &&
-		(requested === false || request.isolation?.apply !== undefined || request.isolation?.merge !== undefined)
-	) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Agent "${agentName}" runs isolated and discards its file changes (agent frontmatter \`isolation\` is not \`apply\`); \`isolated: false\`, \`apply\`, and \`merge\` are unavailable for it.`,
-		);
-	}
-	if (requested === true && !isolationEnabled) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
-		);
-	}
-	let isIsolated: boolean;
-	let isolationUnavailable: string | undefined;
-	if (planMode || requested === false) {
-		isIsolated = false;
-	} else if (requested === true) {
-		isIsolated = true;
-	} else if (!isolationEnabled) {
-		isIsolated = false;
-		if (!applies) isolationUnavailable = "task.isolation.enabled is false";
+	let execution: SubagentExecutionPolicy;
+	if (planMode) {
+		execution = { kind: "plan" };
+	} else if (managed !== undefined) {
+		execution = { kind: "managed", contract: managed };
 	} else {
+		// The definition's `mutable` is the apply-back ceiling: a caller may
+		// narrow true to false, never widen false to true. Omitted requests
+		// resolve to the ceiling itself.
+		const ceiling = agent.mutable ?? false;
+		const requested = request.mutable ?? ceiling;
+		if (requested && !ceiling) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Agent "${agentName}" does not permit mutable execution; omit mutable or pass mutable: false.`,
+			);
+		}
 		const probe = await probeIsolationRepoRoot(request.session.cwd);
-		isIsolated = "repoRoot" in probe;
-		if (!applies && "unavailable" in probe) isolationUnavailable = probe.unavailable;
+		if (!("repoRoot" in probe)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Subagent execution requires an isolated clone, but this workspace cannot provide one: ${probe.unavailable}`,
+			);
+		}
+		execution = {
+			kind: "clone",
+			disposition: requested ? "merge" : "discard",
+			mergeMode: request.session.settings.get("task.isolation.merge"),
+		};
 	}
-	const discardChanges = isIsolated && !applies;
 	return {
 		discovery,
 		agentName,
@@ -369,15 +409,9 @@ export async function resolveEffectiveSubagentPolicy(
 		serviceTierOverride,
 		parentActiveModelPattern,
 		schema,
-		planMode,
-		isIsolated,
-		discardChanges,
-		isolationUnavailable,
-		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
-		applyChanges:
-			!discardChanges &&
-			(request.isolation?.apply ??
-				(request.invocationKind === "task" ? request.session.settings.get("task.isolation.apply") : true)),
+		execution,
+		lspReadOnly:
+			execution.kind === "clone" ? false : execution.kind === "managed" ? request.session.lspReadOnly : undefined,
 		enableLsp:
 			!planMode &&
 			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
@@ -481,9 +515,13 @@ function buildExecutorOptions(
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
+	const execution = policy.execution;
+	const ordinary = execution.kind === "clone";
 	const restrictToolNames =
-		policy.planMode || session.restrictToolNames === true || isReadOnlyAgent(policy.effectiveAgent);
-	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+		ordinary ||
+		execution.kind === "plan" ||
+		session.restrictToolNames === true ||
+		isReadOnlyAgent(policy.effectiveAgent);
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -523,10 +561,14 @@ function buildExecutorOptions(
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
+		lspReadOnly: policy.lspReadOnly,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
-		keepAlive: policy.discardChanges && request.keepAlive === undefined ? false : request.keepAlive,
+		cloneDisposition: ordinary ? execution.disposition : undefined,
+		managedSubagentExecution: execution.kind === "managed" ? execution.contract : undefined,
+		keepAlive:
+			ordinary && execution.disposition === "discard" && request.keepAlive === undefined ? false : request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
@@ -534,8 +576,8 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
-		enableMCP,
+		// Subagent executor sessions never inherit ambient MCP: no manager, no proxies.
+		enableMCP: false,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -556,7 +598,10 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		// Ordinary cloned children own their eval kernel so scratch state never
+		// leaks into the parent; managed workflows keep their historical sharing.
+		parentEvalSessionId:
+			ordinary || request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -566,7 +611,7 @@ async function loadPlanReference(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 ): Promise<{ path: string; content: string } | undefined> {
-	if (policy.planMode) return undefined;
+	if (policy.execution.kind === "plan") return undefined;
 	const localProtocolOptions: LocalProtocolOptions = request.session.localProtocolOptions ?? {
 		getArtifactsDir: request.session.getArtifactsDir ?? (() => null),
 		getSessionId: request.session.getSessionId ?? (() => null),
@@ -634,23 +679,6 @@ async function isolationRecoveryHint(result: SingleResult, artifactsDir: string)
 	return hint ? ` ${hint}` : "";
 }
 
-/**
- * Summary for an isolated run whose changes are captured but deliberately not
- * applied (`task.isolation.apply=false`). Every captured artifact is named:
- * the root patch only when it holds changes, and each nested-repo patch file,
- * so the parent knows exactly where the work lives.
- */
-function describeCapturedChanges(result: SingleResult): string {
-	const nestedPatchPaths = result.nestedPatchPaths ?? [];
-	return renderIsolationSummary({
-		kind: "captured",
-		branchName: result.branchName,
-		rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
-		nestedCount: nestedPatchPaths.length || (result.nestedPatches?.length ?? 0),
-		nestedPatchPaths,
-	});
-}
-
 function attachStructuredOutputMetadata(result: SingleResult, schema: StructuredSubagentSchemaResolution): void {
 	if (schema.source === "none") {
 		delete result.structuredOutput;
@@ -712,16 +740,20 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			deferredCleanup = completion;
 		};
 		baseOptions.planReference = await loadPlanReference(request, policy);
+		const execution = policy.execution;
+		const clone = execution.kind === "clone" ? execution : undefined;
 		// The session resolver (not a fresh classification of the clone's cwd) so
 		// nested isolated spawns inherit the key: a clone's own git root would
 		// classify as primary and never match the workspace.related map.
-		if (policy.isIsolated) {
+		if (clone) {
 			baseOptions.parentWorkspaceKey = (await request.session.resolveRelatedWorkspace?.())?.key ?? undefined;
 		}
 		let isolationContext: IsolationContext | null = null;
-		if (policy.isIsolated) {
+		if (clone) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd, { baseline: !policy.discardChanges });
+				isolationContext = await prepareIsolationContext(request.session.cwd, {
+					baseline: clone.disposition === "merge",
+				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
@@ -735,34 +767,46 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
 			onSubprocessResult?.(result);
-		} else {
+		} else if (clone) {
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
 				preferredBackend: parseIsolationBackend(request.session.settings.get("isolation.backend")),
 				agentId: id,
-				mergeMode: policy.mergeMode,
-				discard: policy.discardChanges,
+				mergeMode: clone.mergeMode,
+				discard: clone.disposition === "discard",
 				artifactsDir: lease.artifactsDir,
 				description: trimToUndefined(request.identity?.label),
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
 				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
 				onSubprocessResult,
 			});
+		} else {
+			throw new StructuredSubagentError("execution", "Isolated context prepared for a non-clone execution.");
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
+		if (clone && result.cloneDisposition === undefined) result.cloneDisposition = clone.disposition;
+		// Discard runs never capture: strip any runner-supplied capture fields so
+		// they cannot leak into caller-visible details or recovery bookkeeping.
+		if (clone?.disposition === "discard") {
+			delete result.patchPath;
+			delete result.hasRootChanges;
+			delete result.branchName;
+			delete result.nestedPatches;
+			delete result.nestedPatchPaths;
+		}
 		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
 		requiresRecoveryArtifacts =
-			policy.isIsolated &&
+			clone !== undefined &&
 			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&
 			(result.patchPath !== undefined || result.branchName !== undefined || (result.nestedPatches?.length ?? 0) > 0);
 
-		if (policy.isIsolated && isolationContext && policy.discardChanges) {
+		if (clone && isolationContext && clone.disposition === "discard") {
 			mergeSummary = renderIsolationSummary({ kind: "discarded" });
 		} else if (
-			policy.isIsolated &&
+			clone &&
 			isolationContext &&
-			policy.applyChanges &&
+			clone.disposition === "merge" &&
 			result.exitCode === 0 &&
 			!result.error &&
 			!result.aborted
@@ -770,7 +814,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			const outcome = await mergeIsolatedChanges({
 				result,
 				repoRoot: isolationContext.repoRoot,
-				mergeMode: policy.mergeMode,
+				mergeMode: clone.mergeMode,
 			});
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
@@ -778,7 +822,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				const nestedPatchSummary = await applyEligibleNestedPatches({
 					result,
 					repoRoot: isolationContext.repoRoot,
-					mergeMode: policy.mergeMode,
+					mergeMode: clone.mergeMode,
 					changesApplied: outcome.changesApplied,
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
 					commitMessage: makeIsolationCommitMessage(request.session)(),
@@ -787,7 +831,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				requiresRecoveryArtifacts ||=
 					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
 			}
-		} else if (policy.isIsolated && isolationContext && result.exitCode === 0 && result.error && !result.aborted) {
+		} else if (clone && isolationContext && result.exitCode === 0 && result.error && !result.aborted) {
 			// The agent finished but the runner could not capture, persist, or
 			// commit its changes. `result.error` names the recovery route (retained
 			// workspace, rescued branch); it is the parent's only way to find it.
@@ -798,12 +842,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths ?? [],
 			});
-		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
-			mergeSummary = describeCapturedChanges(result);
 		}
-		if (policy.isolationUnavailable) {
-			mergeSummary = renderIsolationSummary({ kind: "unavailable", error: policy.isolationUnavailable });
-		}
+		result.changesApplied = clone ? changesApplied : undefined;
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
 		return {
@@ -822,12 +862,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
+		const execution = policy.execution;
 		const shouldRetainArtifacts =
 			request.detached === true ||
 			(request.retainArtifacts && (completedSuccessfully || hasValidStructuredOutput)) ||
-			(policy.isIsolated &&
-				!policy.discardChanges &&
-				(!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+			(execution.kind === "clone" &&
+				execution.disposition === "merge" &&
+				(changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		const cleanupArtifacts = async (): Promise<void> => {
 			await fs.rm(lease.artifactsDir, { recursive: true, force: true });

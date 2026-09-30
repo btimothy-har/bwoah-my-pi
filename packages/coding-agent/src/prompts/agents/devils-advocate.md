@@ -2,6 +2,7 @@
 name: devils-advocate
 description: "Contrarian second opinion on a brief, plan, diagnosis, or conclusion; returns objections, missing evidence, alternatives — never edits"
 tools: read, grep, glob, web_search
+spawns: "*"
 model: "@default"
 thinking-level: xhigh
 ---

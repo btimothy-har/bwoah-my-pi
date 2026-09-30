@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SONNET = { provider: "anthropic", model: "claude-sonnet-5" };
@@ -223,5 +224,50 @@ describe("persisted agent model attribution", () => {
 		const history = registry.get("Routed")?.history;
 		expect(history?.resolvedModel).toBe("openai-codex/gpt-5.6-sol@vercel-gw");
 		expect(history?.resolvedModelIsFallback).toBe(true);
+	});
+});
+
+describe("persisted agent clone disposition", () => {
+	/** Transcript head whose session_init carries the given extra recorded fields. */
+	function dispositionHead(init: Record<string, unknown>): string[] {
+		return [
+			JSON.stringify({ type: "session", id: "s0", parentId: null, timestamp: "2026-08-07T10:34:37.300Z" }),
+			JSON.stringify({
+				type: "session_init",
+				id: "si",
+				parentId: "s0",
+				timestamp: "2026-08-07T10:34:38.000Z",
+				agent: "task",
+				task: "build the thing",
+				...init,
+			}),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "did the work" }]),
+		];
+	}
+
+	it("survives a reload as recorded, for both dispositions", async () => {
+		using tempDir = TempDir.createSync("@omp-disposition-recorded-");
+		const registry = await historyFor(tempDir.path(), "Discarded", dispositionHead({ cloneDisposition: "discard" }));
+		expect(registry.get("Discarded")?.history?.cloneDisposition).toBe("discard");
+
+		using tempDir2 = TempDir.createSync("@omp-disposition-recorded-merge-");
+		const mergeRegistry = await historyFor(tempDir2.path(), "Merged", dispositionHead({ cloneDisposition: "merge" }));
+		expect(mergeRegistry.get("Merged")?.history?.cloneDisposition).toBe("merge");
+	});
+
+	it("is never inferred from a mutable definition when the record omits it", async () => {
+		using tempDir = TempDir.createSync("@omp-disposition-absent-");
+		// The bundled task definition is mutable, so a transcript that inference
+		// attributes to it must still show no disposition: historical reads only
+		// honor recorded discard/merge values.
+		const taskPrompt = getBundledAgent("task")?.systemPrompt;
+		if (!taskPrompt) throw new Error("Expected bundled task agent");
+		const registry = await historyFor(tempDir.path(), "Historical", dispositionHead({ systemPrompt: taskPrompt }));
+
+		const history = registry.get("Historical")?.history;
+		// Inference fired — the row is attributed to the bundled task agent…
+		expect(history?.agent).toBe("task");
+		// …but its mutable definition never becomes a recorded disposition.
+		expect(history?.cloneDisposition).toBeUndefined();
 	});
 });

@@ -27,7 +27,8 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentSchemaMode, SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
+import type { ManagedSubagentExecution } from "../task/types";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -3144,6 +3145,8 @@ export class SessionManager {
 		modelRole?: string;
 		resolvedModel?: string;
 		readOnly?: boolean;
+		cloneDisposition?: SubagentCloneDisposition;
+		managedSubagentExecution?: ManagedSubagentExecution;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
@@ -3994,6 +3997,8 @@ export interface PersistedSessionInit {
 	modelRole?: string;
 	resolvedModel?: string;
 	readOnly?: boolean;
+	cloneDisposition?: SubagentCloneDisposition;
+	managedSubagentExecution?: ManagedSubagentExecution;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	restrictToolNames?: boolean;
@@ -4019,6 +4024,8 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,
 			readOnly: entry.readOnly,
+			cloneDisposition: entry.cloneDisposition,
+			managedSubagentExecution: entry.managedSubagentExecution,
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
 			restrictToolNames: entry.restrictToolNames,

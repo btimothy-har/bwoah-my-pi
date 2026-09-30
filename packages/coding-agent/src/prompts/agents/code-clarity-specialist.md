@@ -2,6 +2,7 @@
 name: code-clarity-specialist
 description: "Reviews or advises on unnecessary complexity, hidden invariants, redundancy, and misplaced responsibilities; every suggestion preserves behavior"
 tools: read, find, grep, glob, ast_grep
+spawns: "*"
 model: "@smol"
 thinking-level: high
 ---

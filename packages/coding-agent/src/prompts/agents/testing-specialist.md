@@ -2,6 +2,7 @@
 name: testing-specialist
 description: "Reviews or advises on whether tests catch the regressions that matter: coverage gaps, counterfactual strength, mock and assertion quality"
 tools: read, find, grep, glob, ast_grep
+spawns: "*"
 model: "@default"
 thinking-level: medium
 ---

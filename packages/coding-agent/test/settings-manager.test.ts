@@ -2054,25 +2054,27 @@ describe("Settings", () => {
 			expect((await readSettings()).inspect_image).toBeUndefined();
 		});
 
-		it("migrates nested task isolation mode none to disabled", async () => {
+		it("drops the legacy nested isolation mode without deriving enablement", async () => {
 			await writeSettings({ task: { isolation: { mode: "none" } } });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
+			// task.isolation.enabled/apply are inert legacy booleans: the mode key
+			// migrates away but nothing derives enabled anymore.
 			expect(settings.get("task.isolation.enabled")).toBe(false);
 			expect(settings.get("isolation.backend")).toBe("auto");
 			settings.set("display.showTokenUsage", true);
 			await settings.flush();
 			const saved = await readSettings();
-			expect((saved.task as Record<string, Record<string, unknown>>).isolation).toEqual({ enabled: false });
+			expect((saved.task as Record<string, Record<string, unknown>>).isolation ?? {}).toEqual({});
 		});
 
-		it("migrates flat task isolation mode to enabled with its backend", async () => {
+		it("maps the flat legacy isolation mode to its backend only", async () => {
 			await writeSettings({ [["task", "isolation", "mode"].join(".")]: "reflink" });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("task.isolation.enabled")).toBe(false);
 			expect(settings.get("isolation.backend")).toBe("reflink");
 		});
 
@@ -2081,7 +2083,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("task.isolation.enabled")).toBe(false);
 			expect(settings.get("isolation.backend")).toBe("overlayfs");
 		});
 

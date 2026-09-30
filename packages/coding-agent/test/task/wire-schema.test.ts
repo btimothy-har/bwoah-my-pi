@@ -7,10 +7,11 @@ import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-// Contract: the task tool's wire shape is flat `{ name?, agent?, task, isolated? }`
+// Contract: the task tool's wire shape is flat `{ name?, agent?, task, mutable? }`
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
-// `description`) are stripped by the schema's `+: "delete"` — never rejected.
+// `description`, removed isolation controls) are rejected by the schema's
+// `+: "reject"` — never silently stripped.
 
 describe("oneLineLabel", () => {
 	it("returns short text unchanged", () => {
@@ -67,36 +68,39 @@ describe("task wire schema", () => {
 		}
 	});
 
-	it("deletes stale caller keys (role, description) instead of rejecting", () => {
+	it("rejects stale caller keys (role, description) instead of stripping them", () => {
 		const parsed = taskSchema({ agent: "task", task: "x", role: "Rust specialist", description: "stale ui label" });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (!(parsed instanceof type.errors)) {
-			expect("role" in parsed).toBe(false);
-			expect("description" in parsed).toBe(false);
-			expect(parsed.task).toBe("x");
-		}
+		expect(parsed instanceof type.errors).toBe(true);
 	});
 
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+		const batch = getTaskSchema({ batchEnabled: true });
 		const items = parsedItems(batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x" }] }));
 		expect(items[0]?.agent).toBe("task");
 		expect(items[0]?.name).toBe("DbMigrator");
 	});
 
 	it("defaults batch item agents to the schema's defaultAgent", () => {
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, defaultAgent: "scout" });
+		const batch = getTaskSchema({ batchEnabled: true, defaultAgent: "scout" });
 		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x" }, { agent: "reviewer", task: "y" }] }));
 		expect(items[0]?.agent).toBe("scout");
 		expect(items[1]?.agent).toBe("reviewer");
 	});
 
-	it("deletes stale keys from batch items", () => {
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", role: "DB migration specialist" }] }));
-		const item = items[0] ?? {};
-		expect("role" in item).toBe(false);
-		expect(item.task).toBe("x");
+	it("rejects stale keys on batch items", () => {
+		const batch = getTaskSchema({ batchEnabled: true });
+		expect(batch({ context: "ctx", tasks: [{ task: "x", role: "DB migration specialist" }] })).toBeInstanceOf(
+			type.errors,
+		);
+	});
+
+	it("accepts a per-item mutable boolean and rejects a batch-root one", () => {
+		const batch = getTaskSchema({ batchEnabled: true });
+		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", mutable: false }] }));
+		expect(items[0]?.mutable).toBe(false);
+		// Batch-root mutable has no schema field; the tool rejects it with the
+		// actionable "per task" message at execute time.
+		expect(batch({ context: "ctx", mutable: true, tasks: [{ task: "x" }] }) instanceof type.errors).toBe(true);
 	});
 });
 
@@ -113,7 +117,7 @@ describe("task approval details surface the dispatch", () => {
 		return TaskTool.create({
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
+			settings: Settings.isolated({ "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => spawns,
 		} as unknown as ToolSession);

@@ -512,9 +512,6 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
-		if (item?.isolated === true) {
-			line += theme.fg("dim", " [isolated]");
-		}
 		lines.push(line);
 	}
 	if (cap < tasks.length) {
@@ -579,7 +576,6 @@ function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSe
  * Render the tool call arguments.
  */
 export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: Theme): Component {
-	const showIsolated = "isolated" in args && args.isolated === true;
 	// Dispatch glyph from the first frame: spawning is non-blocking, so a
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
@@ -617,7 +613,6 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 
 		return {
 			header,
-			headerMeta: showIsolated ? "isolated" : undefined,
 			sections,
 			phase: "pending",
 			borderColor: "borderMuted",
@@ -1734,8 +1729,13 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
-	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
-	isolated?: boolean;
+	/**
+	 * Harness apply-back eligibility for this spawn: `true` merges a successful
+	 * clone's changes into the caller's checkout, `false` discards them. May
+	 * narrow but never exceed the agent definition's `mutable` ceiling; omitted
+	 * resolves to that definition value during preflight.
+	 */
+	mutable?: boolean;
 }
 
 /**
@@ -1763,8 +1763,13 @@ export interface TaskParams {
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
-	/** Run in an isolated worktree (flat form; per-item in batch form). */
-	isolated?: boolean;
+	/**
+	 * Harness apply-back eligibility (flat form only; batch form carries it
+	 * per-item): `true` merges a successful clone's changes, `false` discards
+	 * them. May narrow but never exceed the agent definition's `mutable`
+	 * ceiling; omitted resolves to that definition value during preflight.
+	 */
+	mutable?: boolean;
 }
 
 /**
@@ -1912,6 +1917,13 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/**
+ * What the harness does with an ordinary cloned subagent's changes:
+ * `"discard"` tears the clone down without integrating; `"merge"` integrates
+ * a successful run's changes into the caller's checkout.
+ */
+export type SubagentCloneDisposition = "discard" | "merge";
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -1968,6 +1980,18 @@ export interface SingleResult {
 	 * messageable after the run — summaries must not suggest otherwise.
 	 */
 	isolated?: boolean;
+	/**
+	 * Resolved clone disposition for an ordinary cloned run; absent for
+	 * plan/managed execution. Recorded at dispatch — never inferred from the
+	 * current agent definition.
+	 */
+	cloneDisposition?: SubagentCloneDisposition;
+	/**
+	 * Initial integration outcome for a merge-disposition run: `true` when the
+	 * child's changes were applied back, `false` when integration was skipped
+	 * or failed, `null`/absent when not applicable (discard or non-clone).
+	 */
+	changesApplied?: boolean | null;
 	/** Patch path for isolated worktree output */
 	patchPath?: string;
 	/**

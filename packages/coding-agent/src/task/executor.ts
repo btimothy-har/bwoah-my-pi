@@ -87,6 +87,7 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
+	type ManagedSubagentExecution,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -99,6 +100,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type SubagentCloneDisposition,
 	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
@@ -474,10 +476,12 @@ export interface ExecutorOptions {
 	/** Include IRC only when the invocation policy permits collaboration. */
 	enableIrc?: boolean;
 	enableLsp?: boolean;
+	/** LSP mutation policy for the child; forwarded to session construction. */
+	lspReadOnly?: boolean;
 	/**
 	 * Enable MCP capabilities for this child. `false` suppresses both inherited
 	 * MCP proxy tools and session MCP discovery; it never consults the
-	 * process-global MCP manager. Defaults to `true`.
+	 * process-global MCP manager. Defaults to `false`.
 	 */
 	enableMCP?: boolean;
 	/** Kernel-defined tools explicitly exposed by the parent eval session. */
@@ -489,6 +493,10 @@ export interface ExecutorOptions {
 	 * tool, suppressing discovered and always-included capabilities.
 	 */
 	restrictToolNames?: boolean;
+	/** Resolved clone disposition for ordinary cloned runs; absent for host-managed execution. */
+	cloneDisposition?: SubagentCloneDisposition;
+	/** Effective host-managed execution contract, forwarded into the child session. */
+	managedSubagentExecution?: ManagedSubagentExecution;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -3668,9 +3676,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
 				}
 			}
+			// An armed prewalk's plan/checklist nudge requires the child to commit
+			// its own todo list before the hand-off; restricted tool lists
+			// otherwise omit todo, so grant it explicitly here when enabled.
+			if (prewalk && toolNames && settings.get("todo.enabled") && !toolNames.includes("todo")) {
+				toolNames = [...toolNames, "todo"];
+			}
 
 			const restrictToolNames = options.restrictToolNames === true;
-			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+			// Subagent executor sessions never inherit ambient MCP: only an explicit
+			// opt-in enables it, and no caller currently does.
+			const enableMCP = options.enableMCP === true;
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const sessionCustomTools = [...mcpProxyTools, ...(options.customTools ?? [])];
@@ -3815,11 +3831,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentName: agent.name,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
+				lspReadOnly: options.lspReadOnly,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
 				enableMCP,
 				mcpManager,
 				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
+				// Caller-supplied eval tools remain available inside the restricted
+				// child registry; discovered custom/extension tools stay excluded.
+				allowRestrictedCustomTools: (options.customTools?.length ?? 0) > 0,
+				managedSubagentExecution: options.managedSubagentExecution,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3952,9 +3973,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 			// Todos are parent-owned bookkeeping and stripped from subagents —
-			// except under prewalk, whose plan nudge + todo gate require the
+			// except when the definition explicitly grants todo as an additive
+			// extra, or under prewalk, whose plan nudge + todo gate require the
 			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
+			const todoGranted = agent.tools?.includes("todo") === true;
+			const isParentOwnedTool = (name: string): boolean => !prewalk && !todoGranted && name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
@@ -3981,6 +4004,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				readOnly: isReadOnlyAgent(agent),
+				cloneDisposition: options.cloneDisposition,
+				managedSubagentExecution: options.managedSubagentExecution,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
@@ -3992,6 +4017,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// even when the workspace was retained for recovery.
 				isolated: worktree !== undefined || undefined,
 			});
+
+			// Publish the resolved disposition on the live ref alongside the
+			// persisted contract so Agent Hub shows it without re-reading the
+			// session file; historical reads never infer it from definitions.
+			if (options.cloneDisposition !== undefined) {
+				AgentRegistry.global().setHistory(
+					id,
+					{ cloneDisposition: options.cloneDisposition },
+					sessionFile ?? undefined,
+				);
+			}
 
 			abortSignal.addEventListener(
 				"abort",

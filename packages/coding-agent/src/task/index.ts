@@ -31,12 +31,13 @@ import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { formatTaskResultSummary } from "./result-summary";
+import { formatTaskResultSummary, isSubagentResumable } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import {
 	type AgentProgress,
 	type SingleResult,
+	type SubagentCloneDisposition,
 	type TaskItem,
 	type TaskParams,
 	type TaskToolDetails,
@@ -52,6 +53,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { hasObsoleteSubagentControl, OBSOLETE_SUBAGENT_CONTROL_MESSAGE } from "./tool-policy";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -117,8 +119,6 @@ export {
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
-	isolationEnabled: boolean;
-	applyIsolatedChanges: boolean;
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
@@ -126,6 +126,8 @@ interface TaskDescriptionOptions {
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
+	/** Plan mode or host-managed execution: children run in place, and `mutable` is rejected. */
+	nonCloneExecution: boolean;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -145,7 +147,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
-		appliesChanges: options.isolationEnabled && agent.isolation === "apply",
+		appliesChanges: !options.nonCloneExecution && agent.mutable === true,
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -154,8 +156,6 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
-		isolationEnabled: options.isolationEnabled,
-		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
@@ -163,6 +163,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
+		nonCloneExecution: options.nonCloneExecution,
 	});
 }
 
@@ -176,9 +177,14 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 /**
  * Reject legacy fields and shape/configuration combinations the current tool
  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
- * `schema` remains an eval-only alias and is rejected.
+ * `schema` remains an eval-only alias and is rejected. Removed isolation
+ * request controls and batch-root `mutable` are rejected before any eval
+ * tool description or preflight work happens.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
+	if (hasObsoleteSubagentControl(params)) {
+		return OBSOLETE_SUBAGENT_CONTROL_MESSAGE;
+	}
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
@@ -187,6 +193,12 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		if (disallowed.length > 0) {
 			return `task.batch is disabled, so the task tool does not accept ${disallowed.map(f => `\`${f}\``).join(" or ")}. Spawn one agent per call with \`task\`, or enable the task.batch setting.`;
 		}
+	}
+	if (Array.isArray(params.tasks) && Object.hasOwn(params, "mutable")) {
+		return "mutable is per task; put it on each tasks[] item.";
+	}
+	if (Object.hasOwn(params, "mutable") && typeof params.mutable !== "boolean") {
+		return "`mutable` must be a boolean: `true` applies a successful run's changes back, `false` discards them.";
 	}
 	return undefined;
 }
@@ -220,8 +232,14 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
+			if (!item || typeof item !== "object" || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
+			}
+			if (hasObsoleteSubagentControl(item)) {
+				return OBSOLETE_SUBAGENT_CONTROL_MESSAGE;
+			}
+			if (Object.hasOwn(item, "mutable") && typeof item.mutable !== "boolean") {
+				return `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""} has an invalid \`mutable\` value ${JSON.stringify(item.mutable)}. Use true (apply changes back) or false (discard).`;
 			}
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
@@ -252,7 +270,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 
 /**
  * Normalize a validated call into its spawn list: the `tasks[]` batch when
- * provided, otherwise the single top-level spawn. The flat form's `isolated`
+ * provided, otherwise the single top-level spawn. The flat form's `mutable`
  * flag is only materialized when the caller sent one — `#runSpawn`
  * distinguishes an absent key from an explicit value.
  */
@@ -265,7 +283,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
+	if ("mutable" in params) item.mutable = params.mutable;
 	return [item];
 }
 
@@ -275,8 +293,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * the item's own value, else `defaultAgent` from the session spawn policy.
  * `tasks` never leaks into a spawn; the shared `context` rides along
  * unchanged. Keys are only materialized when present — `#runSpawn`
- * distinguishes an absent `isolated` from an explicit one. The item's
- * `isolated` (batch form) wins over the top-level flag (flat form).
+ * distinguishes an absent `mutable` from an explicit one. Only the item's
+ * own `mutable` is copied; the batch root never carries one and the flat
+ * root's value already landed on the item in `resolveSpawnItems`.
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
@@ -287,11 +306,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
-	if (item.isolated !== undefined) {
-		spawn.isolated = item.isolated;
-	} else if ("isolated" in params) {
-		spawn.isolated = params.isolated;
-	}
+	if (item.mutable !== undefined) spawn.mutable = item.mutable;
 	return spawn;
 }
 
@@ -574,11 +589,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#spawnSemaphore: Semaphore | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
-		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.enabled");
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
-			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -593,15 +605,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
-		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
 			sessionAgents: this.session.getSessionAgents?.() ?? [],
-			isolationEnabled: !planMode && isolationEnabled,
-			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
@@ -609,6 +617,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			nonCloneExecution:
+				this.session.getPlanModeState?.()?.enabled === true || this.session.managedSubagentExecution !== undefined,
 		});
 	}
 	private constructor(
@@ -653,7 +663,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...("mutable" in params ? { mutable: params.mutable } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -732,13 +742,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
+		// Pin each item's resolved clone mode into a launch copy: queue-delayed
+		// launches re-check the definition ceiling at dispatch but never re-derive
+		// the disposition from a definition that may have changed since preflight.
+		// Plan/managed executions get no synthesized mutable key, and caller-owned
+		// items are never mutated.
+		const launchItems = spawnItems.map((item, index) => {
+			const execution = policies[index]!.execution;
+			return execution.kind === "clone" ? { ...item, mutable: execution.disposition === "merge" } : item;
+		});
+
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
 		// execution is available.
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
-		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
+		const asyncItems = manager ? launchItems.filter((_, index) => !itemBlocking[index]) : [];
 		const depthCapacity = canSpawnAtDepth(
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
@@ -768,7 +788,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index })),
+				launchItems.map((item, index) => ({ item, index })),
 				defaultAgent,
 				signal,
 				onUpdate,
@@ -823,7 +843,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				await this.#executeSyncFanout(
 					toolCallId,
 					params,
-					spawnItems.map((item, index) => ({ item, index })),
+					launchItems.map((item, index) => ({ item, index })),
 					defaultAgent,
 					signal,
 					onUpdate,
@@ -846,7 +866,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			blocking: boolean;
 			progress: AgentProgress;
 		}> = [];
-		for (const [index, item] of spawnItems.entries()) {
+		for (const [index, item] of launchItems.entries()) {
 			const agentType = resolvedAgents[index]!;
 			const policy = policies[index]!;
 			const agentSource = policy.agent.source;
@@ -1084,14 +1104,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (aborted: boolean, isolated: boolean): Promise<string> => {
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+		const buildFollowUpHint = async (
+			aborted: boolean,
+			cloneDisposition: SubagentCloneDisposition | undefined,
+		): Promise<string> => {
+			const ref = AgentRegistry.global().get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
-				isolated,
+				discarded: cloneDisposition === "discard",
+				mergeRetained: cloneDisposition === "merge",
 				ircEnabled,
-				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
+				resumable: isSubagentResumable({ aborted, cloneDisposition, status: ref?.status }),
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};
@@ -1234,7 +1258,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true, singleResult?.isolated === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true, singleResult?.cloneDisposition)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1251,7 +1275,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false, undefined) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1499,7 +1523,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...("mutable" in params ? { mutable: params.mutable } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

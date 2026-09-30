@@ -28,6 +28,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { stubCloneSeam } from "../helpers/clone-seam";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -99,6 +100,9 @@ describe("task per-item blocking split", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
+		// Ordinary spawns always clone: stub the clone seam so runs delegate to
+		// the (separately mocked) executor without a real Git checkout.
+		stubCloneSeam({ repoRoot: "/tmp" });
 	});
 
 	afterEach(async () => {

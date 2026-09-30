@@ -31,8 +31,8 @@ describe("bundled agent parsing", () => {
 			["conventions-specialist", Effort.High],
 			["integration-specialist", Effort.High],
 			["testing-specialist", Effort.Medium],
-			["code-clarity-specialist", Effort.Medium],
-			["docs-specialist", Effort.Low],
+			["code-clarity-specialist", Effort.High],
+			["docs-specialist", Effort.Medium],
 			["security-specialist", Effort.High],
 			["data-model-specialist", Effort.High],
 		] as const;
@@ -41,35 +41,56 @@ describe("bundled agent parsing", () => {
 			const agent = getBundledAgent(name);
 			expect(agent?.output).toBeUndefined();
 			expect(agent?.thinkingLevel).toBe(effort);
-			expect(agent?.isolation).toBeUndefined();
-			expect(agent?.spawns).toBeUndefined();
+			expect(agent?.mutable).toBeUndefined();
+			expect(agent?.spawns).toBe("*");
 			expect(agent?.tools).toEqual(["read", "find", "grep", "glob", "ast_grep", "yield"]);
 		}
 	});
 
 	it("keeps the devil's advocate read-only and unschematized by default", () => {
 		const agent = getBundledAgent("devils-advocate");
-		expect(agent?.isolation).toBeUndefined();
+		expect(agent?.mutable).toBeUndefined();
 		expect(agent?.tools).toEqual(["read", "grep", "glob", "web_search", "yield"]);
-		expect(agent?.thinkingLevel).toBe(Effort.High);
+		expect(agent?.thinkingLevel).toBe(Effort.XHigh);
 		expect(agent?.output).toBeUndefined();
 	});
 
-	it("accepts apply only when explicitly configured and defaults invalid isolation to discard", () => {
-		expect(getBundledAgent("task")?.isolation).toBe("apply");
-		expect(getBundledAgent("sonic")?.isolation).toBe("apply");
-		expect(getBundledAgent("reviewer")?.isolation).toBeUndefined();
-		for (const [value, expected] of [
-			["apply", "apply"],
-			["discard", "discard"],
-			["typo", undefined],
-		] as const) {
-			const agent = parseAgent(
+	it("permits apply-back only on explicit mutable definitions and rejects removed keys", () => {
+		expect(getBundledAgent("task")?.mutable).toBe(true);
+		expect(getBundledAgent("sonic")?.mutable).toBe(true);
+		expect(getBundledAgent("reviewer")?.mutable).toBeUndefined();
+
+		const mutableAgent = parseAgent(
+			"custom.md",
+			"---\nname: custom\ndescription: Custom agent\nmutable: true\n---\nReview the assignment.",
+			"user",
+		);
+		expect(mutableAgent.mutable).toBe(true);
+		const immutableAgent = parseAgent(
+			"custom.md",
+			"---\nname: custom\ndescription: Custom agent\nmutable: false\n---\nReview the assignment.",
+			"user",
+		);
+		expect(immutableAgent.mutable).toBe(false);
+
+		// A present but unsupported value is an invalid definition, not an omitted one.
+		expect(() =>
+			parseAgent(
 				"custom.md",
-				`---\nname: custom\ndescription: Custom agent\nisolation: ${value}\n---\nReview the assignment.`,
+				"---\nname: custom\ndescription: Custom agent\nmutable: typo\n---\nReview the assignment.",
 				"user",
-			);
-			expect(agent.isolation).toBe(expected);
+			),
+		).toThrow("Invalid agent field");
+
+		// The removed frontmatter keys fail loudly instead of being dropped.
+		for (const key of ["isolation", "readOnly"] as const) {
+			expect(() =>
+				parseAgent(
+					"custom.md",
+					`---\nname: custom\ndescription: Custom agent\n${key}: apply\n---\nReview the assignment.`,
+					"user",
+				),
+			).toThrow(`Agent frontmatter "${key}" was removed; use mutable: true or mutable: false.`);
 		}
 	});
 
@@ -83,7 +104,7 @@ describe("bundled agent parsing", () => {
 			});
 			const session = {
 				cwd: repo,
-				settings: Settings.isolated({ "task.isolation.enabled": true }),
+				settings: Settings.isolated({}),
 				hasUI: false,
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
@@ -96,9 +117,7 @@ describe("bundled agent parsing", () => {
 					agent: name,
 				});
 				expect(policy.agent.source).toBe("project");
-				expect(policy.isIsolated).toBe(true);
-				expect(policy.discardChanges).toBe(false);
-				expect(policy.applyChanges).toBe(true);
+				expect(policy.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
 			}
 
 			for (const name of ["conventions-specialist", "devils-advocate"]) {
@@ -109,9 +128,7 @@ describe("bundled agent parsing", () => {
 					agent: name,
 				});
 				expect(policy.agent.source).toBe("project");
-				expect(policy.isIsolated).toBe(true);
-				expect(policy.discardChanges).toBe(true);
-				expect(policy.applyChanges).toBe(false);
+				expect(policy.execution).toEqual({ kind: "clone", disposition: "discard", mergeMode: "patch" });
 				expect(policy.schema.source).toBe("none");
 			}
 		} finally {
@@ -194,10 +211,14 @@ describe("bundled agent parsing", () => {
 			});
 		}
 		for (const agent of loadBundledAgents().filter(agent => !["task", "sonic"].includes(agent.name))) {
-			expect(resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern })).toEqual({
-				patterns: [activeModelPattern],
-				role: undefined,
-			});
+			// Specialists pinned to the smol role keep it; @default agents inherit
+			// the active model without a role identity.
+			const expected = agent.model?.includes("@smol")
+				? { patterns: ["fast/hy3"], role: "smol" }
+				: { patterns: [activeModelPattern], role: undefined };
+			expect(resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern })).toEqual(
+				expected,
+			);
 		}
 		const reviewer = getBundledAgent("reviewer");
 		expect(resolveAgentModelSelection({ agentModel: reviewer?.model, settings })).toEqual({

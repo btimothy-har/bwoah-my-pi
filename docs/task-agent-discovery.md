@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `mutable`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -38,6 +38,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
+- `mutable` is a boolean owning the apply-back ceiling: `mutable: true` lets a caller integrate a successful clone's changes into the parent checkout; absent or `false` means the clone is always discarded. A per-spawn `mutable: false` argument may narrow the ceiling but never exceeds it. The removed `isolation`, `readOnly`, and per-spawn `isolated`/`apply`/`merge` controls fail parsing or preflight rather than being read as aliases.
 - `read-summarize: false` (normalized to `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `scout` ships with it disabled. Defaults to enabled when the field is absent.
 - `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
@@ -125,9 +126,9 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 `EMBEDDED_AGENT_DEFS` defines:
 
 - `scout`, `reviewer`, and `security-reviewer` from prompt files
-- Seven Bwoah review lenses (`conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`, `data-model-specialist`) are bundled from the top level of `src/prompts/agents/` with YAML frontmatter; each is self-contained, so copying a source file to `.omp/agents` works as-is and `omp agents unpack` produces a standalone override. The lenses have read-only tools and no nested spawning; restricted child sessions exclude ambient custom/MCP/memory capabilities. The chair supplies their pinned diff and strict finding/verdict schema for `/review`. Standalone consultations have no agent default schema, but may inherit the parent's schema; without an effective schema they return raw prose through a same-response terminal `yield`.
+- Seven Bwoah review lenses (`conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`, `data-model-specialist`) are bundled from the top level of `src/prompts/agents/` with YAML frontmatter; each is self-contained, so copying a source file to `.omp/agents` works as-is and `omp agents unpack` produces a standalone override. The lenses are report-oriented read-only roles with wildcard delegation (`spawns: "*"`) for scratch probes; ordinary child sessions share the common coding toolset and exclude ambient custom/MCP capabilities. The chair supplies their pinned diff and strict finding/verdict schema for `/review`. Standalone consultations have no agent default schema, but may inherit the parent's schema; without an effective schema they return raw prose through a same-response terminal `yield`.
 - `devils-advocate`, also bundled from the top level of `src/prompts/agents/`, is a read-only consultation agent with no default schema; callers may supply one.
-- `task` and `sonic` from the shared `task.md` body plus injected frontmatter, including `isolation: apply`; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
+- `task` and `sonic` from the shared `task.md` body plus injected frontmatter, including `mutable: true` and `spawns: "*"`; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
 
 Loading path:
 
@@ -202,7 +203,7 @@ Lookup is exact-name linear search:
 3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
 4. rediscovers agents with `discoverAgents(session.cwd)`, appends user-tagged session agents, and performs exact lookup
 5. checks `task.disabledAgents`
-6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
+6. resolves plan-mode restrictions, output schema, model policy, and the execution contract (an ordinary clone whose disposition comes from the definition's `mutable` ceiling narrowed by the per-spawn argument, a host-managed internal contract, or plan-attenuated direct execution)
 
 A missing name fails preflight with `Unknown agent "...". Available: ...`; no subprocess runs.
 
@@ -241,11 +242,11 @@ Runtime output schema precedence is:
 
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
 
-When `task.isolation.enabled` is true, each task/eval spawn defaults to an isolated clone. Agent frontmatter `isolation: apply` captures changes and follows `task.isolation.apply` and `task.isolation.merge`; omitted or `isolation: discard` skips diff capture and deletes the clone at completion. The bundled `task` and `sonic` agents declare `apply`; user-tagged model agents inherit `task`'s declaration. Project/user agents of the same name override bundled ones. An `apply` agent may pass `isolated: false` to work directly in the parent checkout; a discard agent cannot opt out or request apply/merge. With isolation disabled, in plan mode, or outside Git, the child runs without a clone; discard agents get an explicit unavailable notice rather than a promise that their edits vanish. Isolation is not a filesystem or network sandbox: absolute paths and external systems remain accessible.
+Every ordinary task/eval spawn runs in a writable isolated clone of the checkout; there is no per-call opt-out and no `task.isolation.enabled` switch (that key and `task.isolation.apply` remain recognized but inert). The agent definition's `mutable` frontmatter is the apply-back ceiling: `mutable: true` integrates a successful initial run's changes into the parent checkout following `task.isolation.merge` (patch or branch); absent or `false` discards the clone at completion. A caller may pass per-spawn `mutable: false` to narrow a permitting definition to discard; passing `mutable: true` against a definition without the ceiling fails preflight. The bundled `task` and `sonic` agents declare `mutable: true`; user-tagged model agents inherit `task`'s declaration. Project/user agents of the same name override bundled ones. Outside a Git checkout, ordinary spawns fail preflight — they never fall back to running directly in the parent. Isolation is not a filesystem or network sandbox: absolute paths and external systems remain accessible.
 
 Isolated children resolve the parent's `workspace.related` entry as read-only reference material, including shared context files. They do not inherit session-added `/add-dir` roots, which may be writable and would fall outside change capture.
 
-The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and warns against offloading reasoning to `scout`/`sonic`.
+The model-facing prompt (`src/prompts/tools/task.md`) marks read-only agents and definitions permitting apply-back, and documents the per-item `mutable` control.
 
 ## Command discovery interaction
 
@@ -284,7 +285,7 @@ If denied: `Cannot spawn '...'. Allowed: ...`.
 
 `task.maxRecursionDepth` defaults to `2`; a negative value disables the cap. The shared policy rejects a spawn when the current task depth has already reached the cap. When a child reaches the cap, `runSubprocess` also removes `task` from its tool list and sets its spawn policy empty.
 
-For a restricted agent tool list, `runSubprocess` auto-adds `task` when `spawns` is declared and depth permits it. It also retains the host's `hub` collaboration tool unless the session is explicitly restricting tool names.
+Every ordinary child requests the common coding toolset (`read edit write bash grep glob find ast_grep ast_edit lsp eval yield task hub`); a definition's `tools:` frontmatter adds built-in extras on top, and unknown or MCP extras fail preflight. `task` is stripped at the recursion cap.
 
 ## Plan mode behavior
 
@@ -295,4 +296,4 @@ When parent plan mode is enabled, `resolveEffectiveSubagentPolicy()` builds an `
 - clears child spawns
 - clears `prewalk` (read-only exploration must not receive the prewalk plan/implement nudges)
 
-Plan mode also rejects per-spawn isolation, apply, and merge controls. The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.
+Plan mode runs the `effectiveAgent` directly in the parent checkout without a clone and rejects `mutable: true` (an omitted or `false` value is accepted). The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.

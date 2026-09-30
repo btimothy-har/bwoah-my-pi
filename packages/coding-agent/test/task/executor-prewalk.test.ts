@@ -24,6 +24,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { stubCloneSeam } from "../helpers/clone-seam";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 function yieldEmittingSession(
@@ -374,7 +375,7 @@ describe("task tool plan-mode prewalk guard", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.enabled": false }),
+			settings: Settings.isolated({}),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),
@@ -386,6 +387,9 @@ describe("task tool plan-mode prewalk guard", () => {
 			agents: [prewalkAgent],
 			projectAgentsDir: null,
 		});
+		// Ordinary (non-plan) spawns always clone: stub the seam so the run
+		// delegates to the mocked executor without a real Git checkout.
+		stubCloneSeam({ repoRoot: "/tmp" });
 		let forwarded: AgentDefinition | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => {
 			forwarded = options.agent;

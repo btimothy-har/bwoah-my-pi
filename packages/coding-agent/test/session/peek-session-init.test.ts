@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { extractSessionInit, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -118,6 +118,35 @@ describe("SessionManager.peekSessionInit", () => {
 		const peek = await SessionManager.peekSessionInit(sessionFile);
 		expect(peek?.cwd).toBe(manager.getCwd());
 		expect(peek?.init).toBeNull();
+	});
+
+	it("round-trips a recorded cloneDisposition through append, extract, and peek", async () => {
+		const cwd = makeTempDir("@pi-peek-disposition-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+
+		manager.appendSessionInit({
+			systemPrompt: "first",
+			task: "task",
+			tools: ["read"],
+			cloneDisposition: "discard",
+		});
+		// Flush buffered entries (header + init) so the lock-free peek can read
+		// them off disk.
+		manager.appendMessage(assistantMessage("flush"));
+
+		// extractSessionInit reads the in-memory entries; peekSessionInit
+		// re-reads the persisted file. Both must carry the recorded value.
+		expect(extractSessionInit(manager.getEntries())?.cloneDisposition).toBe("discard");
+		const peek = await SessionManager.peekSessionInit(sessionFile);
+		expect(peek?.init?.cloneDisposition).toBe("discard");
+
+		// A later init without the field replaces the contract wholesale: the
+		// disposition is never carried over or inferred from anything else.
+		manager.appendSessionInit({ systemPrompt: "second", task: "task", tools: ["read"] });
+		expect(extractSessionInit(manager.getEntries())?.cloneDisposition).toBeUndefined();
+		expect((await SessionManager.peekSessionInit(sessionFile))?.init?.cloneDisposition).toBeUndefined();
 	});
 
 	it("returns null when the first entry is not a session header", async () => {

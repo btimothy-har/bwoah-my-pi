@@ -2191,9 +2191,11 @@ export class Settings {
 			}
 			delete raw["features.unexpectedStopDetection"];
 		}
-		// Split the legacy combined isolation setting into enablement and backend.
-		// Handle both nested YAML and quoted dotted keys. Explicit enabled and
-		// backend values win; legacy backend names are normalized everywhere.
+		// Legacy `task.isolation.mode` still normalizes backend names below, but
+		// its enablement half derives nothing: ordinary spawns always run in an
+		// isolated clone. `task.isolation.enabled` / `task.isolation.apply`
+		// remain recognized as inert booleans, so an explicitly configured value
+		// is preserved (folded from the quoted dotted form) rather than stripped.
 		const legacyIsolationBackends: Record<string, string> = {
 			worktree: "rcopy",
 			"fuse-overlay": "overlayfs",
@@ -2206,20 +2208,16 @@ export class Settings {
 				: typeof raw[legacyIsolationModePath] === "string"
 					? (raw[legacyIsolationModePath] as string)
 					: undefined;
+		if (isolationObj && typeof isolationObj.mode === "string") {
+			delete isolationObj.mode;
+		}
 		const flatIsolationEnabled = raw["task.isolation.enabled"];
-		const explicitIsolationEnabled =
-			typeof isolationObj?.enabled === "boolean"
-				? isolationObj.enabled
-				: typeof flatIsolationEnabled === "boolean"
-					? flatIsolationEnabled
-					: undefined;
-		if (legacyIsolationMode !== undefined || explicitIsolationEnabled !== undefined) {
+		if (typeof flatIsolationEnabled === "boolean") {
 			if (!isRecord(raw.task)) raw.task = {};
 			const targetTask = raw.task as Record<string, unknown>;
 			if (!isRecord(targetTask.isolation)) targetTask.isolation = {};
 			const targetIsolation = targetTask.isolation as Record<string, unknown>;
-			targetIsolation.enabled = explicitIsolationEnabled ?? legacyIsolationMode !== "none";
-			delete targetIsolation.mode;
+			if (typeof targetIsolation.enabled !== "boolean") targetIsolation.enabled = flatIsolationEnabled;
 		}
 		delete raw[legacyIsolationModePath];
 		delete raw["task.isolation.enabled"];
