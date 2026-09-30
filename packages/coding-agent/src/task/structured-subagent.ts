@@ -833,8 +833,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			// Guard the artifact directory for the clone's whole lifecycle: the
 			// runner owns the hold and releases it after reclamation, retention
 			// handoff, or setup failure — consumer eviction must not delete a
-			// parked clone's transcript or its only recovery patch.
-			const releaseHold = lease.holdForIsolation();
+			// parked clone's transcript or its only recovery patch. Detached
+			// runs are fire-and-forget (no revival, no parked clone), so the
+			// job's eviction cleanup owns the directory exactly as before.
+			const releaseHold = request.detached === true ? undefined : lease.holdForIsolation();
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
