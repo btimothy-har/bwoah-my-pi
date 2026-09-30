@@ -578,7 +578,10 @@ export class AgentLifecycleManager {
 					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => entry.promise);
 				} catch (error) {
 					if (Date.now() >= deadlineAt) {
-						trackLateCleanup(entry.promise.then(() => {}), { id: entry.ref.id, resource: "releasing-agent" });
+						trackLateCleanup(
+							entry.promise.then(() => {}),
+							{ id: entry.ref.id, resource: "releasing-agent" },
+						);
 					}
 					logger.warn("Agent cleanup exceeded its deadline", {
 						id: entry.ref.id,

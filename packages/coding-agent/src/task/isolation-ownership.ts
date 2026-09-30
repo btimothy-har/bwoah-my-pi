@@ -169,7 +169,6 @@ export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 	return isIsolationOwnerLive(parsed);
 }
 
-
 /** Sidecar recording the native-teardown backend of a retained workspace. */
 export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
 
@@ -311,7 +310,10 @@ function parseIsolationCleanupRecord(decoded: unknown): IsolationCleanupRecord |
 	if (record.disposition !== "preserve" && record.disposition !== "discard") return undefined;
 	if (typeof record.state !== "string" || !ISOLATION_CLEANUP_STATES.includes(record.state as IsolationCleanupState))
 		return undefined;
-	if (record.sourceBaseDir !== undefined && (typeof record.sourceBaseDir !== "string" || record.sourceBaseDir.length === 0))
+	if (
+		record.sourceBaseDir !== undefined &&
+		(typeof record.sourceBaseDir !== "string" || record.sourceBaseDir.length === 0)
+	)
 		return undefined;
 	const authorization = record.authorization;
 	if (authorization !== undefined) {

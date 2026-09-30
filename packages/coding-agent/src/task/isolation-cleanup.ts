@@ -112,50 +112,58 @@ export async function collectIsolationCleanup(
 	const observations = await observeWrappers(resolvedRoot);
 	const verdicts = await evaluateEntries(observations, options);
 
-	// Child-before-source: dependents sort deeper and are decided first, so a
-	// source is attempted only after its surviving dependents are gone.
+	// Child-before-source by fixed point: dependency direction is unknown for
+	// same-depth wrappers (a nested clone and its source are both direct root
+	// children), so a source deferred as pinned in one round is retried after
+	// its dependent is removed in that round.
 	const removalOrder = orderEntries(resolvedRoot, observations);
+	const pending = new Set(removalOrder.map(entry => entry.dir));
+	const kept = new Set(pending);
 	const removedDirs = new Set<string>();
 	let removed = 0;
-	let kept = 0;
 	let failed = 0;
-	for (const entry of removalOrder) {
-		if (Date.now() >= deadlineAt) {
-			kept += removalOrder.length - (removed + kept + failed);
-			break;
-		}
-		const verdict = verdicts.get(entry.dir);
-		if (!verdict?.eligible) {
-			kept += 1;
-			continue;
-		}
-		if (await isPinnedByDependent(resolvedRoot, entry, observations, removedDirs)) {
-			kept += 1;
-			logger.debug("isolation cleanup skipping pinned source", {
-				dir: entry.dir,
-				generation: entry.record?.generation,
-			});
-			continue;
-		}
-		try {
-			const outcome = await reclaimEntry(resolvedRoot, entry);
-			if (outcome === "removed") {
-				removedDirs.add(entry.dir);
-				removed += 1;
-			} else {
-				kept += 1;
+	let progress = true;
+	while (progress && Date.now() < deadlineAt) {
+		progress = false;
+		for (const entry of removalOrder) {
+			if (Date.now() >= deadlineAt) break;
+			if (!pending.has(entry.dir)) continue;
+			const verdict = verdicts.get(entry.dir);
+			if (!verdict?.eligible) continue;
+			if (await isPinnedByDependent(resolvedRoot, entry, observations, removedDirs)) {
+				logger.debug("isolation cleanup skipping pinned source", {
+					dir: entry.dir,
+					generation: entry.record?.generation,
+				});
+				continue;
 			}
-		} catch (error) {
-			failed += 1;
-			logger.warn("isolation cleanup entry failed", {
-				dir: entry.dir,
-				generation: entry.record?.generation,
-				error: error instanceof Error ? error.message : String(error),
-			});
+			pending.delete(entry.dir);
+			try {
+				const outcome = await reclaimEntry(resolvedRoot, entry);
+				if (outcome === "removed") {
+					kept.delete(entry.dir);
+					removedDirs.add(entry.dir);
+					removed += 1;
+					progress = true;
+				}
+			} catch (error) {
+				failed += 1;
+				logger.warn("isolation cleanup entry failed", {
+					dir: entry.dir,
+					generation: entry.record?.generation,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
 	}
-	logger.debug("isolation cleanup pass complete", { root: resolvedRoot, removed, kept, failed, owner: options.owner });
-	return { removed, kept, failed };
+	logger.debug("isolation cleanup pass complete", {
+		root: resolvedRoot,
+		removed,
+		kept: kept.size,
+		failed,
+		owner: options.owner,
+	});
+	return { removed, kept: kept.size, failed };
 }
 
 /** Canonicalize and validate the configured worktree root; `undefined` when absent. */
@@ -234,10 +242,7 @@ async function evaluateEntries(
 	return verdicts;
 }
 
-async function evaluateEntry(
-	observation: WrapperObservation,
-	options: IsolationCleanupOptions,
-): Promise<EntryVerdict> {
+async function evaluateEntry(observation: WrapperObservation, options: IsolationCleanupOptions): Promise<EntryVerdict> {
 	const { record } = observation;
 	if (!record) return { eligible: false, reason: "no valid cleanup record" };
 
@@ -335,8 +340,17 @@ async function dependencySourcesFor(root: string, dependent: WrapperObservation)
 	return sources;
 }
 
-function pathsEqual(a: string, b: string): boolean {
-	return path.resolve(a) === path.resolve(b);
+/**
+ * Path equality through symlinks: macOS `/tmp` → `/private/tmp` and similar
+ * links make lexical comparison lie. Falls back to lexical equality when a
+ * path cannot be resolved.
+ */
+async function pathsEqual(a: string, b: string): Promise<boolean> {
+	const [realA, realB] = await Promise.all([
+		fs.realpath(a).catch(() => path.resolve(a)),
+		fs.realpath(b).catch(() => path.resolve(b)),
+	]);
+	return realA === realB;
 }
 
 /** Deepest wrappers first, so dependents are decided before their sources. */
@@ -362,7 +376,9 @@ async function isPinnedByDependent(
 		if (removedDirs.has(dependent.dir)) continue;
 		if (!dependent.hasPayload) continue; // marker-only wrapper: no object-store dependency
 		const sources = await dependencySourcesFor(root, dependent);
-		if (sources.some(sourceDir => pathsEqual(sourceDir, source.dir))) return true;
+		for (const sourceDir of sources) {
+			if (await pathsEqual(sourceDir, source.dir)) return true;
+		}
 	}
 	return false;
 }
@@ -377,10 +393,12 @@ export async function hasManagedDependents(root: string, baseDir: string): Promi
 	if (!resolvedRoot) return false;
 	const observations = await observeWrappers(resolvedRoot);
 	for (const dependent of observations) {
-		if (pathsEqual(dependent.dir, baseDir)) continue;
+		if (await pathsEqual(dependent.dir, baseDir)) continue;
 		if (!dependent.hasPayload) continue;
 		const sources = await dependencySourcesFor(resolvedRoot, dependent);
-		if (sources.some(sourceDir => pathsEqual(sourceDir, baseDir))) return true;
+		for (const sourceDir of sources) {
+			if (await pathsEqual(sourceDir, baseDir)) return true;
+		}
 	}
 	return false;
 }
@@ -603,7 +621,15 @@ export async function claimSlotForNewGeneration(
 						`; inspect it with \`omp worktree list\` and clear it before respawning this task id`,
 				);
 			}
-			return { version: 1, generation: "legacy", backend: params.backend, detached: false, disposition: "preserve", state: "ready", authorization: { kind: "explicit" } };
+			return {
+				version: 1,
+				generation: "legacy",
+				backend: params.backend,
+				detached: false,
+				disposition: "preserve",
+				state: "ready",
+				authorization: { kind: "explicit" },
+			};
 		}
 		await writeIsolationCleanup(baseDir, {
 			version: 1,

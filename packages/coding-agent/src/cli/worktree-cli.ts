@@ -219,9 +219,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	const parentsToPrune = new Set<string>();
 	// Dependents before sources: a trash child sorts deeper than its original
 	// slot, and a removed dependent unpins its source for this same pass.
-	const ordered = [...targets].sort(
-		(a, b) => b.path.split(path.sep).length - a.path.split(path.sep).length,
-	);
+	const ordered = [...targets].sort((a, b) => b.path.split(path.sep).length - a.path.split(path.sep).length);
 	for (const target of ordered) {
 		try {
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
@@ -233,7 +231,10 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					await fs.rm(target.path, { recursive: true, force: true });
 					parentsToPrune.add(target.parentRepo);
 				}
-			} else if (target.kind === "task-isolation" && (await readIsolationCleanup(target.path).catch(() => undefined))?.authorization) {
+			} else if (
+				target.kind === "task-isolation" &&
+				(await readIsolationCleanup(target.path).catch(() => undefined))?.authorization
+			) {
 				// New-format entry: claim-based teardown with backend/generation
 				// checks. A source pinned by a surviving dependent is refused.
 				const root = path.resolve(getWorktreesDir());

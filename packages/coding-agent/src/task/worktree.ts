@@ -692,7 +692,6 @@ export async function cleanupIsolation(
 	await removeAuthorizedWrapper(root, baseDir);
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Branch-mode isolation
 // ═══════════════════════════════════════════════════════════════════════════

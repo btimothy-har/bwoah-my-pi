@@ -276,7 +276,9 @@ async function publishNestedPatches(
 			// leave a truncated file behind, and `force: true` makes removing
 			// a never-created path a no-op.
 			saved.push(destination);
-			const existing = await Bun.file(destination).text().catch(() => undefined);
+			const existing = await Bun.file(destination)
+				.text()
+				.catch(() => undefined);
 			if (existing !== nestedPatch.patch) {
 				const staged = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
 				await Bun.write(staged, nestedPatch.patch);
@@ -314,7 +316,9 @@ async function writeIsolationPatch(
 ): Promise<IsolationPatchArtifacts> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
-	const existingRoot = await Bun.file(patchPath).text().catch(() => undefined);
+	const existingRoot = await Bun.file(patchPath)
+		.text()
+		.catch(() => undefined);
 	if (existingRoot !== delta.rootPatch) {
 		const staged = `${patchPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 		await Bun.write(staged, delta.rootPatch);
@@ -332,7 +336,6 @@ async function writeIsolationPatch(
 		artifacts: [{ path: patchPath, sha256: digestArtifact(delta.rootPatch) }, ...artifacts],
 	};
 }
-
 
 /**
  * Move a retained isolation workspace out of its deterministic
@@ -359,10 +362,9 @@ export interface RetainedWorkspace {
 }
 
 /** Result fields from a published patch, excluding the GC evidence array. */
-function patchResultFields(patchResult: IsolationPatchArtifacts): Pick<
-	IsolationPatchArtifacts,
-	"patchPath" | "hasRootChanges" | "nestedPatches" | "nestedPatchPaths"
-> {
+function patchResultFields(
+	patchResult: IsolationPatchArtifacts,
+): Pick<IsolationPatchArtifacts, "patchPath" | "hasRootChanges" | "nestedPatches" | "nestedPatchPaths"> {
 	return {
 		patchPath: patchResult.patchPath,
 		hasRootChanges: patchResult.hasRootChanges,
@@ -548,14 +550,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	const oneShotSequence = async (): Promise<void> => {
-		await releaseBase();
-		if (!handle || retainWorkspace) return;
-		const authorization: IsolationCleanupAuthorization = opts.discard
-			? { kind: "discard" }
-			: lastPublished
-				? { kind: "snapshot", artifacts: lastPublished.artifacts }
-				: { kind: "explicit" };
-		await cleanupIsolation(handle, authorization);
+		try {
+			await releaseBase();
+			if (!handle || retainWorkspace) return;
+			const authorization: IsolationCleanupAuthorization = opts.discard
+				? { kind: "discard" }
+				: lastPublished
+					? { kind: "snapshot", artifacts: lastPublished.artifacts }
+					: { kind: "explicit" };
+			await cleanupIsolation(handle, authorization);
+		} finally {
+			await opts.releaseArtifactHold?.();
+		}
 	};
 	try {
 		if (!opts.discard && !taskBaseline) throw new Error("Isolation baseline is required to capture changes.");
@@ -723,6 +729,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
+		// Setup never completed: no clone exists, so the artifact hold transfers
+		// back to the consumer immediately.
+		if (!handle) await opts.releaseArtifactHold?.();
 		const adopted = opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId);
 		if (handle && !retainWorkspace && !reclaimPromise && !(adopted && !releaseRequested)) {
 			const runSequence = async (): Promise<void> => {

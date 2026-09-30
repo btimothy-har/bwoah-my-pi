@@ -4269,7 +4269,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						throw new AggregateError(failures, `Deferred cleanup failed for subagent ${id}`);
 					}
 				});
-				trackLateCleanup(completion.then(() => {}), { id, resource: "subagent" });
+				trackLateCleanup(
+					completion.then(() => {}),
+					{ id, resource: "subagent" },
+				);
 				options.onCleanupDeferred?.(completion);
 			}
 		}
