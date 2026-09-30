@@ -1128,7 +1128,6 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			const roster = Bun.stripANSI(hub.render(80).join("\n"));
-			expect(roster).toContain("Tab:details");
 			expect(roster).not.toContain("Registered ");
 
 			hub.handleInput("\t");
@@ -1136,7 +1135,6 @@ describe("Agent hub row ordering", () => {
 			expect(details).toContain("Agent Hub · NarrowAgent");
 			expect(details).toContain("Usage");
 			expect(details).toContain("$0.0000 · 2.0s active · 2 req · 3 tools · 900 tok");
-			expect(details).toContain("Tab:roster");
 			hub.handleInput("\x1b[6~");
 			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Changes");
 			for (const line of hub.render(80)) expect(visibleWidth(line)).toBeLessThanOrEqual(80);

@@ -15,6 +15,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
+import { cfgWorkspaceRelated } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { RelatedWorkspacesSubmenu } from "@oh-my-pi/pi-tui/overlays/related-workspaces-submenu";
 import type {
@@ -249,7 +250,7 @@ describe("workspace.related structured editor", () => {
 
 	it("rejects invalid input inline and leaves the map unchanged", async () => {
 		const fx = (fixture = await makeFixture());
-		settings.set("workspace.related", { [fx.repoA]: { directories: [], contextFiles: [] } });
+		cfgWorkspaceRelated.set(settings, { [fx.repoA]: { directories: [], contextFiles: [] } });
 		const { changes, onChange } = recordChanges();
 		const comp = createSelector(onChange);
 
@@ -316,7 +317,7 @@ describe("workspace.related structured editor", () => {
 		const fx = (fixture = await makeFixture());
 		const nestedDir = path.join(fx.dirB, "nested");
 		await fs.mkdir(nestedDir, { recursive: true });
-		settings.set("workspace.related", { [fx.repoA]: { directories: [fx.dirB], contextFiles: [] } });
+		cfgWorkspaceRelated.set(settings, { [fx.repoA]: { directories: [fx.dirB], contextFiles: [] } });
 		const { changes, onChange } = recordChanges();
 		const comp = createSelector(onChange);
 
@@ -352,7 +353,7 @@ describe("workspace.related structured editor", () => {
 
 	it("removes items with Delete/Backspace and a checkout after confirmation", async () => {
 		const fx = (fixture = await makeFixture());
-		settings.set("workspace.related", {
+		cfgWorkspaceRelated.set(settings, {
 			[fx.repoA]: { directories: [fx.dirB], contextFiles: [fx.sharedFile] },
 		});
 		const { changes, onChange } = recordChanges();
@@ -401,7 +402,7 @@ describe("workspace.related structured editor", () => {
 
 	it("reads and writes only the global layer, ignoring runtime overrides", async () => {
 		const fx = (fixture = await makeFixture());
-		settings.override("workspace.related", { "/elsewhere/proj": { directories: ["/x"] } });
+		cfgWorkspaceRelated.override(settings, { "/elsewhere/proj": { directories: ["/x"] } });
 		const { changes, onChange } = recordChanges();
 		const comp = createSelector(onChange);
 
@@ -418,13 +419,13 @@ describe("workspace.related structured editor", () => {
 		// The write did not copy the override-layer entry into the global file…
 		expect(Object.keys(relatedMap())).toEqual([fx.repoA]);
 		// …nor disturb the override itself.
-		expect(settings.get("workspace.related")).toHaveProperty("/elsewhere/proj");
+		expect(cfgWorkspaceRelated.get(settings)).toHaveProperty("/elsewhere/proj");
 		expect(changes.length).toBe(1);
 	});
 
 	it("preserves unknown fields on retained entries", async () => {
 		const fx = (fixture = await makeFixture());
-		settings.set("workspace.related", { [fx.repoA]: { directories: [], note: "keep" } } as never);
+		cfgWorkspaceRelated.set(settings, { [fx.repoA]: { directories: [], note: "keep" } } as never);
 		const { onChange } = recordChanges();
 		const comp = createSelector(onChange);
 

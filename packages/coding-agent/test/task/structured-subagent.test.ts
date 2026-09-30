@@ -5,6 +5,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
@@ -31,6 +32,9 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { stubCloneSeam } from "../helpers/clone-seam";
 
+import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 const AGENT: AgentDefinition = {
 	name: "worker",
 	description: "Test worker",
@@ -49,6 +53,8 @@ function session(
 		maxDepth?: number;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
+		agentCompactionThresholdOverrides?: Record<string, AgentCompactionThresholdOverride>;
+		sessionAgents?: readonly AgentDefinition[];
 	} = {},
 ): ToolSession {
 	return {
@@ -65,9 +71,13 @@ function session(
 				...(options.agentServiceTierOverrides
 					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
 					: {}),
+				...(options.agentCompactionThresholdOverrides
+					? { "task.agentCompactionThresholdOverrides": options.agentCompactionThresholdOverrides }
+					: {}),
 			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getSessionAgents: () => options.sessionAgents ?? [],
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
@@ -330,8 +340,8 @@ describe("structured subagent primitive", () => {
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
 			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
-			expect(liveSettings.get("task.enableEffort")).toBe(false);
-			expect(liveSettings.get("retry.modelFallback")).toBe(false);
+			expect(cfgTaskEnableEffort.get(liveSettings)).toBe(false);
+			expect(cfgRetryModelFallback.get(liveSettings)).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
@@ -350,6 +360,21 @@ describe("structured subagent primitive", () => {
 			request({ session: session({ agentServiceTierOverrides: { Scout: "priority" } }), agent: "scout" }),
 		);
 		expect(differentCase.serviceTierOverride).toBeUndefined();
+	});
+
+	it("resolves only the exact case-sensitive compaction threshold override into the policy", async () => {
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const resolve = (overrides: Record<string, AgentCompactionThresholdOverride>) =>
+			resolveEffectiveSubagentPolicy(
+				request({ session: session({ agentCompactionThresholdOverrides: overrides }), agent: "scout" }),
+			);
+
+		expect((await resolve({ scout: "80%", task: 90000 })).compactionThresholdOverride).toEqual({
+			thresholdPercent: 80,
+			thresholdTokens: -1,
+		});
+		expect((await resolve({ Scout: "80%" })).compactionThresholdOverride).toBeUndefined();
+		expect((await resolve({ task: 90000 })).compactionThresholdOverride).toBeUndefined();
 	});
 
 	it("reloads persisted per-agent service-tier overrides before each launch", async () => {
@@ -377,6 +402,21 @@ describe("structured subagent primitive", () => {
 		}
 	});
 
+	it("forwards parent-authorized model agents to nested subagent sessions", async () => {
+		mockDiscovery();
+		const inheritedAgent: AgentDefinition = { ...AGENT, name: "m1", model: ["b/y"] };
+		const parentSession = session({ sessionAgents: [inheritedAgent] });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		mockCloneDispatch(options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ session: parentSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -433,7 +473,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		roleSession.settings.override("task.agentModelOverrides", { worker: "@override" });
+		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
 
 		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
 		expect(requestPolicy.modelRole).toBe("request");
@@ -447,7 +487,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		concreteOverrideSession.settings.override("task.agentModelOverrides", { worker: "openai/gpt-4o" });
+		cfgTaskAgentModelOverrides.override(concreteOverrideSession.settings, { worker: "openai/gpt-4o" });
 		const concreteOverridePolicy = await resolveEffectiveSubagentPolicy(
 			request({ session: concreteOverrideSession }),
 		);
@@ -473,7 +513,7 @@ describe("structured subagent primitive", () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
@@ -484,7 +524,7 @@ describe("structured subagent primitive", () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "@empty" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "@empty" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
@@ -792,7 +832,8 @@ describe("structured subagent primitive", () => {
 		});
 		expect(options[0]?.mcpManager).toBeUndefined();
 		// Ordinary clones never inherit ambient MCP, extension, or custom-tool
-		// sources, and they own their eval kernel rather than sharing the parent's.
+		// sources; their eval kernel is unconditionally private (ExecutorOptions
+		// no longer carries a shareable parent kernel handle).
 		expect(options[1]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
@@ -802,7 +843,6 @@ describe("structured subagent primitive", () => {
 			cloneDisposition: "discard",
 		});
 		expect(options[1]?.mcpManager).toBeUndefined();
-		expect(options[1]?.parentEvalSessionId).toBeUndefined();
 		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
 		explicitRoot = "/plugins/explicit-after-spawn";
 		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);

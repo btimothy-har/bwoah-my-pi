@@ -42,6 +42,8 @@ import {
 } from "../task/isolation-cleanup";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
+import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
@@ -163,8 +165,8 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	}
 	const result = await repository.worktreeAdd(worktreePath, ref, {
 		detach,
-		clone: settings.get("worktree.clone"),
-		backend: parseIsolationBackend(settings.get("isolation.backend")),
+		clone: cfgWorktreeClone.get(settings),
+		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 	});
 	if (!options.quiet) {
 		console.log(`HEAD is now at ${shortSha} ${subject}`);

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionCustomOptions, ExtensionUIContext } from "../../src/extensibility/extensions/types";
-import { resolveArtifactFile } from "../../src/internal-urls/artifact-protocol";
+import { ArtifactProtocolHandler } from "../../src/internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { prepareReview, reviewFindingsSchema } from "../../src/review/report";
 import { ArtifactManager } from "../../src/session/artifacts";
@@ -188,10 +188,11 @@ interface PersistedArtifactJson {
  *  resolution path (the same `artifact://` handler the read tool uses), pinned
  *  to the calling session's artifacts directory. */
 async function readPersistedArtifact(manager: SessionManager, reviewRef: string): Promise<PersistedArtifactJson> {
-	const resolved = await resolveArtifactFile(parseInternalUrl(reviewRef), {
+	const resolved = await new ArtifactProtocolHandler().locate(parseInternalUrl(reviewRef), {
 		localProtocolOptions: { getArtifactsDir: () => manager.getArtifactsDir() },
 	});
-	return JSON.parse(await Bun.file(resolved.path).text()) as PersistedArtifactJson;
+	if (resolved === null) throw new Error(`No artifact backs ${reviewRef}`);
+	return JSON.parse(await Bun.file(resolved).text()) as PersistedArtifactJson;
 }
 
 // =============================================================================

@@ -13,21 +13,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("accepts {agent, task}", () => {
-		const parsed = taskSchema({ agent: "scout", task: "Map the auth module." });
-		expect(parsed instanceof type.errors).toBe(false);
-	});
-
-	it("defaults agent to `task` when omitted", () => {
-		const parsed = taskSchema({ task: "Map the auth module." });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (!(parsed instanceof type.errors)) {
-			expect(parsed.agent).toBe("task");
-		}
-	});
-
 	it("requires task", () => {
-		const parsed = taskSchema({ agent: "scout" });
+		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
@@ -41,19 +28,21 @@ describe("task schema (single-spawn)", () => {
 		expect(schema({ agent: "scout", task: "Map the auth module.", tools: ["word_count"] })).toBeInstanceOf(
 			type.errors,
 		);
-		const parsed = schema({ agent: "scout", task: "Map the auth module." });
+		const parsed = schema({ agent: "scout", task: "Map the auth module.", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 	});
 
 	it("accepts a per-spawn mutable boolean", () => {
 		for (const mutable of [true, false]) {
-			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", mutable });
+			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", solutionSpace: "c", mutable });
 			expect(parsed instanceof type.errors).toBe(false);
 			if (!(parsed instanceof type.errors)) {
 				expect(parsed.mutable).toBe(mutable);
 			}
 		}
-		expect(taskSchema({ agent: "scout", task: "x", mutable: "yes" }) instanceof type.errors).toBe(true);
+		expect(taskSchema({ agent: "scout", task: "x", solutionSpace: "c", mutable: "yes" }) instanceof type.errors).toBe(
+			true,
+		);
 	});
 
 	it("retains caller outputSchema, schemaMode, and eval tool names", () => {
@@ -61,6 +50,7 @@ describe("task schema (single-spawn)", () => {
 		const parsed = taskSchema({
 			agent: "scout",
 			task: "Map the auth module.",
+			solutionSpace: "c",
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],
@@ -85,7 +75,9 @@ describe("task schema (single-spawn)", () => {
 			{ merge: true },
 			{ readOnly: false },
 		]) {
-			expect(taskSchema({ agent: "scout", task: "x", ...stale }) instanceof type.errors).toBe(true);
+			expect(taskSchema({ agent: "scout", task: "x", solutionSpace: "c", ...stale }) instanceof type.errors).toBe(
+				true,
+			);
 		}
 	});
 });

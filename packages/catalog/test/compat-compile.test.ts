@@ -6,6 +6,7 @@ import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
+import { cursorModelParameters } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
 
 const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
@@ -142,6 +143,20 @@ describe("compat compiler grammar", () => {
 			text: 'behavior {\n\texclude-discovery-modes "embedding" "moderation" provider="litellm"\n}',
 		});
 		expect(compiled.excludeDiscoveryModes).toEqual([{ provider: "litellm", modes: ["embedding", "moderation"] }]);
+	});
+
+	test("cursor-model-parameter compiles a fixed requestedModel parameter", () => {
+		const compiled = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\tcursor-model-parameter model="composer-2.5" id="fast" value="false"\n}',
+		});
+		expect(compiled.cursorParameters).toEqual([{ model: "composer-2.5", id: "fast", value: "false" }]);
+	});
+
+	test("shipped rules pin composer-2.5 to the Standard tier (#9012)", () => {
+		const parameters = cursorModelParameters("composer-2.5").map(({ id, value }) => ({ id, value }));
+		expect(parameters).toEqual([{ id: "fast", value: "false" }]);
+		expect(cursorModelParameters("composer-2.5-fast")).toEqual([]);
 	});
 
 	test("duplicate axis in one block is rejected", () => {
@@ -291,6 +306,21 @@ describe("auth grammar", () => {
 			order(),
 		]);
 		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
+	});
+
+	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\torg-scoped-identity #false\n\toauth-token-env "X_OAUTH" "X_BACKUP"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.orgScopedIdentity).toBe(false);
+		expect(compiled.providers[0]?.oauthTokenEnv).toEqual(["X_OAUTH", "X_BACKUP"]);
+		expect(() => compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\toauth-token-env\n}' }])).toThrow(
+			/auth\/x\.kdl:3.*malformed value/,
+		);
 	});
 
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {

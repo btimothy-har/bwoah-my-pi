@@ -7,8 +7,8 @@ import {
 	type EvalAgentResult,
 } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
-import type { LocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp";
+import type { LocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -234,6 +234,7 @@ describe("runEvalAgent", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
 		const session = createBudgetSession(sessionManager);
+
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(isolationRunner, "probeIsolationRepoRoot").mockResolvedValue({ repoRoot: "/tmp" });
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({

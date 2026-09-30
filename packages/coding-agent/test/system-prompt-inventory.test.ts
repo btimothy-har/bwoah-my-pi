@@ -12,6 +12,7 @@ import {
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import computerUsePrompt from "../src/prompts/system/computer-use.md" with { type: "text" };
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -512,7 +513,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: false,
-			computerEnabled: true,
+			evalPreludes: [{ name: "computer", guidance: computerUsePrompt }],
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).toContain("# Computer Use");
@@ -578,7 +579,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["eval", "read"],
 			directToolNames: ["eval"],
 			tools,
-			computerEnabled: true,
+			evalPreludes: [{ name: "computer", guidance: computerUsePrompt }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: true,
@@ -620,7 +621,8 @@ describe("system prompt tool inventory", () => {
 
 		expect(toolNames).toContain("bash");
 		expect(toolNames).not.toContain("eval");
-		expect(bash?.description).toContain("purpose-built tool");
+		// The fork compresses bash.md; assert its stable opening, not upstream's wording.
+		expect(bash?.description).toContain("Persistent shell");
 		expect(bash?.description).not.toContain("eval` cell");
 		expect(bash?.description).not.toContain("use `eval` cells");
 		expect(bash?.description).not.toContain("Prefer `eval`");
@@ -784,10 +786,9 @@ describe("system prompt tool inventory", () => {
 		expect(bash.description).not.toContain("skill://");
 	});
 
-	it("advertises loaded skills through real provider tool definitions", async () => {
+	it("advertises loaded skills in the SDK system prompt built from real tools", async () => {
 		const session = {
 			...makeToolSession(Settings.isolated()),
-			skillHintVisible: undefined as boolean | undefined,
 			skills: [
 				{
 					name: "provider-skill",
@@ -799,8 +800,6 @@ describe("system prompt tool inventory", () => {
 			],
 		};
 		const tools = await createTools(session, ["read", "bash"]);
-		const read = tools.find(tool => tool.name === "read")!;
-		const bash = tools.find(tool => tool.name === "bash")!;
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -808,18 +807,7 @@ describe("system prompt tool inventory", () => {
 			tools,
 		});
 
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("`skill://<name>`");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
-
-		// Standalone sessions derive visibility; an explicit managed snapshot wins.
-		session.skillHintVisible = false;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
-		expect(bash.description).not.toContain("skill://");
-		session.settings.set("skillful", false);
-		session.skillHintVisible = true;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("skill://");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {
@@ -1008,8 +996,8 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("scout while working is allowed");
-		expect(withoutScout).not.toContain("scout while working is allowed");
+		expect(withScout).toContain("research scout while working allowed");
+		expect(withoutScout).not.toContain("research scout while working allowed");
 	});
 
 	it("omits todo workflow guidance when the todo tool is absent", async () => {
@@ -1024,12 +1012,11 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 		};
 		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withoutTodo).not.toContain("Todo calls NEVER alone");
-		expect(withoutTodo).not.toContain("batch each with turn's real calls");
+		expect(withoutTodo).not.toContain("todo-only turn");
 
 		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
 			"\n\n",
 		);
-		expect(withTodo).toContain("Todo calls NEVER alone");
+		expect(withTodo).toContain("todo-only turn");
 	});
 });

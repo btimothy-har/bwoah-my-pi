@@ -8,21 +8,27 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	type CompactionThresholdPair,
+	validateAgentCompactionThresholdOverrides,
+} from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import type { LocalProtocolOptions } from "../internal-urls";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
-import { isIrcEnabled } from "../tools/hub";
+import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
@@ -59,6 +65,17 @@ import type {
 } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
+
+import {
+	cfgIsolationBackend,
+	cfgTaskAgentCompactionThresholdOverrides,
+	cfgTaskAgentModelOverrides,
+	cfgTaskAgentServiceTierOverrides,
+	cfgTaskDisabledAgents,
+	cfgTaskEnableLsp,
+	cfgTaskIsolationMerge,
+	cfgTaskMaxRecursionDepth,
+} from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
 export type StructuredSubagentSchemaResult = StructuredSubagentOutput;
@@ -101,6 +118,8 @@ export interface StructuredSubagentRequest {
 	schemaMode?: StructuredSubagentSchemaMode;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
+	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
@@ -129,8 +148,7 @@ export interface StructuredSubagentRequest {
 	onArtifactsRetained?: (cleanup: () => Promise<void>) => void;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
-	/** Host-managed runs share their parent's eval kernel by default; ordinary clones never do. */
-	shareEvalSession?: boolean;
+
 	/** Task frontends may inherit LSP; eval frontends normally set this false. */
 	enableLsp?: boolean;
 	/** Explicitly pass false for plan mode or invocation kinds that must not use IRC. */
@@ -158,6 +176,8 @@ export interface EffectiveSubagentPolicy {
 	modelRoute?: string;
 	/** Exact-name `task.agentServiceTierOverrides` entry for this agent, applied after model resolution. */
 	serviceTierOverride?: ServiceTierInheritSettingValue;
+	/** Exact-name entry normalized to both child compaction threshold fields. */
+	compactionThresholdOverride?: CompactionThresholdPair;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	/** How this run executes: ordinary clone (with its disposition), host-managed, or plan-attenuated. */
@@ -181,11 +201,18 @@ export interface StructuredSubagentResult {
 /** Machine-readable failure category so adapters can retain their native errors. */
 export class StructuredSubagentError extends Error {
 	readonly kind: "preflight" | "isolation" | "execution";
+	/** The child's settled result, when the child finished before a later step failed. */
+	readonly result?: SingleResult;
 
-	constructor(kind: "preflight" | "isolation" | "execution", message: string, options?: ErrorOptions) {
+	constructor(
+		kind: "preflight" | "isolation" | "execution",
+		message: string,
+		options?: ErrorOptions & { result?: SingleResult },
+	) {
 		super(message, options);
 		this.name = "StructuredSubagentError";
 		this.kind = kind;
+		this.result = options?.result;
 	}
 }
 
@@ -253,7 +280,7 @@ function assertNoObsoleteControls(request: StructuredSubagentRequest): void {
 
 function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
 	const taskDepth = request.session.taskDepth ?? 0;
-	const maxDepth = request.session.settings.get("task.maxRecursionDepth") ?? 2;
+	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
 	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -297,9 +324,13 @@ export async function resolveEffectiveSubagentPolicy(
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
-		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
+		const searched = discovery.searchedDirs?.map(dir => shortenPath(dir)).join(", ") || "none";
+		throw new StructuredSubagentError(
+			"preflight",
+			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
+		);
 	}
-	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
+	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
 	if (disabledAgents.includes(agentName)) {
 		const enabled = agents
 			.filter(candidate => !disabledAgents.includes(candidate.name))
@@ -350,12 +381,18 @@ export async function resolveEffectiveSubagentPolicy(
 			throw new StructuredSubagentError("preflight", `Invalid ${scope} output schema: ${error}`);
 		}
 	}
-	const agentModelOverrides = request.session.settings.get("task.agentModelOverrides");
+	const agentModelOverrides = cfgTaskAgentModelOverrides.get(request.session.settings);
 	const agentServiceTierOverrides = validateAgentServiceTierOverrides(
-		request.session.settings.get("task.agentServiceTierOverrides"),
+		cfgTaskAgentServiceTierOverrides.get(request.session.settings),
 	);
 	const serviceTierOverride = Object.hasOwn(agentServiceTierOverrides, agentName)
 		? agentServiceTierOverrides[agentName]
+		: undefined;
+	const compactionThresholdOverrides = validateAgentCompactionThresholdOverrides(
+		cfgTaskAgentCompactionThresholdOverrides.get(request.session.settings),
+	);
+	const compactionThresholdOverride = Object.hasOwn(compactionThresholdOverrides, agentName)
+		? compactionThresholdOverrides[agentName]
 		: undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
 	const modelResolution = {
@@ -397,7 +434,7 @@ export async function resolveEffectiveSubagentPolicy(
 		execution = {
 			kind: "clone",
 			disposition: requested ? "merge" : "discard",
-			mergeMode: request.session.settings.get("task.isolation.merge"),
+			mergeMode: cfgTaskIsolationMerge.get(request.session.settings),
 		};
 	}
 	return {
@@ -408,6 +445,7 @@ export async function resolveEffectiveSubagentPolicy(
 		modelOverride,
 		modelRole,
 		serviceTierOverride,
+		compactionThresholdOverride,
 		parentActiveModelPattern,
 		schema,
 		execution,
@@ -415,7 +453,7 @@ export async function resolveEffectiveSubagentPolicy(
 			execution.kind === "clone" ? false : execution.kind === "managed" ? request.session.lspReadOnly : undefined,
 		enableLsp:
 			!planMode &&
-			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
+			(request.enableLsp ?? ((request.session.enableLsp ?? true) && cfgTaskEnableLsp.get(request.session.settings))),
 		enableIrc:
 			!planMode &&
 			(request.enableIrc ??
@@ -574,10 +612,7 @@ function buildExecutorOptions(
 ): ExecutorOptions {
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
-	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
-		getArtifactsDir: session.getArtifactsDir ?? (() => null),
-		getSessionId: session.getSessionId ?? (() => null),
-	};
+	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const execution = policy.execution;
 	const ordinary = execution.kind === "clone";
 	const restrictToolNames =
@@ -609,9 +644,11 @@ function buildExecutorOptions(
 		modelRole: policy.modelRole,
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
+		compactionThresholdOverride: policy.compactionThresholdOverride,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		solutionSpace: request.solutionSpace?.trim() || undefined,
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -641,6 +678,7 @@ function buildExecutorOptions(
 		settings: session.settings,
 		// Subagent executor sessions never inherit ambient MCP: no manager, no proxies.
 		enableMCP: false,
+		inheritedSessionAgents: session.getSessionAgents?.(),
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
@@ -661,10 +699,7 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		// Ordinary cloned children own their eval kernel so scratch state never
-		// leaks into the parent; managed workflows keep their historical sharing.
-		parentEvalSessionId:
-			ordinary || request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -675,11 +710,10 @@ async function loadPlanReference(
 	policy: EffectiveSubagentPolicy,
 ): Promise<{ path: string; content: string } | undefined> {
 	if (policy.execution.kind === "plan") return undefined;
-	const localProtocolOptions: LocalProtocolOptions = request.session.localProtocolOptions ?? {
-		getArtifactsDir: request.session.getArtifactsDir ?? (() => null),
-		getSessionId: request.session.getSessionId ?? (() => null),
-	};
-	return loadOverallPlanReference(request.session.getPlanReferencePath?.() ?? "local://PLAN.md", localProtocolOptions);
+	return loadOverallPlanReference(
+		request.session.getPlanReferencePath?.() ?? "local://PLAN.md",
+		sessionLocalProtocolOptions(request.session),
+	);
 }
 
 function buildFailureResult(
@@ -776,6 +810,19 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 	};
 }
 
+/** Name a settled child's exit status and artifact for a post-settle failure message. */
+function describeSalvagedWork(result: SingleResult): string {
+	const hint = prompt.render(salvagedChildHintTemplate, {
+		aborted: result.aborted,
+		abortReason: result.abortReason,
+		exitCode: result.exitCode,
+		error: result.error,
+		id: result.id,
+		outputPath: result.outputPath,
+	});
+	return `\n${hint.trim()}`;
+}
+
 /**
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
@@ -790,6 +837,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let completedSuccessfully = false;
 	let hasValidStructuredOutput = false;
 	let deferredCleanup: Promise<void> | undefined;
+	// Set once the child returns: every later step (structured-output
+	// metadata, isolation merge, nested patch apply) can still throw, and the
+	// failure must carry the exit status and artifact the child produced.
+	let settled: SingleResult | undefined;
+	let retainSalvagedArtifact = false;
 	const onSubprocessResult =
 		request.invocationKind === "eval"
 			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
@@ -845,7 +897,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
-				preferredBackend: parseIsolationBackend(request.session.settings.get("isolation.backend")),
+				preferredBackend: parseIsolationBackend(cfgIsolationBackend.get(request.session.settings)),
 				agentId: id,
 				mergeMode: clone.mergeMode,
 				discard: clone.disposition === "discard",
@@ -860,6 +912,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		} else {
 			throw new StructuredSubagentError("execution", "Isolated context prepared for a non-clone execution.");
 		}
+		settled = result;
 		attachStructuredOutputMetadata(result, policy.schema);
 		if (clone && result.cloneDisposition === undefined) result.cloneDisposition = clone.disposition;
 		// Discard runs never capture: strip any runner-supplied capture fields so
@@ -932,10 +985,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		};
 	} catch (error) {
 		if (error instanceof StructuredSubagentError) throw error;
+		// The failure message points the parent at the artifact, so it must
+		// survive the cleanup below.
+		retainSalvagedArtifact = settled?.outputPath !== undefined;
 		throw new StructuredSubagentError(
 			"execution",
-			`Subagent execution failed: ${error instanceof Error ? error.message : String(error)}`,
-			{ cause: error },
+			`Subagent execution failed: ${error instanceof Error ? error.message : String(error)}${settled ? describeSalvagedWork(settled) : ""}`,
+			{ cause: error, result: settled },
 		);
 	} finally {
 		// Safety net for the artifact hold: the runner releases it on every
@@ -949,6 +1005,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const execution = policy.execution;
 		const shouldRetainArtifacts =
 			request.detached === true ||
+			retainSalvagedArtifact ||
 			(request.retainArtifacts && (completedSuccessfully || hasValidStructuredOutput)) ||
 			(execution.kind === "clone" &&
 				execution.disposition === "merge" &&

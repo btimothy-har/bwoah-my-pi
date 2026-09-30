@@ -47,13 +47,14 @@ Use `task` to dispatch reviewers in the batch or flat shape specified by the ski
 ### Chair Diff Capture
 
 {{#if skipDiff}}{{diffInstruction}}. Capture and share the COMPLETE diff before dispatch; the previews below are insufficient.{{else}}The complete diff below is the review input; share it with every reviewer.{{/if}}
+{{#if fullDiffRef}}The complete diff is frozen at `{{fullDiffRef}}` — read it there; it stays byte-identical even if the working tree changes.{{/if}}
 
 ### Reviewer Instructions
 
 Reviewer MUST:
 1. Focus ONLY on assigned files
 2. MUST inspect the chair's complete pinned diff (inline or session-local `local://` reference); NEVER infer a verdict from previews or a moving branch
-3. {{contextInstruction}}
+3. {{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}
 4. Use incremental `yield` sections for findings and verdict fields; reviewers MUST NOT call `review_findings` — only the primary (as review chair) calls it after synthesis
 
 {{#if skipDiff}}

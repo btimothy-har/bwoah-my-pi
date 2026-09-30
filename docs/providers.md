@@ -47,11 +47,15 @@ Use the interactive slash commands inside a session:
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
 - `/logout` — opens the provider selector to remove stored credentials.
 
+Outside a session, `omp login [<provider>]` runs the same login from the terminal: it prints the auth URL (and opens it in your browser), reads any prompts from stdin, and saves to the same store sessions use — local `agent.db`, or the configured auth broker. Without a provider it shows a numbered picker.
+
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 
 When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
 
 For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key. OMP refreshes membership from Cline's public recommended-models endpoint and bundles the current sixteen-model roster with Cline-authored limits, subscription pricing, modalities, and per-model reasoning controls for offline startup. New live ids remain selectable before regeneration, using conservative metadata rather than guessed controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and work with the same key on any Cline account; subscription models show API-equivalent reference pricing, while streamed gateway cost remains authoritative for actual billed or discounted usage. Requests mirror Cline CLI client headers and a stable per-session task id, Qwen routes use Cline's prompt-cache shape, and Qwen3.7 Plus maps thinking levels to the gateway's token-budget field.
+
+For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses Chat Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, which that registry does not list yet, takes them from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
 
 ### Pinning a key in `models.yml`
 
