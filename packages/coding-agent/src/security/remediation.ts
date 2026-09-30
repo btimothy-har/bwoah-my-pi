@@ -88,7 +88,7 @@ export async function prepareSecurityRemediationWorkspace(
 		async cleanup() {
 			if (cleaned) return;
 			cleaned = true;
-			await disposeIsolation(handle);
+			await disposeIsolation(handle, { kind: "explicit" });
 		},
 	};
 }

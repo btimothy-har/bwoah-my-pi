@@ -104,6 +104,7 @@ describe("runIsolatedSubprocess", () => {
 
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -191,6 +192,7 @@ describe("runIsolatedSubprocess", () => {
 
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -256,6 +258,7 @@ describe("runIsolatedSubprocess", () => {
 		const cleanupGate = Promise.withResolvers<void>();
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -328,6 +331,7 @@ describe("runIsolatedSubprocess", () => {
 		};
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -397,6 +401,7 @@ describe("runIsolatedSubprocess", () => {
 		};
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -465,7 +470,9 @@ describe("runIsolatedSubprocess", () => {
 
 		expect(captureSpy).toHaveBeenCalledTimes(2);
 		expect(await Bun.file(patchPath).text()).toBe(finalPatch);
-		expect(commitSpy).toHaveBeenCalledWith(isolationDir, baseline, "RetainedIsolation", undefined, undefined);
+		// Patch-only recovery: release re-captures the patch but never creates
+		// a cleanup-time recovery branch.
+		expect(commitSpy).not.toHaveBeenCalled();
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 
@@ -474,6 +481,7 @@ describe("runIsolatedSubprocess", () => {
 		tempRoots.push(artifactsDir);
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -556,6 +564,7 @@ describe("runIsolatedSubprocess", () => {
 		const order: string[] = [];
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -640,6 +649,7 @@ describe("runIsolatedSubprocess", () => {
 		sessionManager.beginTurnBudget(100_000, true);
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -726,6 +736,7 @@ describe("runIsolatedSubprocess", () => {
 		};
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -780,6 +791,7 @@ describe("runIsolatedSubprocess", () => {
 		await Bun.write(artifactsDir, "not a directory");
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: "/repo/isolated",
+			generation: "test-generation",
 			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
@@ -898,7 +910,7 @@ describe("retainIsolationWorkspace", () => {
 		await Promise.all(tempRoots.splice(0).map(tempRoot => fs.rm(tempRoot, { force: true, recursive: true })));
 	});
 
-	it("moves the workspace to a unique sibling out of the deterministic slot", async () => {
+	it("retains a mounting-backend workspace in place at its recorded path", async () => {
 		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-retain-"));
 		tempRoots.push(parent);
 		const baseDir = path.join(parent, "wt_abc123");
@@ -908,14 +920,14 @@ describe("retainIsolationWorkspace", () => {
 
 		const retained = await retainIsolationWorkspace(isolationDir, natives.IsoBackendKind.Overlayfs);
 
-		expect(retained).toEqual({ dir: expect.any(String), sidecarOk: true });
-		expect(retained.dir).not.toBe(isolationDir);
-		expect(path.dirname(retained.dir)).toContain(".retained-");
+		// Mount/path-indexed backends keep the path their teardown was recorded
+		// against: relocating them invalidates ZFS dataset lookup and any
+		// dependent clone's object borrows. The sidecar still routes manual
+		// `worktree clear` through native teardown.
+		expect(retained).toEqual({ dir: isolationDir, sidecarOk: true });
 		expect(await Bun.file(path.join(retained.dir, "work.txt")).text()).toBe("unrecovered");
-		expect(await Bun.file(baseDir).exists()).toBe(false);
 		const sidecar = await Bun.file(path.join(path.dirname(retained.dir), RETAINED_BACKEND_FILE)).json();
 		expect(sidecar.backend).toBe(natives.IsoBackendKind.Overlayfs);
-		tempRoots.push(path.dirname(retained.dir));
 	});
 
 	it("records no sidecar for copy backends that need no unmount", async () => {
