@@ -17,6 +17,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -783,6 +784,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
+	let releaseHold: (() => Promise<void>) | undefined;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
@@ -792,12 +794,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		request.invocationKind === "eval"
 			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
 			: undefined;
+	let leasedId: string | undefined;
+	let baseOptions: ExecutorOptions | undefined;
 	try {
-		const id = await reserveStructuredSubagentId(request.session, {
+		leasedId = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const id = leasedId;
+		baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};
@@ -836,7 +841,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			// parked clone's transcript or its only recovery patch. Detached
 			// runs are fire-and-forget (no revival, no parked clone), so the
 			// job's eviction cleanup owns the directory exactly as before.
-			const releaseHold = request.detached === true ? undefined : lease.holdForIsolation();
+			releaseHold = request.detached === true ? undefined : lease.holdForIsolation();
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
@@ -933,6 +938,14 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
+		// Safety net for the artifact hold: the runner releases it on every
+		// non-adopted exit path, but a dispatched runner that never adopted the
+		// agent (mocked dispatches, pre-dispatch failures) must not leave the
+		// lease held — that would block consumer cleanup forever. The releaser
+		// is idempotent, so real adopted runs keep the hold.
+		const stillAdopted =
+			baseOptions?.keepAlive !== false && leasedId !== undefined && AgentLifecycleManager.global().has(leasedId);
+		if (releaseHold && !stillAdopted) await releaseHold();
 		const execution = policy.execution;
 		const shouldRetainArtifacts =
 			request.detached === true ||
