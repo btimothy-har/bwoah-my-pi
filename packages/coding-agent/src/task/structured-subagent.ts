@@ -475,6 +475,68 @@ interface ArtifactLease {
 	artifactsDir: string;
 	temporary: boolean;
 	unregister: (() => void) | undefined;
+	/**
+	 * Idempotent consumer cleanup request. While an isolation hold is active
+	 * this resolves immediately (the clone still needs the directory); the
+	 * final hold release performs the deferred physical cleanup.
+	 */
+	requestCleanup: () => Promise<void>;
+	/** Guard the directory for a live isolation clone; returns the hold releaser. */
+	holdForIsolation: () => () => Promise<void>;
+	/** Files that must outlive clone disposal (published recovery patches). */
+	preserveRecoveryFiles: (artifacts: readonly { path: string }[]) => void;
+}
+
+function createArtifactLease(
+	sessionFile: string | null,
+	artifactsDir: string,
+	temporary: boolean,
+	unregister: (() => void) | undefined,
+): ArtifactLease {
+	let holdCount = 0;
+	let cleanupRequested = false;
+	let physicalCleanup: Promise<void> | undefined;
+	const preserved = new Set<string>();
+	const physicalCleanupOnce = (): Promise<void> => {
+		physicalCleanup ??= (async () => {
+			if (!temporary) return;
+			// Remove everything except files the isolation lifecycle preserved:
+			// acknowledged recovery patches outlive the clone.
+			for (const entry of await fs.readdir(artifactsDir).catch(() => [])) {
+				if (preserved.has(path.join(artifactsDir, entry))) continue;
+				await fs.rm(path.join(artifactsDir, entry), { recursive: true, force: true }).catch(() => undefined);
+			}
+			if (preserved.size === 0) {
+				await fs.rm(artifactsDir, { recursive: true, force: true }).catch(() => undefined);
+				unregister?.();
+			}
+		})();
+		return physicalCleanup;
+	};
+	return {
+		sessionFile,
+		artifactsDir,
+		temporary,
+		unregister,
+		requestCleanup: async () => {
+			cleanupRequested = true;
+			if (holdCount > 0) return; // the final hold release performs it
+			await physicalCleanupOnce();
+		},
+		holdForIsolation: () => {
+			holdCount += 1;
+			let released = false;
+			return async () => {
+				if (released) return;
+				released = true;
+				holdCount -= 1;
+				if (holdCount === 0 && cleanupRequested) await physicalCleanupOnce();
+			};
+		},
+		preserveRecoveryFiles: artifacts => {
+			for (const artifact of artifacts) preserved.add(path.resolve(artifact.path));
+		},
+	};
 }
 
 async function leaseArtifacts(
@@ -485,14 +547,14 @@ async function leaseArtifacts(
 	if (sessionFile) {
 		const artifactsDir = sessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
+		return createArtifactLease(sessionFile, artifactsDir, false, undefined);
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return createArtifactLease(null, artifactsDir, true, registerArtifactsDir(artifactsDir));
 }
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
@@ -768,6 +830,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			result = await runSubprocess(baseOptions);
 			onSubprocessResult?.(result);
 		} else if (clone) {
+			// Guard the artifact directory for the clone's whole lifecycle: the
+			// runner owns the hold and releases it after reclamation, retention
+			// handoff, or setup failure — consumer eviction must not delete a
+			// parked clone's transcript or its only recovery patch.
+			const releaseHold = lease.holdForIsolation();
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
@@ -780,6 +847,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
 				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
 				onSubprocessResult,
+				preserveRecoveryFiles: lease.preserveRecoveryFiles,
+				releaseArtifactHold: releaseHold,
 			});
 		} else {
 			throw new StructuredSubagentError("execution", "Isolated context prepared for a non-clone execution.");
@@ -870,24 +939,24 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				execution.disposition === "merge" &&
 				(changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		const cleanupArtifacts = async (): Promise<void> => {
-			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-			lease.unregister?.();
-		};
 		if (shouldCleanup) {
 			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
-					resource: "artifacts",
-					artifactsDir: lease.artifactsDir,
-				});
+				trackLateCleanup(
+					deferredCleanup.then(() => lease.requestCleanup()).then(() => {}),
+					{
+						resource: "artifacts",
+						artifactsDir: lease.artifactsDir,
+					},
+				);
 			} else {
-				await cleanupArtifacts();
+				await lease.requestCleanup();
 			}
 		} else if (lease.temporary && request.onArtifactsRetained) {
 			// Retained rather than cleaned up now: the caller (e.g. an async
 			// job body) owns disposing it once the retained handle is no
 			// longer needed, instead of it leaking for the process lifetime.
-			request.onArtifactsRetained(cleanupArtifacts);
+			// The request honors isolation holds and preserved recovery files.
+			request.onArtifactsRetained(() => lease.requestCleanup());
 		}
 	}
 }

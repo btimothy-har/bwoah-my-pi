@@ -4236,9 +4236,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {
-					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
+					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async results => {
 						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());
 						await reap.completion;
+						// A failed deferred shutdown means unproven workspace state:
+						// the aggregate barrier below must observe it, not swallow it.
+						const failures = results.filter(r => r.status === "rejected").map(r => r.reason);
+						if (failures.length > 0) {
+							throw new AggregateError(failures, `Deferred session shutdown failed for subagent ${id}`);
+						}
 					});
 					lateCleanups.push(finalReap);
 				} else {
@@ -4253,8 +4259,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 			if (lateCleanups.length > 0) {
-				const completion = Promise.allSettled(lateCleanups).then(() => {});
-				trackLateCleanup(completion, { id, resource: "subagent" });
+				// Error-preserving barrier: waits for every deferred cleanup, then
+				// rejects when any failed. Consumers (the isolation runner's
+				// writer barrier) must see failure — it means the workspace holds
+				// unproven state and must never be reclaimed.
+				const completion = Promise.allSettled(lateCleanups).then(results => {
+					const failures = results.filter(r => r.status === "rejected").map(r => r.reason);
+					if (failures.length > 0) {
+						throw new AggregateError(failures, `Deferred cleanup failed for subagent ${id}`);
+					}
+				});
+				trackLateCleanup(completion.then(() => {}), { id, resource: "subagent" });
 				options.onCleanupDeferred?.(completion);
 			}
 		}
