@@ -926,6 +926,11 @@ export class MCPManager {
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
 					await this.#onToolsChanged?.(this.#tools);
+					// The publication await spans queued session work; a teardown or
+					// superseding reconcile that landed during it must not receive a
+					// phantom "connected" event or a cache write for a dead generation.
+					if (this.#epoch !== connectEpoch) return;
+					if (this.#connections.get(name) !== connection) return;
 					void this.toolCache?.set(name, config, serverTools);
 
 					notify({ type: "connected", serverName: name });
