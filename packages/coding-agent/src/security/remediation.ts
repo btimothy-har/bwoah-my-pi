@@ -25,7 +25,7 @@ export interface SecurityRemediationWorkspace {
 export interface SecurityRemediationDependencies {
 	prepareContext?: (cwd: string) => Promise<IsolationContext>;
 	createIsolation?: (repositoryRoot: string, id: string, preferred?: IsoBackendKind) => Promise<IsolationHandle>;
-	cleanupIsolation?: (handle: IsolationHandle) => Promise<void>;
+	cleanupIsolation?: (handle: IsolationHandle, authorization: { kind: "explicit" }) => Promise<void>;
 	createId?: () => string;
 }
 
@@ -88,7 +88,7 @@ export async function prepareSecurityRemediationWorkspace(
 		async cleanup() {
 			if (cleaned) return;
 			cleaned = true;
-			await disposeIsolation(handle);
+			await disposeIsolation(handle, { kind: "explicit" });
 		},
 	};
 }

@@ -6,12 +6,26 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, getWorktreesDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValue } from "../config/settings-schema";
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import {
+	readIsolationCleanup,
+	writeIsolationCleanup,
+	type IsolationCleanupAuthorization,
+	type IsolationCleanupRecord,
+} from "./isolation-ownership";
+import {
+	claimSlotForNewGeneration,
+	discardIncompleteWrapper,
+	managedSourceWrapper,
+	markIsolationDetached,
+	registerIsolationGeneration,
+	removeAuthorizedWrapper,
+	verifyIsolationRecoveryArtifacts,
+	withIsolationMetadataLock,
+} from "./isolation-cleanup";
 import { mapWithConcurrencyLimit } from "./parallel";
-
 const { IsoBackendKind } = natives;
 
 const TASK_ISOLATION_DIR_PREFIX = "t";
@@ -509,6 +523,8 @@ export interface IsolationHandle {
 	mergedDir: string;
 	/** Backend the PAL actually used. */
 	backend: IsoBackendKind;
+	/** Cleanup-generation identity of this materialization. */
+	generation: string;
 	/** True when the resolver downgraded from `preferred` to `backend`. */
 	fellBack: boolean;
 	/** Optional reason associated with `fellBack`. */
@@ -585,16 +601,35 @@ export async function ensureIsolation(
 	const resolution = natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
+	const root = path.resolve(getWorktreesDir());
+	const sourceBaseDir = managedSourceWrapper(root, repoRoot);
 
 	for (const candidate of candidates) {
-		await fs.rm(baseDir, { recursive: true, force: true });
-		// Claim ownership before the backend materialises `m`. Backends only
-		// create/replace `mergedDir` (and overlay upper/work), never the base
-		// dir, so the marker survives `isoStart` — and a concurrent
-		// `omp worktree clear` never sees this sandbox without a live owner,
-		// even while a large clone is still in progress.
-		await fs.mkdir(baseDir, { recursive: true });
-		await writeIsolationOwner(baseDir, id);
+		const generation = crypto.randomUUID();
+		await fs.mkdir(root, { recursive: true });
+		// Register the cleanup record, generation, and source dependency under
+		// the root metadata lock before any backend touches the slot. An
+		// unauthorized occupant (live owner, unknown legacy clone, retained
+		// recovery workspace) fails setup instead of being silently wiped.
+		const stale = await claimSlotForNewGeneration(root, baseDir, {
+			id,
+			generation,
+			backend: candidate,
+			sourceBaseDir,
+		});
+		if (stale) {
+			await removeAuthorizedWrapper(root, baseDir);
+			// The removal deleted the wrapper including its markers: the new
+			// generation's record + owner MUST be on disk before isoStart, or a
+			// concurrent `omp worktree clear` sees a live clone with no
+			// verifiable owner.
+			await registerIsolationGeneration(root, baseDir, {
+				id,
+				generation,
+				backend: candidate,
+				sourceBaseDir,
+			});
+		}
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
@@ -606,14 +641,18 @@ export async function ensureIsolation(
 			// frozen repo that still borrows the source object DB via alternates.
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
 			await dedupeNestedAlternates(mergedDir);
+			await markIsolationDetached(root, baseDir);
 			return {
 				mergedDir,
 				backend: candidate,
+				generation,
 				fellBack: candidate !== resolution.kind || resolution.fellBack,
 				fallbackReason,
 			};
 		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
+			// No agent has run in this generation: explicit teardown is safe even
+			// though a mount may exist (detached is still false in the record).
+			await discardIncompleteWrapper(root, baseDir);
 			const message = errorMessage(err);
 			if (!natives.isoIsUnavailableError(message)) {
 				throw err;
@@ -625,23 +664,45 @@ export async function ensureIsolation(
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
-export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	try {
-		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: handle.mergedDir,
-				error: err instanceof Error ? err.message : String(err),
-			});
+/**
+ * Tear down a handle returned by {@link ensureIsolation}. The caller supplies
+ * the cleanup authorization: `snapshot` (with the published patch evidence),
+ * `discard`, or `explicit` (a workspace that never ran an agent). This
+ * validates the evidence, records `ready`, and reclaims the wrapper — it
+ * never captures work, commits branches, or merges.
+ */
+export async function cleanupIsolation(
+	handle: IsolationHandle,
+	authorization: IsolationCleanupAuthorization,
+): Promise<void> {
+	const baseDir = path.dirname(handle.mergedDir);
+	const root = path.resolve(getWorktreesDir());
+	await fs.mkdir(root, { recursive: true });
+	if (authorization.kind === "snapshot") {
+		if (!(await verifyIsolationRecoveryArtifacts(authorization.artifacts))) {
+			throw new Error(
+				`recovery patch evidence missing or altered for generation ${handle.generation} at ${baseDir}`,
+			);
 		}
-	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
 	}
+	await withIsolationMetadataLock(root, async () => {
+		const existing = await readIsolationCleanup(baseDir).catch(() => undefined);
+		if (existing && existing.generation !== handle.generation) {
+			throw new Error(
+				`isolation slot ${baseDir} changed generation (expected ${handle.generation}, found ${existing.generation})`,
+			);
+		}
+		const record: IsolationCleanupRecord = existing ?? {
+			version: 1,
+			generation: handle.generation,
+			backend: handle.backend,
+			detached: true,
+			disposition: authorization.kind === "discard" ? "discard" : "preserve",
+			state: "finalizing",
+		};
+		await writeIsolationCleanup(baseDir, { ...record, state: "ready", authorization });
+	});
+	await removeAuthorizedWrapper(root, baseDir);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

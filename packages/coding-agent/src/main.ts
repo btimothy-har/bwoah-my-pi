@@ -14,6 +14,7 @@ import {
 	DISPLAY_VERSION,
 	getLogPath,
 	getProjectDir,
+	getWorktreesDir,
 	normalizePathForComparison,
 	setProjectDir,
 	VERSION,
@@ -108,6 +109,7 @@ import {
 	loadSystemPromptTemplateFile,
 	resolvePromptInput,
 } from "./system-prompt";
+import { scheduleIsolationCleanup } from "./task/isolation-cleanup";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -649,6 +651,9 @@ async function runInteractiveMode(
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+		// Reclaim dead-owner isolation leftovers off the startup path: never
+		// awaited, never blocking first paint.
+		scheduleIsolationCleanup(getWorktreesDir());
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);

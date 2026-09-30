@@ -14,6 +14,7 @@ import { disposeAllKernelSessions, executePython } from "../../src/eval/py/execu
 import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
 import type { PlanModeState } from "../../src/plan-mode/state";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as taskDiscovery from "../../src/task/discovery";
@@ -189,6 +190,11 @@ function makeEvalSession(
 describe("runEvalAgent", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		// Dispose adopted agents/lifecycle timers BEFORE registry reset: the
+		// reset retires maps without running release callbacks, which would
+		// strand adopted resources across tests.
+		await AgentLifecycleManager.global().dispose();
+		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		resetRegisteredArtifactDirsForTests();
 		await Promise.all([...jobManagers].map(manager => manager.dispose()));

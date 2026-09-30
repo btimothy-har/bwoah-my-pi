@@ -6,14 +6,24 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { replaceFileAtomically } from "../utils/atomic-file";
 
 const { IsoBackendKind } = natives;
 
 /** Marker file written into a task-isolation base dir identifying its owner. */
 export const ISOLATION_OWNER_FILE = ".omp-isolation-owner.json";
+
+/**
+ * Recognizable task-isolation wrapper segment: the deterministic `t<9 hex>`
+ * slot from `getTaskIsolationSegment`, optionally suffixed by
+ * `retainIsolationWorkspace`'s unique `.retained-<ts>-<rand>` relocation.
+ */
+export const ISOLATION_SEGMENT_PATTERN = /^t[0-9a-f]{9}(?:\.retained-[0-9a-z]+-[0-9a-f]+)?$/;
 
 /** Recorded owner of a task-isolation sandbox. */
 export interface IsolationOwner {
@@ -59,6 +69,24 @@ async function processStartToken(pid: number): Promise<string | null> {
 	const started = res.text().trim();
 	return started.length > 0 ? started : null;
 }
+/**
+ * Build a collector claim identity for the current process — the same
+ * pid/start-token shape as an owner marker, but naming the cleanup
+ * continuation rather than the creating agent.
+ */
+export async function currentIsolationClaim(): Promise<{ pid: number; startToken?: string }> {
+	const startToken = await processStartToken(process.pid);
+	return { pid: process.pid, ...(startToken ? { startToken } : {}) };
+}
+
+/**
+ * Build an owner record for the current process. Exported so cleanup metadata
+ * can stamp the same identity shape as the owner marker.
+ */
+export async function currentIsolationOwner(id: string): Promise<IsolationOwner> {
+	const startToken = await processStartToken(process.pid);
+	return { pid: process.pid, id, ...(startToken ? { startToken } : {}) };
+}
 
 /**
  * Record the current process as owner of the sandbox rooted at `baseDir`.
@@ -67,21 +95,68 @@ async function processStartToken(pid: number): Promise<string | null> {
  * `omp worktree clear` never sees an owner-less sandbox mid-creation.
  */
 export async function writeIsolationOwner(baseDir: string, id: string): Promise<void> {
-	const startToken = await processStartToken(process.pid);
-	const owner: IsolationOwner = { pid: process.pid, id, ...(startToken ? { startToken } : {}) };
+	const owner = await currentIsolationOwner(id);
 	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
+}
+
+/** Read and validate the owner marker. `undefined` only when the file is absent. */
+export async function readIsolationOwner(baseDir: string): Promise<IsolationOwner | undefined> {
+	const marker = path.join(baseDir, ISOLATION_OWNER_FILE);
+	let decoded: unknown;
+	try {
+		decoded = await Bun.file(marker).json();
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+	const parsed = parseIsolationOwner(decoded);
+	if (!parsed) throw new Error(`isolation owner marker at ${marker} is malformed`);
+	return parsed;
+}
+
+/** Validate decoded JSON as an owner record; `undefined` when the shape is wrong. */
+function parseIsolationOwner(decoded: unknown): IsolationOwner | undefined {
+	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return undefined;
+	const { pid, id, startToken } = decoded as Record<string, unknown>;
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return undefined;
+	if (typeof id !== "string" || id.length === 0) return undefined;
+	if (startToken !== undefined && (typeof startToken !== "string" || startToken.length === 0)) return undefined;
+	return { pid, id, ...(startToken !== undefined ? { startToken } : {}) };
+}
+
+/**
+ * Whether the process described by an owner/claim identity is still alive.
+ *
+ * `process.kill(pid, 0)` can fail with `EPERM` even when the process is alive,
+ * so only an explicit `ESRCH` ("no such process") counts as dead; any other
+ * error is treated as alive to avoid deleting a sandbox that is actually in
+ * use. When the identity carries a start-time token, a live pid whose current
+ * token no longer matches is a recycled pid — a different process — and counts
+ * as dead.
+ */
+export async function isIsolationOwnerLive(owner: Pick<IsolationOwner, "pid" | "startToken">): Promise<boolean> {
+	try {
+		process.kill(owner.pid, 0);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+	}
+	// The pid is live (or unknowable via EPERM). Reject a recycled pid: if the
+	// identity pinned the owner's start-time token, the process wearing that
+	// pid now must still present the same token.
+	if (owner.startToken !== undefined && owner.startToken.length > 0) {
+		const current = await processStartToken(owner.pid);
+		if (current !== null && current !== owner.startToken) return false;
+	}
+	return true;
 }
 
 /**
  * Whether a live omp process still owns the sandbox at `baseDir`.
  *
  * A missing or malformed marker means no verifiable owner — a crashed run or a
- * sandbox from before markers existed, both safe to reclaim. `process.kill(pid,
- * 0)` can fail with `EPERM` even when the process is alive, so only an explicit
- * `ESRCH` ("no such process") counts as dead; any other error is treated as
- * alive to avoid deleting a sandbox that is actually in use. When the marker
- * carries a {@link IsolationOwner.startToken}, a live pid whose current token no
- * longer matches is a recycled pid — a different process — and counts as dead.
+ * sandbox from before markers existed, both safe to reclaim by the manual
+ * `clear` path. Automatic GC uses {@link readIsolationOwner} instead: there,
+ * unknown ownership must fail closed rather than count as proven death.
  */
 export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 	let decoded: unknown;
@@ -90,22 +165,9 @@ export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return false;
-	const pid = decoded.pid;
-	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
-	}
-	// The pid is live (or unknowable via EPERM). Reject a recycled pid: if the
-	// marker pinned the owner's start-time token, the process wearing that pid
-	// now must still present the same token.
-	if ("startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0) {
-		const current = await processStartToken(pid);
-		if (current !== null && current !== decoded.startToken) return false;
-	}
-	return true;
+	const parsed = parseIsolationOwner(decoded);
+	if (!parsed) return false;
+	return isIsolationOwnerLive(parsed);
 }
 
 /** Sidecar recording the native-teardown backend of a retained workspace. */
@@ -164,4 +226,169 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	}
 	if (!needsNativeTeardown(backend)) return undefined;
 	return backend;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cleanup record — durable authorization for automatic reclamation.
+//
+// The owner marker answers "who owns this sandbox". The cleanup record answers
+// "may an automatic collector remove it": it names the backend that must tear
+// the workspace down, records the clone-generation it belongs to, and — for
+// mutable work — the exact patch files that carry the saved changes. A dead
+// owner alone never authorizes deletion; only a validated record does.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Sidecar recording the cleanup/authorization contract for one generation. */
+export const ISOLATION_CLEANUP_FILE = ".omp-isolation-cleanup.json";
+
+/** One recovered patch file a collector must find intact before deletion. */
+export interface IsolationRecoveryArtifact {
+	/** Absolute path of the published artifact. */
+	path: string;
+	/** SHA-256 hex digest of the artifact bytes at publication time. */
+	sha256: string;
+}
+
+/**
+ * Why a workspace may be reclaimed:
+ * - `snapshot` — a complete final patch set was published and verified.
+ * - `discard` — the clone ran with a discard disposition; nothing to save.
+ * - `explicit` — a caller that never runs an agent (setup failure, security
+ *   remediation) requested teardown directly.
+ */
+export type IsolationCleanupAuthorization =
+	| { kind: "snapshot"; artifacts: IsolationRecoveryArtifact[] }
+	| { kind: "discard" }
+	| { kind: "explicit" };
+
+/**
+ * Generations are UUIDv4 or short test labels; the strict charset keeps the
+ * value path-safe wherever it is interpolated into filesystem names. `..` is
+ * excluded by the charset (no repeated-dot runs) and the length caps abuse.
+ */
+const ISOLATION_GENERATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+type IsolationCleanupState = "active" | "finalizing" | "ready" | "retained" | "deleting" | "trash";
+
+const ISOLATION_CLEANUP_STATES: readonly IsolationCleanupState[] = [
+	"active",
+	"finalizing",
+	"ready",
+	"retained",
+	"deleting",
+	"trash",
+];
+
+const ISO_BACKEND_KIND_VALUES = new Set(Object.values(natives.IsoBackendKind));
+
+/**
+ * Lifecycle/authorization record for one isolation generation, stored at
+ * `.omp-isolation-cleanup.json`. `state` tracks physical progress:
+ * `active` (agent may still run) → `finalizing` (writer fence + final
+ * snapshot) → `ready` (complete snapshot verified) → `deleting`/`trash`
+ * (collector claimed it) — or `retained`, an intentional recovery holdout.
+ * `authorization` explains why `ready` is safe to delete.
+ */
+export interface IsolationCleanupRecord {
+	version: 1;
+	/** Identity of this materialization; a re-created slot is a new generation. */
+	generation: string;
+	/** Backend that actually materialized `m` (recorded per candidate attempt). */
+	backend: number;
+	/** True once the clone's git metadata was successfully detached. */
+	detached: boolean;
+	/** Whether the generation ran with a discard disposition. */
+	disposition: "preserve" | "discard";
+	/** Canonical managed wrapper holding the source checkout, when known. */
+	sourceBaseDir?: string;
+	state: IsolationCleanupState;
+	authorization?: IsolationCleanupAuthorization;
+	/** Collector identity currently performing physical teardown. */
+	claim?: { pid: number; startToken?: string };
+}
+
+/** Validate decoded JSON as a cleanup record; `undefined` when the shape is wrong. */
+function parseIsolationCleanupRecord(decoded: unknown): IsolationCleanupRecord | undefined {
+	if (typeof decoded !== "object" || decoded === null) return undefined;
+	const record = decoded as Record<string, unknown>;
+	if (record.version !== 1) return undefined;
+	// Path-safe format: the generation is interpolated into trash rename
+	// targets, so separators and traversal segments must never reach disk.
+	if (typeof record.generation !== "string" || !ISOLATION_GENERATION_PATTERN.test(record.generation)) return undefined;
+	if (typeof record.backend !== "number" || !ISO_BACKEND_KIND_VALUES.has(record.backend)) return undefined;
+	if (typeof record.detached !== "boolean") return undefined;
+	if (record.disposition !== "preserve" && record.disposition !== "discard") return undefined;
+	if (typeof record.state !== "string" || !ISOLATION_CLEANUP_STATES.includes(record.state as IsolationCleanupState))
+		return undefined;
+	if (
+		record.sourceBaseDir !== undefined &&
+		(typeof record.sourceBaseDir !== "string" || record.sourceBaseDir.length === 0)
+	)
+		return undefined;
+	const authorization = record.authorization;
+	if (authorization !== undefined) {
+		if (typeof authorization !== "object" || authorization === null) return undefined;
+		const kind = (authorization as Record<string, unknown>).kind;
+		if (kind === "snapshot") {
+			const artifacts = (authorization as Record<string, unknown>).artifacts;
+			if (!Array.isArray(artifacts)) return undefined;
+			for (const artifact of artifacts) {
+				if (typeof artifact !== "object" || artifact === null) return undefined;
+				const entry = artifact as Record<string, unknown>;
+				if (typeof entry.path !== "string" || entry.path.length === 0) return undefined;
+				if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) return undefined;
+			}
+		} else if (kind !== "discard" && kind !== "explicit") {
+			return undefined;
+		}
+	}
+	const claim = record.claim;
+	if (claim !== undefined) {
+		if (typeof claim !== "object" || claim === null) return undefined;
+		const claimPid = (claim as Record<string, unknown>).pid;
+		if (typeof claimPid !== "number" || !Number.isInteger(claimPid) || claimPid <= 0) return undefined;
+		const claimToken = (claim as Record<string, unknown>).startToken;
+		if (claimToken !== undefined && (typeof claimToken !== "string" || claimToken.length === 0)) return undefined;
+	}
+	return record as unknown as IsolationCleanupRecord;
+}
+
+/**
+ * Read and validate the cleanup record. `undefined` only when the file is
+ * absent — a missing record means the sandbox predates the contract or died
+ * mid-creation, both unknown rather than reclaimable. Malformed or unreadable
+ * records throw so callers fail closed instead of deleting through ambiguity.
+ */
+export async function readIsolationCleanup(baseDir: string): Promise<IsolationCleanupRecord | undefined> {
+	const sidecar = path.join(baseDir, ISOLATION_CLEANUP_FILE);
+	let decoded: unknown;
+	try {
+		decoded = await Bun.file(sidecar).json();
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+	const parsed = parseIsolationCleanupRecord(decoded);
+	if (!parsed) throw new Error(`isolation cleanup record at ${sidecar} is malformed`);
+	return parsed;
+}
+
+/**
+ * Atomically publish a cleanup record. Callers validate the record and hold
+ * the worktree-root metadata lock across generation/authorization/claim
+ * transitions; the write itself is a staged sibling file replaced atomically
+ * so a crash never leaves a torn record.
+ */
+export async function writeIsolationCleanup(baseDir: string, record: IsolationCleanupRecord): Promise<void> {
+	const target = path.join(baseDir, ISOLATION_CLEANUP_FILE);
+	if (parseIsolationCleanupRecord(record) === undefined) {
+		throw new Error(`refusing to publish malformed isolation cleanup record for ${record?.generation ?? "?"}`);
+	}
+	const staged = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	try {
+		await Bun.write(staged, JSON.stringify(record));
+		await replaceFileAtomically(staged, target);
+	} catch (error) {
+		await fs.rm(staged, { force: true }).catch(() => undefined);
+		throw error;
+	}
 }

@@ -38,9 +38,11 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
-import { selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "../persistence-failure";
+import { scheduleIsolationCleanup } from "../../task/isolation-cleanup";
+import { getWorktreesDir } from "@oh-my-pi/pi-utils/dirs";
+import { selectRpcEntries } from "./rpc-compat";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
@@ -864,6 +866,9 @@ export async function runRpcMode(
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
 			frameEncoder.setProtocolVersion(2);
 	};
+	// Reclaim dead-owner isolation leftovers after protocol readiness; never
+	// awaited and never written to the protocol channel.
+	scheduleIsolationCleanup(getWorktreesDir());
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(

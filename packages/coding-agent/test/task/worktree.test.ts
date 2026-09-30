@@ -6,6 +6,7 @@ import {
 	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
+	cleanupIsolation,
 	cleanupTaskBranches,
 	commitToBranch,
 	ensureIsolation,
@@ -234,16 +235,30 @@ describe("worktree isolation helpers", () => {
 				message.startsWith("ISO_UNAVAILABLE:"),
 			);
 
-			const handle = await ensureIsolation(repo, "retry-path-unavailable");
+			// Contain the real slot creation in a temp worktree root — never the
+			// user's ~/.omp/wt — and clean the handle up even on assertion failure.
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-retry-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			try {
+				const handle = await ensureIsolation(repo, "retry-path-unavailable");
 
-			expect(isoResolve).toHaveBeenCalledWith(null);
-			expect(isoStart.mock.calls.map(call => call[0])).toEqual([
-				natives.IsoBackendKind.Btrfs,
-				natives.IsoBackendKind.Rcopy,
-			]);
-			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
-			expect(handle.fellBack).toBe(true);
-			expect(handle.fallbackReason).toBe(unavailable.message);
+				expect(isoResolve).toHaveBeenCalledWith(null);
+				expect(isoStart.mock.calls.map(call => call[0])).toEqual([
+					natives.IsoBackendKind.Btrfs,
+					natives.IsoBackendKind.Rcopy,
+				]);
+				expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+				expect(handle.fellBack).toBe(true);
+				expect(handle.fallbackReason).toBe(unavailable.message);
+				await cleanupIsolation(handle, { kind: "explicit" });
+			} finally {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			}
 		});
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {

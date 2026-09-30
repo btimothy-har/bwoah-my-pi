@@ -22,6 +22,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { AsyncJobManager } from "../async/job-manager";
 import type { AgentSession } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -336,8 +337,16 @@ export class AgentLifecycleManager {
 	 *
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
+	 * A ref that is mid-release cannot be revived at all.
 	 */
 	async ensureLive(id: string): Promise<AgentSession> {
+		const releasing = this.#releases.get(id);
+		const current = this.#registry.get(id);
+		if (releasing && (!current || releasing.ref === current)) {
+			throw new Error(
+				`Agent "${id}" is releasing and cannot be revived. Its transcript remains readable at history://${id}.`,
+			);
+		}
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -424,6 +433,9 @@ export class AgentLifecycleManager {
 		}
 	}
 
+	/** In-flight exact-ref releases, so revival and repeated release coalesce. */
+	readonly #releases = new Map<string, { ref: AgentRef; promise: Promise<boolean>; tombstone?: boolean }>();
+
 	/**
 	 * Dispose if live and drop timers. When `expected` is given, only a ref
 	 * matching it is released; a stale release can never take down a newer
@@ -436,8 +448,11 @@ export class AgentLifecycleManager {
 	 * `if (!registry.get(id))` guard rather than re-adopting the surviving
 	 * on-disk transcript as a fresh `parked` row. Mirrors
 	 * `finalizeSubagentLifecycle`'s genuine-kill path.
+	 *
+	 * Repeated releases of the same exact ref coalesce onto the in-flight
+	 * promise; a replacement ref releases independently.
 	 */
-	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
@@ -445,13 +460,44 @@ export class AgentLifecycleManager {
 		const adoptedMatches =
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
+		if (!ref) return Promise.resolve(false);
+		const inflight = this.#releases.get(id);
+		if (inflight && inflight.ref === ref) {
+			// A kill coalesced onto an in-flight ordinary release already ends
+			// with the session disposed; persist the tombstone sidecar anyway so
+			// a restart cannot re-adopt the transcript as a parked agent.
+			if (options?.tombstone && !inflight.tombstone) {
+				return inflight.promise.then(async result => {
+					if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile).catch(() => {});
+					return result;
+				});
+			}
+			return inflight.promise;
+		}
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
-		if (!ref) return false;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
 		}
+		const promise = this.#release(id, ref, onRelease, options);
+		this.#releases.set(id, { ref, promise, tombstone: options?.tombstone });
+		// Drop the entry once settled. `.then(forget, forget)` — not `.finally` —
+		// so a rejected release (tombstone persistence failure) is not reported
+		// as an unhandled rejection on a discarded derived promise; the caller
+		// still receives the original rejection through `promise`.
+		const forget = (): void => {
+			if (this.#releases.get(id)?.ref === ref) this.#releases.delete(id);
+		};
+		void promise.then(forget, forget);
+		return promise;
+	}
 
+	async #release(
+		id: string,
+		ref: AgentRef,
+		onRelease: (() => Promise<void>) | undefined,
+		options: { tombstone?: boolean } | undefined,
+	): Promise<boolean> {
 		const park = this.#parks.get(id);
 		if (park && park.ref === ref) {
 			// Prefer cancel when the session is still live so release owns dispose.
@@ -489,6 +535,16 @@ export class AgentLifecycleManager {
 					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
 				}
 			}
+			// Settle the agent's owned async jobs before the release callback
+			// touches its isolation workspace: their writers must be gone before
+			// the final snapshot. The foreground deadline only stops waiting —
+			// the completion promise keeps owning the actual settlement.
+			const jobManager = AsyncJobManager.instance();
+			if (jobManager) {
+				const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now() + AGENT_RELEASE_GRACE_MS);
+				if (!reap.settled) await reap.completion;
+			}
+
 			try {
 				await onRelease?.();
 			} catch (error) {
@@ -519,6 +575,27 @@ export class AgentLifecycleManager {
 					}
 					logger.warn("Agent cleanup exceeded its deadline", {
 						id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}),
+		);
+		// Releases already in flight when dispose started (e.g. an explicit kill
+		// racing shutdown) must settle too: join them under the same deadline.
+		const inflight = [...new Set(this.#releases.values())];
+		await Promise.all(
+			inflight.map(async entry => {
+				try {
+					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => entry.promise);
+				} catch (error) {
+					if (Date.now() >= deadlineAt) {
+						trackLateCleanup(
+							entry.promise.then(() => {}),
+							{ id: entry.ref.id, resource: "releasing-agent" },
+						);
+					}
+					logger.warn("Agent cleanup exceeded its deadline", {
+						id: entry.ref.id,
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}
