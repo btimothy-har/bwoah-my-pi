@@ -9,9 +9,14 @@
  *   - **Task-isolation dirs** (`task/worktree.ts`): a wrapper dir with a
  *     compact `m` subdir mounted/cloned by `natives.isoStart`. Legacy `merged`
  *     subdirs are still recognized. `ensureIsolation` writes an ownership
- *     marker naming the live omp process; a
- *     sandbox whose owner is still running is reported `live` and never
- *     removed without `--all`, so `clear` reclaims only crashed leftovers.
+ *     marker plus a cleanup record (`.omp-isolation-cleanup.json`) naming the
+ *     live omp process and what may reclaim the sandbox; a sandbox whose
+ *     owner is still running is reported `live` and never removed without
+ *     `--all`, so `clear` reclaims only crashed leftovers.
+ *   - **Trash container** (`.trash/`, `task/isolation-cleanup.ts`): already
+ *     release-authorized wrappers awaiting deletion; `list`/`clear` enumerate
+ *     its children as individual entries and never treat the container itself
+ *     as a stray. The `.isolation-gc.lock` metadata-lock file is skipped.
  *
  * Legacy entries from before the encoding change keep working because git still
  * tracks them by branch name. This command exists to GC them on demand.
@@ -29,7 +34,12 @@ import {
 	readIsolationCleanup,
 	readRetainedMountBackend,
 } from "../task/isolation-ownership";
-import { hasManagedDependents, ISOLATION_TRASH_DIR, removeAuthorizedWrapper } from "../task/isolation-cleanup";
+import {
+	compareDependentsFirst,
+	hasManagedDependents,
+	ISOLATION_TRASH_DIR,
+	removeAuthorizedWrapper,
+} from "../task/isolation-cleanup";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
@@ -215,11 +225,11 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 		return { removed: 0, failed: 0 };
 	}
 
+	// Dependents before sources: shared with the automatic collector's
+	// ordering, and a removed dependent unpins its source for this same pass.
+	const ordered = [...targets].sort((a, b) => compareDependentsFirst(a.path, b.path));
 	const results: { path: string; ok: boolean; error?: string }[] = [];
 	const parentsToPrune = new Set<string>();
-	// Dependents before sources: a trash child sorts deeper than its original
-	// slot, and a removed dependent unpins its source for this same pass.
-	const ordered = [...targets].sort((a, b) => b.path.split(path.sep).length - a.path.split(path.sep).length);
 	for (const target of ordered) {
 		try {
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {

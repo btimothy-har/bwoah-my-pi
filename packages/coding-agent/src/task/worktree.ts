@@ -20,6 +20,7 @@ import {
 	discardIncompleteWrapper,
 	managedSourceWrapper,
 	markIsolationDetached,
+	registerIsolationGeneration,
 	removeAuthorizedWrapper,
 	verifyIsolationRecoveryArtifacts,
 	withIsolationMetadataLock,
@@ -616,7 +617,19 @@ export async function ensureIsolation(
 			backend: candidate,
 			sourceBaseDir,
 		});
-		if (stale) await removeAuthorizedWrapper(root, baseDir);
+		if (stale) {
+			await removeAuthorizedWrapper(root, baseDir);
+			// The removal deleted the wrapper including its markers: the new
+			// generation's record + owner MUST be on disk before isoStart, or a
+			// concurrent `omp worktree clear` sees a live clone with no
+			// verifiable owner.
+			await registerIsolationGeneration(root, baseDir, {
+				id,
+				generation,
+				backend: candidate,
+				sourceBaseDir,
+			});
+		}
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy

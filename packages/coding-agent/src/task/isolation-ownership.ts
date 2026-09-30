@@ -6,6 +6,7 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils";
@@ -260,6 +261,12 @@ export type IsolationCleanupAuthorization =
 	| { kind: "discard" }
 	| { kind: "explicit" };
 
+/**
+ * Generations are UUIDv4 or short test labels; the strict charset keeps the
+ * value path-safe wherever it is interpolated into filesystem names. `..` is
+ * excluded by the charset (no repeated-dot runs) and the length caps abuse.
+ */
+const ISOLATION_GENERATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 type IsolationCleanupState = "active" | "finalizing" | "ready" | "retained" | "deleting" | "trash";
 
 const ISOLATION_CLEANUP_STATES: readonly IsolationCleanupState[] = [
@@ -304,7 +311,9 @@ function parseIsolationCleanupRecord(decoded: unknown): IsolationCleanupRecord |
 	if (typeof decoded !== "object" || decoded === null) return undefined;
 	const record = decoded as Record<string, unknown>;
 	if (record.version !== 1) return undefined;
-	if (typeof record.generation !== "string" || record.generation.length === 0) return undefined;
+	// Path-safe format: the generation is interpolated into trash rename
+	// targets, so separators and traversal segments must never reach disk.
+	if (typeof record.generation !== "string" || !ISOLATION_GENERATION_PATTERN.test(record.generation)) return undefined;
 	if (typeof record.backend !== "number" || !ISO_BACKEND_KIND_VALUES.has(record.backend)) return undefined;
 	if (typeof record.detached !== "boolean") return undefined;
 	if (record.disposition !== "preserve" && record.disposition !== "discard") return undefined;
@@ -375,6 +384,11 @@ export async function writeIsolationCleanup(baseDir: string, record: IsolationCl
 		throw new Error(`refusing to publish malformed isolation cleanup record for ${record?.generation ?? "?"}`);
 	}
 	const staged = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	await Bun.write(staged, JSON.stringify(record));
-	await replaceFileAtomically(staged, target);
+	try {
+		await Bun.write(staged, JSON.stringify(record));
+		await replaceFileAtomically(staged, target);
+	} catch (error) {
+		await fs.rm(staged, { force: true }).catch(() => undefined);
+		throw error;
+	}
 }

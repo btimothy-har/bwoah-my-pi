@@ -223,10 +223,11 @@ export interface IsolatedRunOptions {
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
 	/**
-	 * Record the published patch evidence with the artifact lease, so consumer
-	 * cleanup can never delete the clone's recovery checkpoint.
+	 * Record files the artifact lease must keep across consumer cleanup: real
+	 * published evidence (with digests) and, on retention transfer, the
+	 * transcript/summary (paths only — the lease never hashes these).
 	 */
-	preserveRecoveryFiles?: (artifacts: readonly IsolationRecoveryArtifact[]) => void;
+	preserveRecoveryFiles?: (artifacts: readonly { path: string }[]) => void;
 	/** Release the artifact lease's isolation hold after reclamation or retention handoff. */
 	releaseArtifactHold?: () => Promise<void>;
 }
@@ -281,8 +282,13 @@ async function publishNestedPatches(
 				.catch(() => undefined);
 			if (existing !== nestedPatch.patch) {
 				const staged = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
-				await Bun.write(staged, nestedPatch.patch);
-				await replaceFileAtomically(staged, destination);
+				try {
+					await Bun.write(staged, nestedPatch.patch);
+					await replaceFileAtomically(staged, destination);
+				} catch (error) {
+					await fs.rm(staged, { force: true }).catch(() => undefined);
+					throw error;
+				}
 			}
 			artifacts.push({ path: destination, sha256: digestArtifact(nestedPatch.patch) });
 		}
@@ -321,8 +327,13 @@ async function writeIsolationPatch(
 		.catch(() => undefined);
 	if (existingRoot !== delta.rootPatch) {
 		const staged = `${patchPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-		await Bun.write(staged, delta.rootPatch);
-		await replaceFileAtomically(staged, patchPath);
+		try {
+			await Bun.write(staged, delta.rootPatch);
+			await replaceFileAtomically(staged, patchPath);
+		} catch (error) {
+			await fs.rm(staged, { force: true }).catch(() => undefined);
+			throw error;
+		}
 	}
 	const { nestedPatchPaths, artifacts } = await publishNestedPatches(artifactsDir, agentId, delta.nestedPatches);
 
@@ -338,19 +349,19 @@ async function writeIsolationPatch(
 }
 
 /**
- * Move a retained isolation workspace out of its deterministic
- * (`repoRoot` + agent id) slot into a globally unique sibling, so a later
- * isolated run with the same id cannot wipe it: `ensureIsolation`
- * unconditionally removes the deterministic base dir before writing its
- * owner marker. The owner marker, `m` mount, and backend sidecar move along,
- * so `omp worktree clear` still classifies and reclaims the workspace with
- * native teardown. Backends needing it (mounts, Btrfs subvolumes) record the
- * sidecar BEFORE the move so it travels atomically — a crash between rename
- * and a later write would leave a mounted workspace with a dead owner and
- * no metadata, and cleanup would traverse the live mount.
+ * Retain a failed-capture workspace as recovery. Conditional placement:
+ * mount/path-indexed backends and sources with surviving dependents retain
+ * IN PLACE (moving them invalidates backend paths or breaks a dependent's
+ * object borrows); a quiescent detached copy backend moves to a globally
+ * unique `.retained-*` sibling so a later `ensureIsolation` for the same id
+ * — which now refuses occupied slots via `claimSlotForNewGeneration` — still
+ * finds a free deterministic slot. The record travels with the workspace and
+ * is marked `retained`, which automatic GC never reclaims; the backend
+ * sidecar (written before any move) lets `omp worktree clear` route mounts
+ * through native teardown.
  */
 export interface RetainedWorkspace {
-	/** Workspace path to report (unique sibling on success, original dir when the move fails). */
+	/** Workspace path to report (original dir on in-place retention or move failure; unique sibling on success). */
 	dir: string;
 	/**
 	 * False when cleanup metadata is missing that `clear` would need: the
@@ -459,8 +470,9 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * Kept-alive runs retain the isolation handle through idle/parked lifecycle
  * transitions, then capture final changes and clean up on release. One-shot
  * and failed startup paths clean up in `finally`. If captured changes cannot
- * be written to disk, the workspace is retained under a unique `.retained-*`
- * sibling and its path is named in the resulting error.
+ * be written to disk, the workspace is retained as recovery — in place for
+ * mounts/pinned sources, otherwise a unique `.retained-*` sibling — and its
+ * path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	const taskBaseline = structuredClone(opts.context.baseline);
@@ -602,10 +614,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		// requested by the lifecycle before this point is completed below.
 		initialExecutionDone = true;
 		// A successful result cannot be captured while deferred owner jobs or
-		// shutdown hooks may still write the worktree. Failed runs skip capture,
-		// so their cleanup remains asynchronous.
+		// shutdown hooks may still write the worktree. A failed settlement
+		// retains the workspace but must NOT downgrade the run's result — the
+		// agent's output and captured patch stay intact (non-reclaimable).
 		if (deferredCleanup && result.exitCode === 0) {
-			await deferredCleanup;
+			try {
+				await deferredCleanup;
+			} catch (error) {
+				retainWorkspace = true;
+				logger.warn("deferred isolation cleanup failed; workspace preserved", {
+					agentId: opts.agentId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
 		if (opts.discard) return rememberAgentArtifacts(result);
 		const baseline = taskBaseline as WorktreeBaseline;
@@ -710,6 +731,10 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		if (result.exitCode === 0) {
 			try {
 				const patchResult = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				// Evidence for oneShotSequence's snapshot authorization: a
+				// successful one-shot run must never fall back to `explicit`
+				// (evidence-free).
+				lastPublished = patchResult;
 				return rememberAgentArtifacts({ ...result, ...patchResultFields(patchResult) });
 			} catch (patchErr) {
 				retainWorkspace = true;
@@ -729,10 +754,24 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
+		/** Preserve the recovery story, then release the hold exactly once. */
+		const transferHoldToRecovery = async (): Promise<void> => {
+			opts.preserveRecoveryFiles?.(
+				[`${opts.agentId}.jsonl`, `${opts.agentId}.md`].map(file => ({
+					path: path.join(opts.artifactsDir, file),
+				})),
+			);
+			await opts.releaseArtifactHold?.();
+		};
 		// Setup never completed: no clone exists, so the artifact hold transfers
 		// back to the consumer immediately.
 		if (!handle) await opts.releaseArtifactHold?.();
 		const adopted = opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId);
+		if (handle && retainWorkspace && !(adopted && !releaseRequested)) {
+			// Retention keeps the workspace as recovery; the consumer's cleanup
+			// must keep the transcript/summary and any published patches.
+			await transferHoldToRecovery();
+		}
 		if (handle && !retainWorkspace && !reclaimPromise && !(adopted && !releaseRequested)) {
 			const runSequence = async (): Promise<void> => {
 				if (deferredCleanup) {
@@ -746,6 +785,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 							agentId: opts.agentId,
 							error: error instanceof Error ? error.message : String(error),
 						});
+						await transferHoldToRecovery();
 						await releaseBase();
 						return;
 					}

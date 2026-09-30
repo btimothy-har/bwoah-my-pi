@@ -434,7 +434,7 @@ export class AgentLifecycleManager {
 	}
 
 	/** In-flight exact-ref releases, so revival and repeated release coalesce. */
-	readonly #releases = new Map<string, { ref: AgentRef; promise: Promise<boolean> }>();
+	readonly #releases = new Map<string, { ref: AgentRef; promise: Promise<boolean>; tombstone?: boolean }>();
 
 	/**
 	 * Dispose if live and drop timers. When `expected` is given, only a ref
@@ -462,14 +462,25 @@ export class AgentLifecycleManager {
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
 		if (!ref) return Promise.resolve(false);
 		const inflight = this.#releases.get(id);
-		if (inflight && inflight.ref === ref) return inflight.promise;
+		if (inflight && inflight.ref === ref) {
+			// A kill coalesced onto an in-flight ordinary release already ends
+			// with the session disposed; persist the tombstone sidecar anyway so
+			// a restart cannot re-adopt the transcript as a parked agent.
+			if (options?.tombstone && !inflight.tombstone) {
+				return inflight.promise.then(async result => {
+					if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile).catch(() => {});
+					return result;
+				});
+			}
+			return inflight.promise;
+		}
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
 		}
 		const promise = this.#release(id, ref, onRelease, options);
-		this.#releases.set(id, { ref, promise });
+		this.#releases.set(id, { ref, promise, tombstone: options?.tombstone });
 		// Drop the entry once settled. `.then(forget, forget)` — not `.finally` —
 		// so a rejected release (tombstone persistence failure) is not reported
 		// as an unhandled rejection on a discarded derived promise; the caller

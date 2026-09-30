@@ -17,9 +17,10 @@
  * - A dependent workspace (nested clone borrowing its source's object
  *   database) pins its source: sources are reclaimed only after every
  *   dependent is actually removed.
- * - Copy backends (APFS/reflink/block-clone/rcopy) are renamed into
- *   `<root>/.trash/` before deletion; mount/path-indexed backends (overlayfs,
- *   projfs, ZFS, Btrfs) are torn down at their original path and never moved.
+ * - Detached copy backends (APFS/reflink/block-clone/rcopy) are renamed into
+ *   `<root>/.trash/` before deletion; a not-yet-detached copy backend and
+ *   mount/path-indexed backends (overlayfs, projfs, ZFS, Btrfs) are torn down
+ *   at their original path and never moved.
  */
 
 import type { Stats } from "node:fs";
@@ -30,6 +31,7 @@ import { isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	currentIsolationClaim,
 	isIsolationOwnerLive,
+	ISOLATION_CLEANUP_FILE,
 	ISOLATION_OWNER_FILE,
 	ISOLATION_SEGMENT_PATTERN,
 	RETAINED_BACKEND_FILE,
@@ -39,8 +41,11 @@ import {
 	writeIsolationOwner,
 	type IsolationCleanupRecord,
 } from "./isolation-ownership";
-
-/** Directories inside an isolation wrapper holding the merged working view. */
+/**
+ * Directories inside an isolation wrapper holding the merged working view.
+ * `m` is the canonical name built by worktree.ts's TASK_ISOLATION_MOUNT_DIR;
+ * `merged` is the legacy layout still recognized by manual `worktree clear`.
+ */
 export const ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
 /** Reserved relocation target; entries here are already release-authorized. */
@@ -110,7 +115,7 @@ export async function collectIsolationCleanup(
 	if (!resolvedRoot) return { removed: 0, kept: 0, failed: 0 };
 	const deadlineAt = options.deadlineAt ?? Number.POSITIVE_INFINITY;
 	const observations = await observeWrappers(resolvedRoot);
-	const verdicts = await evaluateEntries(observations, options);
+	const verdicts = await evaluateEntries(resolvedRoot, observations, options);
 
 	// Child-before-source by fixed point: dependency direction is unknown for
 	// same-depth wrappers (a nested clone and its source are both direct root
@@ -118,52 +123,77 @@ export async function collectIsolationCleanup(
 	// its dependent is removed in that round.
 	const removalOrder = orderEntries(resolvedRoot, observations);
 	const pending = new Set(removalOrder.map(entry => entry.dir));
-	const kept = new Set(pending);
 	const removedDirs = new Set<string>();
 	let removed = 0;
 	let failed = 0;
 	let progress = true;
-	while (progress && Date.now() < deadlineAt) {
-		progress = false;
-		for (const entry of removalOrder) {
-			if (Date.now() >= deadlineAt) break;
-			if (!pending.has(entry.dir)) continue;
-			const verdict = verdicts.get(entry.dir);
-			if (!verdict?.eligible) continue;
-			if (await isPinnedByDependent(resolvedRoot, entry, observations, removedDirs)) {
-				logger.debug("isolation cleanup skipping pinned source", {
-					dir: entry.dir,
-					generation: entry.record?.generation,
-				});
-				continue;
-			}
-			pending.delete(entry.dir);
-			try {
-				const outcome = await reclaimEntry(resolvedRoot, entry);
-				if (outcome === "removed") {
-					kept.delete(entry.dir);
-					removedDirs.add(entry.dir);
-					removed += 1;
-					progress = true;
+	const deadline = Promise.withResolvers<void>();
+	// setTimeout coerces non-finite delays to 1ms — arm only a real budget.
+	const deadlineTimer = Number.isFinite(deadlineAt)
+		? setTimeout(() => deadline.resolve(), Math.max(0, deadlineAt - Date.now()))
+		: undefined;
+	deadlineTimer?.unref?.();
+	try {
+		while (progress && Date.now() < deadlineAt) {
+			progress = false;
+			for (const entry of removalOrder) {
+				if (Date.now() >= deadlineAt) break;
+				if (!pending.has(entry.dir)) continue;
+				const verdict = verdicts.get(entry.dir);
+				if (!verdict?.eligible) continue;
+				if (await isPinnedByDependent(resolvedRoot, entry, observations, removedDirs)) {
+					logger.debug("isolation cleanup skipping pinned source", {
+						dir: entry.dir,
+						generation: entry.record?.generation,
+					});
+					continue;
 				}
-			} catch (error) {
-				failed += 1;
-				logger.warn("isolation cleanup entry failed", {
-					dir: entry.dir,
-					generation: entry.record?.generation,
-					error: error instanceof Error ? error.message : String(error),
-				});
+				pending.delete(entry.dir);
+				try {
+					// The deadline bounds waiting on in-flight teardown, never the
+					// teardown itself: on expiry the actual completion is registered
+					// with trackLateCleanup and the entry counts as kept.
+					const outcome = await Promise.race([
+						reclaimEntry(resolvedRoot, entry),
+						deadline.promise.then((): "removed" | "kept" => "kept"),
+					]);
+					if (outcome === "removed") {
+						removedDirs.add(entry.dir);
+						removed += 1;
+						progress = true;
+					}
+				} catch (error) {
+					failed += 1;
+					logger.warn("isolation cleanup entry failed", {
+						dir: entry.dir,
+						generation: entry.record?.generation,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 		}
+	} finally {
+		clearTimeout(deadlineTimer);
 	}
+	// Kept = never attempted + attempted-but-not-removed + skipped by verdict.
+	for (const entry of removalOrder) {
+		if (verdicts.get(entry.dir)?.eligible && !pending.has(entry.dir) && !removedDirs.has(entry.dir)) {
+			logger.debug("isolation cleanup kept entry", {
+				dir: entry.dir,
+				generation: entry.record?.generation,
+				reason: verdicts.get(entry.dir)?.reason,
+			});
+		}
+	}
+	const kept = observations.length - removed - failed;
 	logger.debug("isolation cleanup pass complete", {
 		root: resolvedRoot,
 		removed,
-		kept: kept.size,
+		kept,
 		failed,
 		owner: options.owner,
 	});
-	return { removed, kept: kept.size, failed };
+	return { removed, kept, failed };
 }
 
 /** Canonicalize and validate the configured worktree root; `undefined` when absent. */
@@ -232,30 +262,35 @@ async function observeWrapper(dir: string): Promise<WrapperObservation> {
  * same pass unpins its source).
  */
 async function evaluateEntries(
+	root: string,
 	observations: WrapperObservation[],
 	options: IsolationCleanupOptions,
 ): Promise<Map<string, EntryVerdict>> {
 	const verdicts = new Map<string, EntryVerdict>();
 	for (const observation of observations) {
-		verdicts.set(observation.dir, await evaluateEntry(observation, options));
+		verdicts.set(observation.dir, await evaluateEntry(root, observation, options));
 	}
 	return verdicts;
 }
 
-async function evaluateEntry(observation: WrapperObservation, options: IsolationCleanupOptions): Promise<EntryVerdict> {
+async function evaluateEntry(
+	root: string,
+	observation: WrapperObservation,
+	options: IsolationCleanupOptions,
+): Promise<EntryVerdict> {
 	const { record } = observation;
 	if (!record) return { eligible: false, reason: "no valid cleanup record" };
 
-	// A live collector claim blocks re-entry, including from this same process.
+	// A live collector claim blocks re-entry, including from this same process;
+	// resuming a dead claim re-validates the generation in claimForTeardown.
 	if (record.claim && (await isIsolationOwnerLive(record.claim))) {
 		return { eligible: false, reason: `live collector claim pid ${record.claim.pid}` };
 	}
-	// A dead claim must still be the same generation before resuming teardown.
 
 	const owner = await readIsolationOwner(observation.dir).catch(() => undefined);
 	const ownerProvenDead = owner !== undefined && !(await isIsolationOwnerLive(owner));
 	const ownerAbsent = owner === undefined;
-	if (!ownerProvenDead && !(ownerAbsent && observation.dir.includes(ISOLATION_TRASH_DIR))) {
+	if (!ownerProvenDead && !(ownerAbsent && inTrash(root, observation.dir))) {
 		return { eligible: false, reason: "original owner live or unverifiable" };
 	}
 	if (options.owner === "released-current") {
@@ -277,7 +312,7 @@ async function evaluateEntry(observation: WrapperObservation, options: Isolation
 	const authorization = record.authorization;
 	if (!authorization) return { eligible: false, reason: "no cleanup authorization" };
 	if (authorization.kind === "snapshot") {
-		const evidenceOk = await verifyRecoveryArtifacts(authorization.artifacts);
+		const evidenceOk = await verifyIsolationRecoveryArtifacts(authorization.artifacts);
 		if (!evidenceOk) return { eligible: false, reason: "patch evidence missing or altered" };
 	}
 
@@ -285,24 +320,19 @@ async function evaluateEntry(observation: WrapperObservation, options: Isolation
 }
 
 /** Verify every recorded artifact exists at its recorded path with matching bytes. */
-async function verifyRecoveryArtifacts(artifacts: readonly { path: string; sha256: string }[]): Promise<boolean> {
+export async function verifyIsolationRecoveryArtifacts(
+	artifacts: readonly { path: string; sha256: string }[],
+): Promise<boolean> {
 	if (artifacts.length === 0) return false;
 	for (const artifact of artifacts) {
 		const stat = await fs.lstat(artifact.path).catch(() => undefined);
 		if (!stat?.isFile()) return false;
 		const digest = new Bun.CryptoHasher("sha256");
 		const stream = Bun.file(artifact.path).stream();
-		for await (const chunk of stream) digest.update(chunk as Buffer);
+		for await (const chunk of stream) digest.update(chunk);
 		if (digest.digest("hex") !== artifact.sha256) return false;
 	}
 	return true;
-}
-
-/** Public verification seam for {@link cleanupIsolation}: evidence must match before `ready`. */
-export function verifyIsolationRecoveryArtifacts(
-	artifacts: readonly { path: string; sha256: string }[],
-): Promise<boolean> {
-	return verifyRecoveryArtifacts(artifacts);
 }
 
 /**
@@ -353,11 +383,17 @@ async function pathsEqual(a: string, b: string): Promise<boolean> {
 	return realA === realB;
 }
 
-/** Deepest wrappers first, so dependents are decided before their sources. */
+/**
+ * Deepest-first ordering for teardown: dependents are decided before their
+ * sources. Shared with `worktree clear`'s target ordering so manual and
+ * automatic collection never disagree.
+ */
+export function compareDependentsFirst(a: string, b: string): number {
+	return b.split(path.sep).length - a.split(path.sep).length;
+}
+
 function orderEntries(root: string, observations: WrapperObservation[]): WrapperObservation[] {
-	const depth = (observation: WrapperObservation): number =>
-		path.relative(root, observation.dir).split(path.sep).length;
-	return [...observations].sort((a, b) => depth(b) - depth(a));
+	return [...observations].sort((a, b) => compareDependentsFirst(a.dir, b.dir));
 }
 
 /**
@@ -426,8 +462,8 @@ async function claimForTeardown(
 	dir: string,
 	generation: string,
 ): Promise<IsolationCleanupRecord | undefined> {
-	return withFileLock(
-		path.join(root, ISOLATION_GC_LOCK_STEM),
+	return withIsolationMetadataLock(
+		root,
 		async () => {
 			const current = await readIsolationCleanup(dir).catch(() => undefined);
 			if (!current || current.generation !== generation) return undefined;
@@ -526,7 +562,7 @@ async function findMergedDir(dir: string): Promise<string | undefined> {
 
 /** Remove everything under the wrapper except the control metadata files. */
 async function removeWrapperPreservingMarkers(dir: string): Promise<void> {
-	const markers = [ISOLATION_OWNER_FILE, RETAINED_BACKEND_FILE, ".omp-isolation-cleanup.json"];
+	const markers = [ISOLATION_OWNER_FILE, RETAINED_BACKEND_FILE, ISOLATION_CLEANUP_FILE];
 	for (const entry of await fs.readdir(dir)) {
 		if (markers.includes(entry)) continue;
 		await fs.rm(path.join(dir, entry), { recursive: true, force: true });
@@ -563,9 +599,13 @@ function isLockContention(error: unknown): boolean {
 	return error instanceof Error && error.message.includes("Failed to acquire lock");
 }
 
-/** Metadata lock over the worktree root; callers use the default bounded wait. */
-export function withIsolationMetadataLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
-	return withFileLock(path.join(root, ISOLATION_GC_LOCK_STEM), fn);
+/** Metadata lock over the worktree root; `options` forwards to the file lock (e.g. `{ retries: 1 }` for background skips). */
+export function withIsolationMetadataLock<T>(
+	root: string,
+	fn: () => Promise<T>,
+	options?: { retries?: number },
+): Promise<T> {
+	return withFileLock(path.join(root, ISOLATION_GC_LOCK_STEM), fn, options);
 }
 
 /** The managed isolation wrapper containing `dir`, when `dir` lives inside one. */
@@ -612,16 +652,19 @@ export async function claimSlotForNewGeneration(
 			);
 		}
 		// Record-less legacy shell: marker-only pending wrappers and empty slots
-		// hold no agent work; a payload-bearing legacy clone is never auto-wiped.
-		if (await hasIsolationPayload(baseDir)) {
+		// hold no agent work; a payload-bearing legacy clone is never auto-wiped
+		// by the GC, but a re-spawn of its task id may reclaim it explicitly —
+		// persist the authorization so removeAuthorizedWrapper can act on it.
+		if ((await findMergedDir(baseDir)) !== undefined) {
 			const owner = await readIsolationOwner(baseDir).catch(() => undefined);
 			if (owner && (await isIsolationOwnerLive(owner))) {
 				throw new Error(
 					`isolation slot ${baseDir} is occupied by a live legacy sandbox owned by pid ${owner.pid}` +
-						`; inspect it with \`omp worktree list\` and clear it before respawning this task id`,
+						`; the owning process must stop it first (or use \`omp worktree clear --all\`)` +
+						` before respawning this task id`,
 				);
 			}
-			return {
+			const stale: IsolationCleanupRecord = {
 				version: 1,
 				generation: "legacy",
 				backend: params.backend,
@@ -630,18 +673,44 @@ export async function claimSlotForNewGeneration(
 				state: "ready",
 				authorization: { kind: "explicit" },
 			};
+			await writeIsolationCleanup(baseDir, stale);
+			return stale;
 		}
-		await writeIsolationCleanup(baseDir, {
-			version: 1,
-			generation: params.generation,
-			backend: params.backend,
-			detached: false,
-			disposition: "preserve",
-			...(params.sourceBaseDir ? { sourceBaseDir: params.sourceBaseDir } : {}),
-			state: "active",
-		});
-		await writeIsolationOwner(baseDir, params.id);
+		await registerIsolationGenerationUnlocked(baseDir, params);
 		return undefined;
+	});
+}
+
+/** The two registration writes, caller holds the root metadata lock. */
+async function registerIsolationGenerationUnlocked(baseDir: string, params: SlotParams): Promise<void> {
+	await writeIsolationCleanup(baseDir, {
+		version: 1,
+		generation: params.generation,
+		backend: params.backend,
+		detached: false,
+		disposition: "preserve",
+		...(params.sourceBaseDir ? { sourceBaseDir: params.sourceBaseDir } : {}),
+		state: "active",
+	});
+	await writeIsolationOwner(baseDir, params.id);
+}
+
+/**
+ * Register a new generation in a slot whose occupant (if any) was already
+ * removed: the cleanup record and owner marker MUST be on disk before
+ * `isoStart` materializes the mount, or a concurrent `omp worktree clear`
+ * sees a live sandbox with no verifiable owner.
+ */
+export async function registerIsolationGeneration(root: string, baseDir: string, params: SlotParams): Promise<void> {
+	await withIsolationMetadataLock(root, async () => {
+		const existing = await readIsolationCleanup(baseDir).catch(() => undefined);
+		if (existing) {
+			throw new Error(
+				`isolation slot ${baseDir} is occupied by ${existing.state} generation ${existing.generation}` +
+					`; inspect it with \`omp worktree list\` and clear it before respawning this task id`,
+			);
+		}
+		await registerIsolationGenerationUnlocked(baseDir, params);
 	});
 }
 
@@ -662,19 +731,12 @@ async function findReclaimableOccupant(
 		// Owner marker missing at the original path is unknown ownership
 		// unless evidence was already verified for this generation.
 		if (existing.authorization.kind === "snapshot") {
-			if (!(await verifyRecoveryArtifacts(existing.authorization.artifacts))) return undefined;
+			if (!(await verifyIsolationRecoveryArtifacts(existing.authorization.artifacts))) return undefined;
 		}
 	}
 	return existing;
 }
 
-async function hasIsolationPayload(baseDir: string): Promise<boolean> {
-	for (const mountDir of ISOLATION_MOUNT_DIRS) {
-		const stat = await fs.lstat(path.join(baseDir, mountDir)).catch(() => undefined);
-		if (stat?.isDirectory() && !stat.isSymbolicLink()) return true;
-	}
-	return false;
-}
 
 /** Flip the record to `detached: true` after `detachGitDir` succeeds. */
 export async function markIsolationDetached(root: string, baseDir: string): Promise<void> {

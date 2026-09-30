@@ -125,6 +125,25 @@ describe("isolation cleanup collector", () => {
 		await expect(Bun.file(path.join(altered, "m", "work.txt")).exists()).resolves.toBe(true);
 	});
 
+	it("reclaims a snapshot-authorized dead clone whose evidence verifies", async () => {
+		// Positive control for the evidence gate: valid digest → removed. A
+		// regression inverting verifyRecoveryArtifacts' acceptance would
+		// otherwise permanently keep every snapshot-authorized clone.
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-artifacts-"));
+		const patchPath = path.join(artifactsDir, "task.patch");
+		await Bun.write(patchPath, "diff --git a/a.txt b/a.txt\n+saved\n");
+		const digest = new Bun.CryptoHasher("sha256").update("diff --git a/a.txt b/a.txt\n+saved\n").digest("hex");
+		const dir = await makeSandbox("taaaa10001", {
+			authorization: { kind: "snapshot", artifacts: [{ path: patchPath, sha256: digest }] },
+		});
+		// makeSandbox stamps the live test process; the sweep needs a dead owner.
+		await Bun.write(path.join(dir, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "aaaa10001" }));
+		const report = await collectIsolationCleanup(base, { owner: "dead" });
+
+		expect(report.removed).toBe(1);
+		await expect(fs.stat(dir)).rejects.toThrow();
+	});
+
 	it("preserves retained workspaces and skips the trash container as a stray", async () => {
 		const retained = await makeSandbox("taaaa00007", { state: "retained" });
 		// A dead owner with an explicit authorization would otherwise be

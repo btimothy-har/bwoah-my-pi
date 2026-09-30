@@ -17,11 +17,21 @@ describe("drainLateCleanups", () => {
 	it("joins cleanups registered while draining", async () => {
 		const first = deferred();
 		trackLateCleanup(first.promise, { resource: "test" });
-		const drained = drainLateCleanups(Date.now() + 1000);
-		// Registered while the drain is waiting on `first`.
+		const drained = drainLateCleanups(Date.now() + 5000);
+		// Registered while the drain is waiting on `first`, and left pending
+		// until after the probe below.
 		const second = deferred();
 		trackLateCleanup(second.promise, { resource: "test-nested" });
 		first.resolve();
+		// (No chain: `second` must stay pending until after the probe below.)
+		// Microtask-drain only: a drain that snapshots the registry once would
+		// have settled at `first`; the re-reading drain must still be waiting
+		// on the pending `second`.
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		let settledEarly = false;
+		drained.then(() => (settledEarly = true));
+		await Promise.resolve();
+		expect(settledEarly).toBe(false);
 		second.resolve();
 		expect(await drained).toBe(true);
 	});
