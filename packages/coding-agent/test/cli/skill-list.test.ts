@@ -51,9 +51,13 @@ describe("runSkillsCommand", () => {
 				skillsSettings: { customDirectories: [path.join(skillsRoot, "first"), path.join(skillsRoot, "second")] },
 			});
 
-			// Home/agent-dir isolation (see the file-level beforeEach) means only the
-			// two fixture skills below are discoverable — pin the whole listing.
-			expect(result.skills.map(skill => skill.name)).toEqual(["calendar", "reviewer"]);
+			// Home/agent-dir isolation (see the file-level beforeEach) means the
+			// custom-directory listing is exactly the two fixture skills. The
+			// fork additionally ships bundled builtin skills (omp-builtin:user);
+			// they are outside this listing contract, so scope the pin.
+			expect(
+				result.skills.filter(skill => skill.source === "custom:user").map(skill => skill.name),
+			).toEqual(["calendar", "reviewer"]);
 			const reviewer = result.skills.find(skill => skill.name === "reviewer");
 			expect(reviewer?.description).toBe("Review code.");
 			expect(reviewer?.filePath).toBe(path.join(skillsRoot, "second", "reviewer", "SKILL.md"));
