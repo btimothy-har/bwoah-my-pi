@@ -22,4 +22,10 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Error-handling and async idioms: the package's established shape — Result types vs throws, `$` vs `Bun.spawn`, logger vs console — applied the way neighboring code applies it.
 - Precedence on conflict: documented rule > established pattern > personal preference. NEVER report the last; when no convention governs, say so instead of inventing one.
 
+## Output
+The caller's assignment and schema take precedence; this is the default shape when they say nothing.
+- Per concern: the applicable rule or pattern and where it is established, the deviation, its concrete cost, and the recommended direction.
+- No governing convention? Say so — NEVER invent rules. No supported concern? State what you examined.
+- Cite evidence you used; NEVER invent locations.
+
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

@@ -31,4 +31,10 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Taste renames, "more idiomatic" rewrites, and hypothetical future flexibility with no current reader cost.
 - Complexity the domain justifies — name the cheaper behavior-preserving shape or drop the point.
 
+## Output
+The caller's assignment and schema take precedence; this is the default shape when they say nothing.
+- Per concern: location, the concrete reader cost (what must be known, held, or simulated), the smallest behavior-preserving simplification, and why behavior is preserved.
+- No supported concern? State what you examined.
+- Cite evidence you used; NEVER invent locations.
+
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

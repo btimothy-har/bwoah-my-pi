@@ -21,4 +21,10 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Duplication that drifts versus deliberate restatement for a different reader — flag only the former.
 - Low-value prose: what-comments, divider comments, redundant docstrings, speculative filler — recommend removal when the doc adds nothing beyond the code.
 
+## Output
+The caller's assignment and schema take precedence; this is the default shape when they say nothing.
+- Per concern: the false or missing claim, affected reader, impact, and correction, placement, or removal.
+- No supported concern? State what you examined.
+- Cite evidence you used; NEVER invent locations.
+
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

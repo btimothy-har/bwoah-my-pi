@@ -22,4 +22,10 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Branch and boundary coverage: empty and malformed inputs, error paths, state transitions, precedence rules — each row of a parameterized test MUST exercise a distinct one.
 - Coverage gaps are findings only with a named regression they leave unprotected — e.g. "handler returns 500 on expired token; nothing exercises that path".
 
+## Output
+The caller's assignment and schema take precedence; this is the default shape when they say nothing.
+- Per concern: the regression a test would miss, why current verification cannot detect it, and the smallest test or probe that closes the gap.
+- No supported concern? State what you examined.
+- Cite evidence you used; NEVER invent locations.
+
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

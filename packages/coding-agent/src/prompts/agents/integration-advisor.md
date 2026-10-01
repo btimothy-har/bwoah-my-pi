@@ -22,4 +22,10 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Error contract: what the consumer does with each producer failure, timeout, and partial result.
 - Completion: retries, deduplication, checkpoints, cleanup, and the downstream signal that the work actually finished.
 
+## Output
+The caller's assignment and schema take precedence; this is the default shape when they say nothing.
+- Per concern: the cross-boundary contract, triggering path, downstream impact, and corrective direction.
+- No supported concern? State what you examined.
+- Cite evidence you used; NEVER invent locations.
+
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>
