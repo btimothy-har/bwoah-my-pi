@@ -860,8 +860,8 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("gates ambient capabilities while granting the common coding toolset", async () => {
-		const specialist = getBundledAgent("conventions-specialist");
-		if (!specialist) throw new Error("Missing bundled conventions specialist");
+		const specialist = getBundledAgent("conventions-advisor");
+		if (!specialist) throw new Error("Missing bundled conventions advisor");
 		mockDiscovery(specialist);
 		const host = session();
 		Object.assign(host, {

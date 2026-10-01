@@ -28,13 +28,13 @@ describe("bundled agent parsing", () => {
 
 	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
-			["conventions-specialist", Effort.High],
-			["integration-specialist", Effort.High],
-			["testing-specialist", Effort.Medium],
-			["code-clarity-specialist", Effort.High],
-			["docs-specialist", Effort.Medium],
-			["security-specialist", Effort.High],
-			["data-model-specialist", Effort.High],
+			["conventions-advisor", Effort.High],
+			["integration-advisor", Effort.High],
+			["testing-advisor", Effort.Medium],
+			["code-clarity-advisor", Effort.High],
+			["docs-advisor", Effort.Medium],
+			["security-advisor", Effort.High],
+			["data-model-advisor", Effort.High],
 		] as const;
 
 		for (const [name, effort] of lenses) {
@@ -120,7 +120,7 @@ describe("bundled agent parsing", () => {
 				expect(policy.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
 			}
 
-			for (const name of ["conventions-specialist", "devils-advocate"]) {
+			for (const name of ["conventions-advisor", "devils-advocate"]) {
 				const policy = await resolveEffectiveSubagentPolicy({
 					session,
 					invocationKind: "task",

@@ -223,8 +223,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
-		const specialist = getBundledAgent("conventions-specialist");
-		if (!specialist) throw new Error("Missing bundled conventions specialist");
+		const specialist = getBundledAgent("conventions-advisor");
+		if (!specialist) throw new Error("Missing bundled conventions advisor");
 		const specialistResult = await runSubprocess({
 			...baseOptions,
 			id: "review-specialist-child",
