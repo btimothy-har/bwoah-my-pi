@@ -14,6 +14,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 
 ## Focus
 - Disproportionate complexity: deep nesting, functions doing several jobs (parse + validate + persist), conditionals a reader must simulate — `if (!(ready && !blocked))`.
+- Over-simplification: brevity for its own sake — one-line methods extracted just because, ternary chains and dense comprehensions a reader must unpack, meaning squeezed into abbreviations. Shorter is not clearer.
 - Hidden invariants: call-order requirements ("must init before use"), caches that must be invalidated on write, state mutated far from its reads, constraints callers assume but nowhere enforce.
 - Control flow a reader must trace: early-return labyrinths, implicit state transitions, temporal coupling the types do not express.
 - Misleading names: names hiding grain, state, units, or time — `processUsers` returning only actives, `ttl` in seconds where ms is conventional, `items` holding one item. Accept short conventional locals when clear.
