@@ -860,9 +860,9 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("gates ambient capabilities while granting the common coding toolset", async () => {
-		const specialist = getBundledAgent("conventions-advisor");
-		if (!specialist) throw new Error("Missing bundled conventions advisor");
-		mockDiscovery(specialist);
+		const advisor = getBundledAgent("conventions-advisor");
+		if (!advisor) throw new Error("Missing bundled conventions advisor");
+		mockDiscovery(advisor);
 		const host = session();
 		Object.assign(host, {
 			mcpManager: {} as NonNullable<ToolSession["mcpManager"]>,
@@ -878,7 +878,7 @@ describe("structured subagent primitive", () => {
 		});
 
 		const settled = await runStructuredSubagent(
-			request({ session: host, agent: specialist.name, retainArtifacts: true }),
+			request({ session: host, agent: advisor.name, retainArtifacts: true }),
 		);
 		expect(options[0]).toMatchObject({
 			restrictToolNames: true,
@@ -887,7 +887,7 @@ describe("structured subagent primitive", () => {
 			preloadedCustomToolPaths: [],
 		});
 		expect(options[0]?.mcpManager).toBeUndefined();
-		// A report-only specialist still receives the shared scratch-clone
+		// A report-only advisor still receives the shared scratch-clone
 		// toolset; its role constraint, not the tool list, keeps it read-only.
 		expect(options[0]?.agent.tools).toEqual([...COMMON_SUBAGENT_TOOL_NAMES]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });

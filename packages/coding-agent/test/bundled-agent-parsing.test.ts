@@ -26,7 +26,7 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
-	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
+	it("parses advisor Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
 			["conventions-advisor", Effort.High],
 			["integration-advisor", Effort.High],
@@ -94,7 +94,7 @@ describe("bundled agent parsing", () => {
 		}
 	});
 
-	it("keeps unpacked workers applying edits and specialists reporting without a default schema", async () => {
+	it("keeps unpacked workers applying edits and advisors reporting without a default schema", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
