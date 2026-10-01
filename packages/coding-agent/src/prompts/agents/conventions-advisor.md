@@ -19,6 +19,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Placement conventions: tests, fixtures, config, generated files, and docs in the locations this repo already uses for their kind.
 - Copied central utilities: local forks of helpers the repo provides — the central version carries hardening a fresh copy loses.
 - Naming and layout: module, export, and file naming consistent with the package around the change.
+- Error-handling and async idioms: the package's established shape — Result types vs throws, `$` vs `Bun.spawn`, logger vs console — applied the way neighboring code applies it.
 - Precedence on conflict: documented rule > established pattern > personal preference. NEVER report the last; when no convention governs, say so instead of inventing one.
 
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

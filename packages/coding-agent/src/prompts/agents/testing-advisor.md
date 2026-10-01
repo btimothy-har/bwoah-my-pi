@@ -15,7 +15,8 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 ## Focus
 - Counterfactual strength: flip a condition or constant in the implementation; if no assertion notices, the test is vacuous.
 - Fixture pre-baking: expected values derived from the implementation's own output, so a wrong implementation still passes.
-- Mock fidelity: mocks returning shapes the real dependency never produces; assertions that echo mock configuration back.
+- Mock fidelity: mocks returning shapes the real dependency never produces; assertions that echo mock configuration back — `toHaveBeenCalled()` without asserting arguments, `not.toThrow()` as the only check.
+- Duplicate coverage: parameterized rows exercising the same branch; a narrow unit test restating what an integration test already proves through mocks.
 - Source-coupled tests: assertions on source text, incidental wording, defaults, or ordering no consumer depends on — they break on refactors and pass while behavior rots.
 - Suite safety: shared state, leaked globals, and order dependence — passes alone, poisons the full run.
 - Branch and boundary coverage: empty and malformed inputs, error paths, state transitions, precedence rules — each row of a parameterized test MUST exercise a distinct one.

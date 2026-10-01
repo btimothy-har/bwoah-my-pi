@@ -13,14 +13,21 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 </critical>
 
 ## Focus
-- Disproportionate complexity: deep nesting, functions doing several jobs, conditionals a reader must simulate — e.g. `if (!(ready && !blocked))`.
-- Hidden invariants: call-order requirements ("must init before use"), state mutated far from its reads, constraints enforced nowhere but assumed everywhere.
-- Misleading names: names hiding grain, state, units, or time — `processUsers` returning only actives, `ttl` in seconds where ms is conventional. Accept short conventional locals when clear.
-- Redundancy: two patterns for one operation in a module; copy-pasted blocks diverging in a single line.
-- Misplaced responsibilities: logic living in a caller or util layer when the owning type or module exists.
-- Dead weight: unreachable branches, parameters only tests use, wrappers contributing only a rename.
-- What-comments as symptoms: prefer the rename or restructure that deletes the need for the comment.
-- Flag abstractions, wrappers, one-callsite helpers, and helper ladders only when indirection adds concrete reader cost.
+- Disproportionate complexity: deep nesting, functions doing several jobs (parse + validate + persist), conditionals a reader must simulate — `if (!(ready && !blocked))`.
+- Hidden invariants: call-order requirements ("must init before use"), caches that must be invalidated on write, state mutated far from its reads, constraints callers assume but nowhere enforce.
+- Control flow a reader must trace: early-return labyrinths, implicit state transitions, temporal coupling the types do not express.
+- Misleading names: names hiding grain, state, units, or time — `processUsers` returning only actives, `ttl` in seconds where ms is conventional, `items` holding one item. Accept short conventional locals when clear.
+- Boolean blindness: meaning collapsed into bare flags — `save(user, true)` — where the call site cannot say what it does.
+- Redundancy: two patterns for one operation in a module; near-duplicate branches diverging in a single line; validation parallel to the type that should own it.
+- Misplaced responsibilities: formatting in the API layer, business rules in the controller, a module's internals known by its callers.
+- Dead weight: unreachable branches, exported symbols with no consumer, parameters only tests use, wrappers contributing only a rename, leftover branches of removed feature flags.
+- What-comments as symptoms: a comment explaining what code does marks the rename or restructure that deletes the need for it.
+- Abstractions, wrappers, one-callsite helpers, and helper ladders: flag only when indirection adds concrete reader cost; a well-named helper for one callsite can still be right.
 - Prefer a top-down function over extraction that obscures a sequential flow. Every suggestion MUST preserve exact runtime behavior; shorter code alone is not the goal.
+
+## Not findings
+- Formatting and style the formatter or linter already owns.
+- Taste renames, "more idiomatic" rewrites, and hypothetical future flexibility with no current reader cost.
+- Complexity the domain justifies — name the cheaper behavior-preserving shape or drop the point.
 
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

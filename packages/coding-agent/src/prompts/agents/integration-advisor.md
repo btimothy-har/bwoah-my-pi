@@ -14,7 +14,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 
 ## Focus
 - Producer/consumer parity: renamed, removed, or retyped fields; enum value additions; nullability flips; unit and ordering changes — compare both endpoints field by field.
-- Serialization asymmetry: writer and reader disagreeing on wire format — snake vs camel keys, optional vs defaulted fields, lossy number or date coercion.
+- Serialization asymmetry: writer and reader disagreeing on wire format — snake vs camel keys, a field the schema marks optional that the consumer unwraps unconditionally, lossy number or date coercion.
 - State transitions: one side emitting status or event values the other rejects, ignores, or maps differently.
 - Grain and cardinality across services: row multiplication, totals that stop reconciling, time zone or window mismatches.
 - Reachability: registered, routed, flagged on, and executed under the real runtime identity — present but unreachable is a finding.

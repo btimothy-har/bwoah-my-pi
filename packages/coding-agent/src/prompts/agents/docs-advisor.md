@@ -15,7 +15,7 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 ## Focus
 - Falsifiable claims checked against the implementation: flags, defaults, limits, error shapes, field names, units, windows, and lifecycle.
 - Examples a reader will copy verbatim: commands, identifiers, and output shapes that no longer run as written.
-- Stale claims after behavior change: renamed options, changed defaults, removed features still documented.
+- Stale claims after behavior change: renamed options, changed defaults, removed features still documented — e.g. a README flag the CLI dropped three releases ago.
 - Missing facts a consumer needs: non-obvious preconditions, side effects, failure behavior, and business rationale.
 - Wrong layer: user workflows buried in code comments; model or column meaning living only in a prose guide; local constraints stated far from the code.
 - Duplication that drifts versus deliberate restatement for a different reader — flag only the former.
