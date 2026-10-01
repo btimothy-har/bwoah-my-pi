@@ -26,15 +26,15 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
-	it("parses advisor Markdown frontmatter without imposing a consultation schema", () => {
+	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
-			["conventions-advisor", Effort.High],
-			["integration-advisor", Effort.High],
-			["testing-advisor", Effort.Medium],
-			["code-clarity-advisor", Effort.High],
-			["docs-advisor", Effort.Medium],
-			["security-advisor", Effort.High],
-			["data-model-advisor", Effort.High],
+			["conventions-specialist", Effort.High],
+			["integration-specialist", Effort.High],
+			["testing-specialist", Effort.Medium],
+			["code-clarity-specialist", Effort.High],
+			["docs-specialist", Effort.Medium],
+			["security-specialist", Effort.High],
+			["data-model-specialist", Effort.High],
 		] as const;
 
 		for (const [name, effort] of lenses) {
@@ -94,7 +94,7 @@ describe("bundled agent parsing", () => {
 		}
 	});
 
-	it("keeps unpacked workers applying edits and advisors reporting without a default schema", async () => {
+	it("keeps unpacked workers applying edits and specialists reporting without a default schema", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-unpack-"));
 		try {
 			await $`git init -q ${repo}`.quiet();
@@ -120,7 +120,7 @@ describe("bundled agent parsing", () => {
 				expect(policy.execution).toEqual({ kind: "clone", disposition: "merge", mergeMode: "patch" });
 			}
 
-			for (const name of ["conventions-advisor", "devils-advocate"]) {
+			for (const name of ["conventions-specialist", "devils-advocate"]) {
 				const policy = await resolveEffectiveSubagentPolicy({
 					session,
 					invocationKind: "task",

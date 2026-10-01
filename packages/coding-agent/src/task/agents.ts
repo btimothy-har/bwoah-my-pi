@@ -8,14 +8,14 @@ import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
-import clarityAdvisorMd from "../prompts/agents/code-clarity-advisor.md" with { type: "text" };
-import conventionsAdvisorMd from "../prompts/agents/conventions-advisor.md" with { type: "text" };
-import dataModelAdvisorMd from "../prompts/agents/data-model-advisor.md" with { type: "text" };
+import claritySpecialistMd from "../prompts/agents/code-clarity-specialist.md" with { type: "text" };
+import conventionsSpecialistMd from "../prompts/agents/conventions-specialist.md" with { type: "text" };
+import dataModelSpecialistMd from "../prompts/agents/data-model-specialist.md" with { type: "text" };
 import devilsAdvocateMd from "../prompts/agents/devils-advocate.md" with { type: "text" };
-import docsAdvisorMd from "../prompts/agents/docs-advisor.md" with { type: "text" };
-import integrationAdvisorMd from "../prompts/agents/integration-advisor.md" with { type: "text" };
-import securityAdvisorMd from "../prompts/agents/security-advisor.md" with { type: "text" };
-import testingAdvisorMd from "../prompts/agents/testing-advisor.md" with { type: "text" };
+import docsSpecialistMd from "../prompts/agents/docs-specialist.md" with { type: "text" };
+import integrationSpecialistMd from "../prompts/agents/integration-specialist.md" with { type: "text" };
+import securitySpecialistMd from "../prompts/agents/security-specialist.md" with { type: "text" };
+import testingSpecialistMd from "../prompts/agents/testing-specialist.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
@@ -85,13 +85,13 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		},
 		template: taskMd,
 	},
-	{ fileName: "conventions-advisor.md", template: conventionsAdvisorMd },
-	{ fileName: "integration-advisor.md", template: integrationAdvisorMd },
-	{ fileName: "testing-advisor.md", template: testingAdvisorMd },
-	{ fileName: "code-clarity-advisor.md", template: clarityAdvisorMd },
-	{ fileName: "docs-advisor.md", template: docsAdvisorMd },
-	{ fileName: "security-advisor.md", template: securityAdvisorMd },
-	{ fileName: "data-model-advisor.md", template: dataModelAdvisorMd },
+	{ fileName: "conventions-specialist.md", template: conventionsSpecialistMd },
+	{ fileName: "integration-specialist.md", template: integrationSpecialistMd },
+	{ fileName: "testing-specialist.md", template: testingSpecialistMd },
+	{ fileName: "code-clarity-specialist.md", template: claritySpecialistMd },
+	{ fileName: "docs-specialist.md", template: docsSpecialistMd },
+	{ fileName: "security-specialist.md", template: securitySpecialistMd },
+	{ fileName: "data-model-specialist.md", template: dataModelSpecialistMd },
 	{ fileName: "devils-advocate.md", template: devilsAdvocateMd },
 ];
 

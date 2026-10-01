@@ -23,13 +23,13 @@ You are the review chair. Reviewers are subagents you dispatch; they report evid
 
 ### 2. Dispatch reviewers
 
-- Required roster: `reviewer`, `conventions-advisor`, `integration-advisor`, `testing-advisor`, `code-clarity-advisor`, `docs-advisor`, `security-advisor`; add `data-model-advisor` for SQL/dbt models, warehouse configuration, or migrations. NEVER use `security-reviewer` or `devils-advocate` for a code review.
+- Required roster: `reviewer`, `conventions-specialist`, `integration-specialist`, `testing-specialist`, `code-clarity-specialist`, `docs-specialist`, `security-specialist`; add `data-model-specialist` for SQL/dbt models, warehouse configuration, or migrations. NEVER use `security-reviewer` or `devils-advocate` for a code review.
 - With `task.batch=true`, dispatch the roster in ONE `tasks[]` call. With `task.batch=false`, dispatch the identical roster as separate flat `task` calls; include the same pinned scope and diff reference in every assignment. NEVER skip a lens because it looks unrelated.
 - The chair MUST capture the complete diff from pinned revisions or the selected working-tree snapshot before dispatch. An inline full diff is usable; previews are NOT. Share full content in batch `context`, or write a uniquely named session-local `local://review-diff-<scope>.md` and include its URI in every task; never overwrite a diff while reviewers may read it. The only direct write during scope preparation is that session-local artifact; NEVER edit repository files.
-- Advisors run in discarded clones with the common coding toolset; they MAY run read-only inspection commands (including `git diff`) inside their clone to verify a suspicion, but the chair's frozen diff is the review input — NEVER let a reviewer scope itself off a moving working tree. Each advisor reviews the WHOLE scope; `reviewer` MAY be split by locality, keeping tests with implementations.
+- Specialists run in discarded clones with the common coding toolset; they MAY run read-only inspection commands (including `git diff`) inside their clone to verify a suspicion, but the chair's frozen diff is the review input — NEVER let a reviewer scope itself off a moving working tree. Each specialist reviews the WHOLE scope; `reviewer` MAY be split by locality, keeping tests with implementations.
 - Give every reviewer complete neutral instructions: exact pinned revisions, assigned paths, full diff or `local://` reference, and context-reading guidance. NEVER use a moving branch name or a bare `git diff`. A `correct` verdict with no findings is normal.
-- Project/user/plugin agents can shadow bundled names. Pass `mutable: false` on EVERY review spawn: even a shadowed definition that permits apply-back is thereby narrowed to a discarded clone, and a review NEVER modifies your checkout. Pass the review `outputSchema` below with `schemaMode: "strict"` on EVERY item or flat call; incompatible output fails rather than masquerading as coverage. The existing `reviewer` has a default schema; the advisors do not.
-- Each advisor assignment requires introduced, exposed, or worsened defects only: cite concrete evidence, impact, and a fix direction. Anchor `file_path`/`line_start`/`line_end` to a changed range of at most 10 lines in the chair's pinned diff.
+- Project/user/plugin agents can shadow bundled names. Pass `mutable: false` on EVERY review spawn: even a shadowed definition that permits apply-back is thereby narrowed to a discarded clone, and a review NEVER modifies your checkout. Pass the review `outputSchema` below with `schemaMode: "strict"` on EVERY item or flat call; incompatible output fails rather than masquerading as coverage. The existing `reviewer` has a default schema; the new specialists do not.
+- Each specialist assignment requires introduced, exposed, or worsened defects only: cite concrete evidence, impact, and a fix direction. Anchor `file_path`/`line_start`/`line_end` to a changed range of at most 10 lines in the chair's pinned diff.
 - Rank `priority` 0–3 by user impact. Set `overall_correctness` to `incorrect` only for P0/P1; otherwise return `correct`, an explanation of examined scope, honest `confidence`, and `findings: []` when none survive.
 
 Review task `outputSchema` (JTD):
@@ -72,7 +72,7 @@ Review task `outputSchema` (JTD):
 - Deduplicate by root cause: the same root cause at several locations is ONE finding. Keep the most severe priority and the clearest evidence.
 - Normalize: findings carry repository-relative paths, 1-indexed lines, line_start ≤ line_end, and a range overlapping the reviewed diff.
 - Every finding gets an actionable recommendation (concrete fix direction, not "consider improving X"); the overall verdict gets its own recommendation.
-- Adopt an advisor's `recommendation` when present and still sound; write one otherwise. The same root cause reported by several lenses is ONE finding.
+- Adopt a specialist's `recommendation` when present and still sound; write one otherwise. The same root cause reported by several lenses is ONE finding.
 
 ### 4. Report
 

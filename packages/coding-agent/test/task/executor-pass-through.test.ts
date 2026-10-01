@@ -223,24 +223,24 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
-		const advisor = getBundledAgent("conventions-advisor");
-		if (!advisor) throw new Error("Missing bundled conventions advisor");
-		const advisorResult = await runSubprocess({
+		const specialist = getBundledAgent("conventions-specialist");
+		if (!specialist) throw new Error("Missing bundled conventions specialist");
+		const specialistResult = await runSubprocess({
 			...baseOptions,
-			id: "review-advisor-child",
-			agent: { ...advisor, model: undefined },
+			id: "review-specialist-child",
+			agent: { ...specialist, model: undefined },
 		});
 
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
-		expect(advisorResult.exitCode).toBe(0);
+		expect(specialistResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
 		// wait joins only when the child can start work (task/bash); a bare
 		// read/write child has nothing to block on.
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
 		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
-		// Bundled advisors delegate (`spawns: "*"`), so they are no longer
+		// Bundled specialists delegate (`spawns: "*"`), so they are no longer
 		// read-only-classified: task + wait auto-join their declared extras.
 		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual([
 			"read",
@@ -260,13 +260,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyPrompt = promptText(0);
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
-		const advisorPrompt = promptText(3);
+		const specialistPrompt = promptText(3);
 		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
 		// Outbound peer coordination requires write: a spawning child without
 		// write cannot message peers, so no # Peers section.
 		expect(writablePrompt.includes("# Peers")).toBe(true);
 		expect(spawningPrompt.includes("# Peers")).toBe(false);
-		expect(advisorPrompt.includes("# Peers")).toBe(false);
+		expect(specialistPrompt.includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {

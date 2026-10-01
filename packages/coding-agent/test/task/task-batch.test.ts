@@ -197,7 +197,7 @@ describe("task.batch schema gating", () => {
 		mockDiscovery([
 			taskAgent,
 			scoutAgent,
-			getBundledAgent("conventions-advisor")!,
+			getBundledAgent("conventions-specialist")!,
 			getBundledAgent("devils-advocate")!,
 		]);
 		const tool = await TaskTool.create(createSession());
@@ -208,7 +208,7 @@ describe("task.batch schema gating", () => {
 		expect(tool.description).not.toContain("- `scout` (mutable: apply-back)");
 		// Bundled agents all delegate now, so none carries a READ-ONLY badge;
 		// the badge remains for custom read-only definitions like this scout.
-		expect(tool.description).not.toContain("- `conventions-advisor` (READ-ONLY");
+		expect(tool.description).not.toContain("- `conventions-specialist` (READ-ONLY");
 		expect(tool.description).not.toContain("- `devils-advocate` (READ-ONLY");
 		expect(tool.description).toContain("- `scout` (READ-ONLY");
 		expect(tool.description).not.toContain("(isolation: apply)");
