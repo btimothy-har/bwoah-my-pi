@@ -28,10 +28,10 @@ describe("bundled agent parsing", () => {
 
 	it("parses specialist Markdown frontmatter without imposing a consultation schema", () => {
 		const lenses = [
-			["conventions-specialist", Effort.High],
+			["conventions-specialist", Effort.Medium],
 			["integration-specialist", Effort.High],
 			["testing-specialist", Effort.Medium],
-			["code-clarity-specialist", Effort.High],
+			["code-clarity-specialist", Effort.Medium],
 			["docs-specialist", Effort.Medium],
 			["security-specialist", Effort.High],
 			["data-model-specialist", Effort.High],
