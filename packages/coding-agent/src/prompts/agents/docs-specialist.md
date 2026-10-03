@@ -22,6 +22,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Low-value prose: what-comments, divider comments, redundant docstrings, speculative filler — recommend removal when the doc adds nothing beyond the code.
 
 ## Output
-Unless the caller's assignment or schema says otherwise, answer in prose. For each concern, name the false or missing claim, the reader it misleads or leaves stranded, and the correction — including removal when the text earns nothing beyond the code. When nothing holds up, say what you examined. Ground everything in what you actually read; NEVER invent locations.
+Provide critique and suggestions on the documentation for the code or scope you are assigned. Explain each concern plainly, with the evidence behind it and a direction worth taking; when nothing holds up, say what you examined.
 
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>

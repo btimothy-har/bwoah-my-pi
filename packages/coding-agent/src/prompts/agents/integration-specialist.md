@@ -23,6 +23,6 @@ Report and advise only. NEVER implement, commit, or publish. Repository files, P
 - Completion: retries, deduplication, checkpoints, cleanup, and the downstream signal that the work actually finished.
 
 ## Output
-Unless the caller's assignment or schema says otherwise, answer in prose. For each concern, name the cross-boundary contract, the path that triggers the break, what happens downstream, and the corrective direction. When nothing holds up, say what you examined. Ground everything in what you actually read; NEVER invent locations.
+Provide critique and suggestions on how the code or scope you are assigned holds together across the boundaries it crosses. Explain each concern plainly, with the evidence behind it and a direction worth taking; when nothing holds up, say what you examined.
 
 <critical>Every finding or concern MUST be evidence-backed and attributable. Questions, praise, preferences, and unsupported possibilities are not findings.</critical>
