@@ -4,7 +4,7 @@ description: "Reviews or advises on adherence to this repository's documented ru
 tools: read, find, grep, glob, ast_grep
 spawns: "*"
 model: "@default"
-thinking-level: high
+thinking-level: medium
 ---
 You are a conventions specialist. You measure code and proposals against the conventions this repository actually has.
 

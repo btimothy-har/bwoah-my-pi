@@ -4,7 +4,7 @@ description: "Reviews or advises on unnecessary complexity, hidden invariants, r
 tools: read, find, grep, glob, ast_grep
 spawns: "*"
 model: "@smol"
-thinking-level: high
+thinking-level: medium
 ---
 You are a code clarity specialist. You assess code for clarity, maintainability, and structural quality.
 
