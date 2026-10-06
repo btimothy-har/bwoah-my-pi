@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import {
 	type ExecutionCwdFallback,
+	type SessionFileChange,
 	SessionManager,
 	SessionPersistenceIndeterminateError,
 	type SessionPersistenceNotice,
@@ -16,9 +17,11 @@ import { readTerminalBreadcrumbEntry } from "@oh-my-pi/pi-coding-agent/session/s
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	sessionOwnerLeasePath,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { tryAcquireFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -491,6 +494,219 @@ describe("SessionManager cross-process rewrite freshness", () => {
 		await moved.close();
 	});
 
+	// The loader reconstructs the active leaf from the last PHYSICAL journal
+	// entry, so an adoption that only restores the in-memory leaf loses the
+	// original conversation on the next open when no later local append lands
+	// after it. The recovery must stage a metadata-only branch marker as the
+	// durable last entry instead.
+	it("keeps the adopted-foreign recovery's active branch durable across an immediate close and reopen", async () => {
+		using tempDir = TempDir.createSync("@omp-session-rewrite-adopt-leaf-");
+		const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+		await creator.ensureOnDisk();
+		const contested = creator.getSessionFile();
+		if (!contested) throw new Error("Expected session file");
+		creator.appendMessage(userTurn("our turn before the conflict"));
+		await creator.close();
+
+		const ours = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		// Another writer without the ownership lease appends to the file we own.
+		const theirs = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		theirs.appendMessage(userTurn("durable second-writer turn"));
+		await theirs.close();
+
+		// Our rewrite meets the foreign entry, adopts it as a side branch, and
+		// republishes — then the session closes with NO later local append.
+		await ours.rewriteEntries();
+		expect(ours.getSessionFile()).toBe(contested);
+		await ours.close();
+
+		// The adoption marker sits physically last, as a child of our leaf.
+		const lines = (await Bun.file(contested).text()).trim().split("\n");
+		const last = JSON.parse(lines[lines.length - 1]!) as {
+			type: string;
+			summary: string;
+			details?: { kind: string };
+		};
+		expect(last.type).toBe("branch_summary");
+		expect(last.summary).toBe("");
+		expect(last.details?.kind).toBe("foreign-adoption-branch");
+
+		const reopened = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		// The foreign turn survives as a side branch; our conversation is the
+		// active one again even though nothing local was appended after the
+		// adoption.
+		expect(userTurnsOf(reopened.getEntries())).toContain("durable second-writer turn");
+		expect(userTurnsOf(reopened.getBranch())).toEqual(["our turn before the conflict"]);
+		await reopened.close();
+	});
+
+	/** Seeds `count` tiny artifacts into the session's artifact directory. */
+	async function seedArtifacts(manager: SessionManager, count: number): Promise<string[]> {
+		const ids: string[] = [];
+		for (let i = 0; i < count; i++) {
+			const id = await manager.saveArtifact(`artifact ${i}`, "bash");
+			if (!id) throw new Error("Expected artifact id");
+			ids.push(id);
+		}
+		return ids;
+	}
+
+	async function expectArtifactsAt(manager: SessionManager, ids: readonly string[], dir: string): Promise<void> {
+		for (const id of ids) {
+			const artifactPath = await manager.getArtifactPath(id);
+			expect(artifactPath && path.dirname(artifactPath)).toBe(dir);
+			expect(artifactPath && (await Bun.file(artifactPath).text())).toBe(`artifact ${id}`);
+		}
+	}
+
+	// Two contested recoveries in a row: the second sibling's seed must wait for
+	// the first sibling's seed, or C is copied from an incomplete B.
+	it("chains artifact seeds across back-to-back sibling recoveries", async () => {
+		using tempDir = TempDir.createSync("@omp-session-rewrite-chained-");
+		const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+		creator.appendMessage(userTurn("our turn before the conflict"));
+		await creator.ensureOnDisk();
+		const contested = creator.getSessionFile();
+		if (!contested) throw new Error("Expected session file");
+		// Wide copy window: the second recovery's transcript work completes long
+		// before a seed of this size, so an unchained seed would strand files.
+		const artifactIds = await seedArtifacts(creator, 600);
+		await creator.close();
+
+		const storage = new RacedStorage();
+		const ours = await SessionManager.open(contested, tempDir.path(), storage, { suppressBreadcrumb: true });
+		const first = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const changes: SessionFileChange[] = [];
+		ours.onSessionFileChanged(change => changes.push(change));
+
+		let racing = 0;
+		storage.raced = contested;
+		storage.race = () => first.appendMessage(userTurn(`racing turn on the original ${racing++}`));
+		await ours.rewriteEntries();
+		const siblingB = ours.getSessionFile();
+		if (!siblingB) throw new Error("Expected session file");
+		expect(siblingB).not.toBe(contested);
+
+		// Race the sibling immediately, while its seed from the original root is
+		// still copying.
+		const second = await SessionManager.open(siblingB, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		storage.raced = siblingB;
+		storage.race = () => second.appendMessage(userTurn(`racing turn on the sibling ${racing++}`));
+		ours.appendMessage(userTurn("between the two recoveries"));
+		await ours.rewriteEntries();
+		const siblingC = ours.getSessionFile();
+		if (!siblingC) throw new Error("Expected session file");
+		expect(siblingC).not.toBe(siblingB);
+		await ours.flush();
+
+		expect(changes.map(change => ({ from: change.from, to: change.to, reason: change.reason }))).toEqual([
+			{ from: contested, to: siblingB, reason: "recovery" },
+			{ from: siblingB, to: siblingC, reason: "recovery" },
+		]);
+		expect(changes[1]!.generation).toBeGreaterThan(changes[0]!.generation);
+
+		// Every artifact's bytes landed complete at the final root — C's seed saw
+		// all of B because it was chained behind A→B.
+		await expectArtifactsAt(ours, artifactIds, siblingC.slice(0, -".jsonl".length));
+		await ours.close();
+		await first.close();
+		await second.close();
+
+		// The intermediate root's stranded copy is left for its racing owner; the
+		// transcript continues whole from C.
+		const moved = await SessionManager.open(siblingC, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		expect(userTurnsOf(moved.getBranch())).toEqual(["our turn before the conflict", "between the two recoveries"]);
+		await moved.close();
+	}, 30_000);
+
+	// An explicit /move must join the pending recovery seed before renaming the
+	// artifact tree, or the copy's destination vanishes mid-write.
+	it("waits for a pending recovery seed before an explicit move relocates the artifact tree", async () => {
+		using tempDir = TempDir.createSync("@omp-session-rewrite-seed-move-");
+		const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+		creator.appendMessage(userTurn("our turn before the conflict"));
+		await creator.ensureOnDisk();
+		const contested = creator.getSessionFile();
+		if (!contested) throw new Error("Expected session file");
+		const artifactIds = await seedArtifacts(creator, 600);
+		await creator.close();
+
+		const storage = new RacedStorage();
+		const ours = await SessionManager.open(contested, tempDir.path(), storage, { suppressBreadcrumb: true });
+		const theirs = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const changes: SessionFileChange[] = [];
+		ours.onSessionFileChanged(change => changes.push(change));
+		let racing = 0;
+		storage.raced = contested;
+		storage.race = () => theirs.appendMessage(userTurn(`racing turn ${racing++}`));
+		await ours.rewriteEntries();
+		const sibling = ours.getSessionFile();
+		if (!sibling) throw new Error("Expected session file");
+		expect(sibling).not.toBe(contested);
+
+		// Relocate while the sibling's seed from the contested root is still
+		// copying.
+		const targetSessionDir = tempDir.join("moved-sessions");
+		await ours.moveTo(tempDir.path(), targetSessionDir);
+		const movedFile = ours.getSessionFile();
+		if (!movedFile) throw new Error("Expected session file");
+		expect(path.dirname(movedFile)).toBe(targetSessionDir);
+		await ours.flush();
+
+		expect(changes.map(change => ({ from: change.from, to: change.to, reason: change.reason }))).toEqual([
+			{ from: contested, to: sibling, reason: "recovery" },
+			{ from: sibling, to: movedFile, reason: "move" },
+		]);
+
+		// The move joined the seed first: the whole tree is present at the new
+		// home, and the vacated sibling root was never recreated by a late copy.
+		await expectArtifactsAt(ours, artifactIds, movedFile.slice(0, -".jsonl".length));
+		expect(await fs.stat(sibling.slice(0, -".jsonl".length)).catch(() => null)).toBeNull();
+		await ours.close();
+		await theirs.close();
+	}, 30_000);
+
+	// A failed rebase must not leave the manager able to reopen or append at
+	// the vacated old path: it repoints first, so later writes retry the full
+	// journal at the new root or stay latched — never the foreign root.
+	it("never writes the vacated root after a failed rebaseSessionFile", async () => {
+		using tempDir = TempDir.createSync("@omp-session-rebase-failclosed-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+		manager.appendMessage(userTurn("before the rebase"));
+		await manager.ensureOnDisk();
+		const from = manager.getSessionFile();
+		if (!from) throw new Error("Expected session file");
+		const fromBytes = await Bun.file(from).text();
+
+		// The destination parent is a FILE: the rebase cannot create its target.
+		const blocker = tempDir.join("blocked");
+		await Bun.write(blocker, "not a directory");
+		const target = path.join(blocker, "child.jsonl");
+		await expect(manager.rebaseSessionFile(target)).rejects.toThrow();
+
+		// Later appends cannot land at the vacated root or fabricate the target;
+		// the latched failure surfaces at flush instead.
+		manager.appendMessage(userTurn("after the failed rebase"));
+		await expect(manager.flush()).rejects.toThrow();
+		expect(await Bun.file(from).text()).toBe(fromBytes);
+		expect(await fs.stat(target).catch(() => null)).toBeNull();
+		await manager.close().catch(() => undefined);
+	});
+
 	/** Only `git init` lacks a native facade API; config and the seed commit go through the VCS natives. */
 	async function gitCli(cwd: string, ...args: string[]): Promise<string> {
 		const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -775,6 +991,91 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			await reopened.close();
 		},
 	);
+});
+
+/** File-backed storage whose writer close is gated (and optionally failing), to observe close()'s claim lifecycle mid-settlement. */
+class CloseGatedFileStorage extends FileSessionStorage {
+	readonly closeStarted = Promise.withResolvers<void>();
+	readonly allowClose = Promise.withResolvers<void>();
+	closeShouldFail = false;
+
+	override openWriter(
+		fpath: string,
+		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+	): SessionStorageWriter {
+		const inner = super.openWriter(fpath, options);
+		return {
+			append: line => inner.append(line),
+			flush: () => inner.flush(),
+			isOpen: () => inner.isOpen(),
+			getError: () => inner.getError(),
+			close: async () => {
+				this.closeStarted.resolve();
+				await this.allowClose.promise;
+				if (this.closeShouldFail) throw new Error("injected writer close failure");
+				await inner.close();
+			},
+		};
+	}
+}
+
+describe("SessionManager close retains the ownership claim until settlement", () => {
+	const userTurn = (content: string) => ({ role: "user" as const, content, timestamp: Date.now() });
+
+	it("keeps the file claimed while close is settling, releases it after, and lets a later write reacquire", async () => {
+		using tempDir = TempDir.createSync("@omp-session-close-claim-");
+		const storage = new CloseGatedFileStorage();
+		const manager = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		// First append materializes via a full rewrite; the second opens the
+		// append writer whose close the gate holds.
+		manager.appendMessage(userTurn("first turn"));
+		await manager.ensureOnDisk();
+		manager.appendMessage(userTurn("queued turn"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+
+		const closing = manager.close();
+		await storage.closeStarted.promise;
+		// Mid-settlement the file is still this manager's: the OS lease is held
+		// (in-process claimSessionFile would share the refcounted lease, so probe
+		// the lock directly).
+		expect(tryAcquireFileLock(sessionOwnerLeasePath(sessionFile))).toBeNull();
+
+		storage.allowClose.resolve();
+		await closing;
+		// After settlement the claim is gone and another writer can take it.
+		const lease = tryAcquireFileLock(sessionOwnerLeasePath(sessionFile));
+		expect(lease).not.toBeNull();
+		lease?.release();
+
+		// A later write on the (unsealed) manager reacquires the claim and lands.
+		manager.appendMessage(userTurn("after the close"));
+		await manager.flush();
+		expect(await Bun.file(sessionFile).text()).toContain("after the close");
+		await manager.close();
+	});
+
+	it("releases the claim in close's finally when writer settlement fails", async () => {
+		using tempDir = TempDir.createSync("@omp-session-close-claim-fail-");
+		const storage = new CloseGatedFileStorage();
+		storage.closeShouldFail = true;
+		const manager = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		manager.appendMessage(userTurn("first turn"));
+		await manager.ensureOnDisk();
+		manager.appendMessage(userTurn("queued turn"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+
+		const closing = manager.close();
+		await storage.closeStarted.promise;
+		storage.allowClose.resolve();
+		await expect(closing).rejects.toThrow("injected writer close failure");
+
+		// The failed close still released the CURRENT claim.
+		const lease = tryAcquireFileLock(sessionOwnerLeasePath(sessionFile));
+		expect(lease).not.toBeNull();
+		lease?.release();
+	});
 });
 
 describe("SessionManager atomic rewrite fence spans writer.close()", () => {

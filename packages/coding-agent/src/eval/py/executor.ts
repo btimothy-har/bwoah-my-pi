@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 
 import { getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { OutputArtifactError, OutputArtifactLease } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	buildManagedKernelEnv,
@@ -101,6 +101,8 @@ export interface PythonExecutorOptions {
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
+	/** Managed allocation lease; forwarded to the base executor's sink, which settles it on close. */
+	artifactLease?: OutputArtifactLease;
 	/**
 	 * On-disk roots the prelude helpers (`read`/`write`) substitute for
 	 * internal-URL schemes (e.g. `{ local: "/…/artifacts/local" }`). Exported to

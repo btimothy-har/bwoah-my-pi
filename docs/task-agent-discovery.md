@@ -265,6 +265,10 @@ Every ordinary task/eval spawn runs in a writable isolated clone of the checkout
 
 Isolated children resolve the parent's `workspace.related` entry as read-only reference material, including shared context files. They do not inherit session-added `/add-dir` roots, which may be writable and would fall outside change capture. Same-process revival of a retained clone is supported; cold isolated history cannot revive — a persisted session stamped `isolated` stays transcript-only (`history://`) after a restart.
 
+Bwoah My Pi rebinds trusted prepared parent extension factories at the clone's cwd and event bus, including same-process revival. It does not re-import the parent's extension paths or custom-tool source files. Restricted child tool admission remains in force: a hook cannot activate ungranted built-ins, extension tools, or ambient MCP tools.
+
+Isolation metadata updates use a per-root FIFO queue within one process before acquiring the cross-process lease. The current process's identity is prepared outside that lease, and the initial generation record already carries the run's preserve/discard disposition. Different roots progress independently; background collection skips a contended root instead of joining the queue. Clone creation, capture, and physical teardown remain outside the metadata critical section.
+
 Explicit caller schemas are validated during preflight in both modes. Agent/session schemas are preflight-validated when the effective mode is `strict`. Invalid schemas fail before child execution.
 
 The model-facing prompt (`src/prompts/tools/task.md`) marks read-only agents and definitions permitting apply-back, and documents the per-item `mutable` control.

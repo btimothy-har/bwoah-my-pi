@@ -24,6 +24,7 @@ import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } 
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { saveOutputArtifactText } from "./output-meta";
 import { parseTailCount } from "./path-utils";
 import { type LineRange, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
@@ -1571,10 +1572,7 @@ async function persistReadUrlArtifact(
 	session: ToolSession,
 	output: string,
 ): Promise<{ id?: string; path?: string } | undefined> {
-	const artifact = await session.allocateOutputArtifact?.("read");
-	if (!artifact?.path) return undefined;
-	await Bun.write(artifact.path, output);
-	return artifact;
+	return await saveOutputArtifactText(session, "read", output);
 }
 
 async function ensureReadUrlArtifact(session: ToolSession, entry: ReadUrlEntry): Promise<ReadUrlEntry> {

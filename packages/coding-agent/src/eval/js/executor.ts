@@ -1,4 +1,9 @@
-import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	type OutputArtifactError,
+	type OutputArtifactLease,
+	OutputSink,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -40,6 +45,8 @@ export interface JsExecutorOptions {
 	environment?: JsPackageEnvironmentMode;
 	artifactPath?: string;
 	artifactId?: string;
+	/** Managed allocation lease; the sink resolves the open path lazily and settles it on close. */
+	artifactLease?: OutputArtifactLease;
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
@@ -110,6 +117,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
+		artifactLease: options.artifactLease,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),

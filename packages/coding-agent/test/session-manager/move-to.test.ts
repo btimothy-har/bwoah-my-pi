@@ -148,6 +148,48 @@ describe("SessionManager.moveTo", () => {
 		await session.close();
 	});
 
+	it("carries an already-open artifact writer's descriptor through the move and back on rollback", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const oldRoot = oldFile.slice(0, -".jsonl".length);
+
+		// Allocate and open the sink's file BEFORE the move: the descriptor pins
+		// the inode, which a whole-directory rename carries to the new root.
+		const allocation = await session.allocateArtifactPath("bash");
+		if (!allocation.lease || !allocation.id) throw new Error("Expected a managed allocation");
+		const openPath = await allocation.lease.resolvePath();
+		expect(path.dirname(openPath)).toBe(oldRoot);
+		const handle = await fsp.open(openPath, "w");
+		await handle.write("before-move-");
+
+		const snapshot = session.captureState();
+		await session.moveTo(cwdB);
+		const movedFile = session.getSessionFile()!;
+		const movedRoot = movedFile.slice(0, -".jsonl".length);
+		expect(path.resolve(movedRoot)).not.toBe(path.resolve(oldRoot));
+
+		// The descriptor kept writing the carried inode; settlement verifies the
+		// bytes at the new root instead of failing against the vacated old path.
+		await handle.write("after-move");
+		await handle.close();
+		await allocation.lease.complete();
+
+		const finalized = await allocation.lease.resolvePath();
+		expect(path.dirname(finalized)).toBe(movedRoot);
+		expect(await Bun.file(finalized).text()).toBe("before-move-after-move");
+		expect(await session.getArtifactPath(allocation.id)).toBe(finalized);
+
+		// Rollback renames the tree back: the finalized artifact returns with it.
+		await session.rollbackMove(snapshot);
+		const restoredFile = session.getSessionFile()!;
+		expect(path.resolve(restoredFile)).toBe(path.resolve(oldFile));
+		const restored = await session.getArtifactPath(allocation.id);
+		expect(restored && path.dirname(restored)).toBe(path.resolve(oldRoot));
+		expect(restored && (await Bun.file(restored).text())).toBe("before-move-after-move");
+		await session.close();
+	});
+
 	it("retains the source when cross-device publication finds an occupied destination", async () => {
 		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
 		await session.ensureOnDisk();

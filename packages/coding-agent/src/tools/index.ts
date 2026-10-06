@@ -29,7 +29,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
-import type { ArtifactManager } from "../session/artifacts";
+import type { ArtifactAllocation, ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { RelatedWorkspace } from "../session/related-workspace";
@@ -405,8 +405,14 @@ export interface ToolSession {
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
 	getArtifactManager?: () => ArtifactManager | null;
-	/** Allocate a new artifact path and ID for session-scoped truncated output. */
-	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
+	/**
+	 * Allocate a new artifact allocation (id, path, settlement lease) for
+	 * session-scoped truncated output. Managed allocations carry a lease:
+	 * resolve the write path lazily via `lease.resolvePath()` immediately
+	 * before opening/writing and settle with `lease.complete()` exactly once at
+	 * the end, so storage-only recovery/moves cannot strand the bytes.
+	 */
+	allocateOutputArtifact?: (toolType: string) => Promise<ArtifactAllocation>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */

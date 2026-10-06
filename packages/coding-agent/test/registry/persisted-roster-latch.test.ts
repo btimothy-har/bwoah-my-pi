@@ -3,7 +3,10 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { ensurePersistedRoster } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
+import {
+	ensurePersistedRoster,
+	registerRootMigrationBarrier,
+} from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
@@ -448,6 +451,59 @@ describe("persisted roster latch semantics", () => {
 		await ensurePersistedRoster(registry, rootFile);
 		expect(registry.get("Worker")?.sessionFile).toBe(childFile);
 		expect(countReaddirs(readdirs, scanDir(rootFile))).toBe(1);
+	}, 10_000);
+
+	// A storage-only recovery moves the root to a sibling and rebases its owned
+	// parked refs in place. That is NOT another root superseding the id: the
+	// exact ref object must survive (no unregister/register), the new root's
+	// scan must wait for the migration barrier, and the settled latch must
+	// accept the rebased path as this root's own.
+	it("keeps the exact ref through a same-owner root relocation, gated on the migration barrier", async () => {
+		using tempDir = TempDir.createSync("@omp-roster-relocation-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "tree", "a.jsonl");
+		const rootB = path.join(dir, "tree", "b.jsonl");
+		const childA = path.join(dir, "tree", "a", "Worker.jsonl");
+		const childB = path.join(dir, "tree", "b", "Worker.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await Bun.write(rootB, `${sessionHeader("b")}\n`);
+		await Bun.write(childA, `${sessionHeader("worker")}\n${sessionInitRecord()}\n`);
+		// The recovery seed copied the transcript into the new root's tree.
+		await Bun.write(childB, `${sessionHeader("worker")}\n${sessionInitRecord()}\n`);
+		const readdirs: string[] = [];
+		spyOnReaddirs(readdirs);
+		const registry = new AgentRegistry();
+		await ensurePersistedRoster(registry, rootA);
+		const ref = registry.get("Worker");
+		expect(ref?.sessionFile).toBe(childA);
+		expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
+		// Only events after the initial scan: the relocation must not churn.
+		const events: string[] = [];
+		registry.onChange(event => events.push(`${event.type}:${event.ref.id}`));
+
+		// The root's migration is in flight: the new root's roster scan joins
+		// the barrier instead of reading a half-rebased tree.
+		const gate = Promise.withResolvers<void>();
+		registerRootMigrationBarrier(rootB, gate.promise);
+		const scan = ensurePersistedRoster(registry, rootB);
+		// Real IO round-trips give a broken (ungated) scan ample room to readdir.
+		await fsp.readFile(rootA);
+		await fsp.readFile(rootB);
+		expect(countReaddirs(readdirs, scanDir(rootB))).toBe(0);
+
+		// The migration repoints the owned ref in place, then settles.
+		expect(registry.setSessionFile("Worker", childB, ref!)).toBe(true);
+		gate.resolve();
+		await scan;
+
+		// Same ref object, rebased path, no unregister/register churn — and the
+		// settled latch accepts the rebased path without a re-scan.
+		expect(registry.get("Worker")).toBe(ref);
+		expect(registry.get("Worker")?.sessionFile).toBe(childB);
+		expect(events.filter(event => event !== "metadata_changed:Worker")).toEqual([]);
+		expect(countReaddirs(readdirs, scanDir(rootB))).toBe(1);
+		await ensurePersistedRoster(registry, rootB);
+		expect(countReaddirs(readdirs, scanDir(rootB))).toBe(1);
 	}, 10_000);
 
 	it("retries a supersession refresh whose scan failed", async () => {

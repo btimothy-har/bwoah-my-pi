@@ -15,6 +15,8 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
+import type { ArtifactAllocation } from "../session/artifacts";
+import type { ToolSession } from "./index";
 
 import {
 	type OutputSummary,
@@ -516,6 +518,62 @@ export function resolveOutputMaxColumns(s: Settings | undefined): number {
 export function resolveOutputSinkArtifactMaxBytes(s: Settings | undefined): number {
 	const megabytes = s ? cfgToolsArtifactMaxBytes.get(s) : cfgToolsArtifactMaxBytes.default;
 	return Math.max(0, Math.floor(megabytes * 1024 * 1024));
+}
+
+/**
+ * Publish raw output text under a session-managed artifact allocation and
+ * settle its lease exactly once.
+ *
+ * Managed allocations carry an `OutputArtifactLease`: the write path is
+ * resolved lazily — immediately before writing — so a storage-only recovery
+ * or move between allocation and publication redirects the write to the
+ * owner's current root, and the lease is settled whether the write succeeded,
+ * failed, or never resolved a path, so the reservation cannot pin the owner's
+ * relocation readiness. After settlement the advertised path is re-resolved
+ * to the finalized current-root location, never the (possibly pre-relocation)
+ * write path.
+ *
+ * Failure is fail-closed and non-throwing: returns `undefined` so no artifact
+ * reference is advertised and the caller's otherwise valid result stands.
+ */
+export async function saveOutputArtifactText(
+	session: ToolSession,
+	toolType: string,
+	text: string,
+): Promise<ArtifactAllocation | undefined> {
+	let allocation: ArtifactAllocation | undefined;
+	try {
+		allocation = await session.allocateOutputArtifact?.(toolType);
+	} catch {
+		return undefined;
+	}
+	if (!allocation?.id) return undefined;
+	const lease = allocation.lease;
+	let artifactPath: string | undefined;
+	try {
+		artifactPath = lease ? await lease.resolvePath() : allocation.path;
+		if (artifactPath) await Bun.write(artifactPath, text);
+	} catch {
+		artifactPath = undefined;
+	}
+	if (!lease) {
+		return artifactPath ? { ...allocation, path: artifactPath } : undefined;
+	}
+	try {
+		await lease.complete();
+	} catch {
+		// Publication into the current root failed; the bytes are not provably
+		// recoverable there, so the allocation must not be advertised.
+		return undefined;
+	}
+	if (!artifactPath) return undefined;
+	try {
+		return { ...allocation, path: await lease.resolvePath() };
+	} catch {
+		// Bytes are finalized and the id resolves through the manager; only the
+		// advisory cached path is unavailable.
+		return { ...allocation, path: undefined };
+	}
 }
 
 /**

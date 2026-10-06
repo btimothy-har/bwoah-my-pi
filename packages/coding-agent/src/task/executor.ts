@@ -527,7 +527,18 @@ export interface ExecutorOptions {
 	acquiredAt?: number;
 	sessionFile?: string | null;
 	persistArtifacts?: boolean;
+	/**
+	 * Launch-time artifact directory: initial placement of the child transcript
+	 * and artifacts. After a storage-only relocation of the owning tree this is
+	 * stale — publication paths must prefer {@link resolveArtifactsDir}.
+	 */
 	artifactsDir?: string;
+	/**
+	 * Live resolver for the CURRENT owned artifact directory of the continuing
+	 * tree (follows contested-write recovery and `/move`). Consulted at each
+	 * publication point; falls back to {@link artifactsDir} when unset.
+	 */
+	resolveArtifactsDir?: () => string | undefined;
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
@@ -1530,7 +1541,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			detached: args.detached,
 			assignment,
 			progress: { ...progress },
-			sessionFile: args.sessionFile,
+			// The ref carries the current rebased transcript path after a
+			// relocation; the launch-time capture is the fallback.
+			sessionFile: AgentRegistry.global().get(id)?.sessionFile ?? args.sessionFile,
 		};
 		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
 		lastProgressEmitMs = Date.now();
@@ -2604,6 +2617,8 @@ interface FinalizeRunArgs {
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	signal?: AbortSignal;
 	artifactsDir?: string;
+	/** Current owned artifact directory of the continuing tree; wins over the launch-time {@link FinalizeRunArgs.artifactsDir} after a relocation. */
+	resolveArtifactsDir?: () => string | undefined;
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
@@ -2686,8 +2701,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// (followUpTurn is unset), preserving the documented missing-yield artifact.
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
-	if (args.artifactsDir && (!args.followUpTurn || hasYield)) {
-		const candidatePath = path.join(args.artifactsDir, `${id}.md`);
+	// Publish into the CURRENT owned artifact root: a recovery/move during the
+	// run made the launch-time dir part of a foreign tree.
+	const artifactsDir = args.resolveArtifactsDir?.() ?? args.artifactsDir;
+	if (artifactsDir && (!args.followUpTurn || hasYield)) {
+		const candidatePath = path.join(artifactsDir, `${id}.md`);
 		try {
 			await writeArtifact(candidatePath, rawOutput);
 			outputPath = candidatePath;
@@ -2703,7 +2721,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			});
 		}
 		const structured = finalized.structuredOutput;
-		const sidecarPath = path.join(args.artifactsDir, `${id}.json`);
+		const sidecarPath = path.join(artifactsDir, `${id}.json`);
 		if (outputPath && structured && Object.hasOwn(structured, "data")) {
 			try {
 				const serialized = JSON.stringify(structured.data, null, 2);
@@ -2783,7 +2801,9 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		agentSource: agent.source,
 		description: progress.description,
 		status: progress.status as "completed" | "failed" | "aborted",
-		sessionFile: args.sessionFile,
+		// The ref carries the current rebased transcript path after a relocation;
+		// the launch-time capture is the fallback.
+		sessionFile: AgentRegistry.global().get(id)?.sessionFile ?? args.sessionFile,
 		index,
 	};
 	emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, settledPayload);
@@ -2846,6 +2866,8 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/** Current owned artifact directory of the continuing tree; wins over the launch-time capture after a relocation. */
+	resolveArtifactsDir?: () => string | undefined;
 }
 
 /** Sender + message id of one `irc:incoming` record that woke a turn. */
@@ -3156,6 +3178,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
 					artifactsDir: options.artifactsDir,
+					resolveArtifactsDir: options.resolveArtifactsDir,
 					eventBus: options.eventBus,
 					subagentEventBus: options.subagentEventBus,
 					parentToolCallId: options.parentToolCallId,
@@ -3365,6 +3388,8 @@ export interface FollowUpTurnOptions {
 	 * wake answering a message) leaves the existing artifact intact (issue #9518).
 	 */
 	artifactsDir?: string;
+	/** Current owned artifact directory of the continuing tree; wins over the launch-time capture after a relocation. */
+	resolveArtifactsDir?: () => string | undefined;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
 	/** Workpool items accepted by the child yield tool during this turn. */
@@ -3526,6 +3551,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,
+		resolveArtifactsDir: options.resolveArtifactsDir,
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
@@ -3725,6 +3751,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
+			resolveArtifactsDir: options.resolveArtifactsDir,
 		});
 	};
 
@@ -4041,8 +4068,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedPreparedExtensions: options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
+					// The main ref carries the current root after a storage-only
+					// relocation; the spawn-time capture is only the pre-registration
+					// fallback.
+					const liveRootSessionFile = AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile ?? ircRootSessionFile;
 					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+						? collectIrcPeerRoster(AgentRegistry.global(), id, liveRootSessionFile)
 						: undefined;
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
@@ -4181,14 +4212,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// (createAgentSession → agent.replaceMessages). Isolated runs keep their
 				// worktree for the same lifecycle, so they can use this path too.
 				reviveSession = async expectedAgentRef => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+					// Read the ref's CURRENT session file at invocation: a storage-only
+					// relocation of the owning tree rebased it in place, so the
+					// launch-time capture may point into a now-foreign root.
+					const reviveFile = expectedAgentRef.sessionFile ?? sessionFile;
+					const reopened = await SessionManager.open(reviveFile, undefined, undefined, {
 						suppressBreadcrumb: true,
 						throwIfMissing: true,
 					});
 					if (!hasConversationalHistory(reopened.getEntries())) {
 						await reopened.close();
 						throw new Error(
-							`Cannot revive subagent "${id}": session file "${sessionFile}" has no message history ` +
+							`Cannot revive subagent "${id}": session file "${reviveFile}" has no message history ` +
 								`(truncated to header/session_init). The agent was not revived.`,
 						);
 					}
@@ -4555,6 +4590,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,
+		resolveArtifactsDir: options.resolveArtifactsDir,
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
@@ -4562,6 +4598,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
+	// outputPath already points into the current owned root (finalize resolves it).
 	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
 	return result;
 }

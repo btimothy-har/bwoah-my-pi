@@ -439,6 +439,8 @@ export class WorkPool {
 							eventBus: this.session.eventBus,
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
+							// Mid-turn relocations move the owned root; resolve live at publication.
+							resolveArtifactsDir: () => this.session.getArtifactsDir?.() ?? undefined,
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 						});
 					}

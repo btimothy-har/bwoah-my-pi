@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import {
+	currentIsolationOwner,
 	ISOLATION_OWNER_FILE,
 	RETAINED_BACKEND_FILE,
 	writeIsolationOwner,
@@ -53,7 +54,7 @@ describe("worktree clear task-isolation ownership", () => {
 
 	it("keeps live-owned sandboxes and reclaims dead/markerless/corrupt ones", async () => {
 		const live = await makeSandbox("tlive0001");
-		await writeIsolationOwner(live, "live0001"); // marker names this test process
+		await writeIsolationOwner(live, await currentIsolationOwner("live0001")); // marker names this test process
 
 		const dead = await makeSandbox("tdead0002");
 		await Bun.write(path.join(dead, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "dead0002" }));
@@ -67,7 +68,7 @@ describe("worktree clear task-isolation ownership", () => {
 		// dir holds only the live-owner marker and no mount yet.
 		const pending = path.join(base, "tpend0005");
 		await fs.mkdir(pending, { recursive: true });
-		await writeIsolationOwner(pending, "pend0005");
+		await writeIsolationOwner(pending, await currentIsolationOwner("pend0005"));
 
 		// Recycled pid: the crashed owner's pid was reassigned to this live test
 		// process, but the recorded start-time token no longer matches.

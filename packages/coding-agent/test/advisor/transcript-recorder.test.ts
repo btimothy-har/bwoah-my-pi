@@ -11,7 +11,7 @@
  * - The target follows the session file: a switch routes later turns to the new
  *   session's `__advisor.jsonl`, leaving the prior file intact.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,7 +22,8 @@ import {
 	advisorTranscriptFilename,
 	loadAdvisorTranscriptCosts,
 } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { SessionFileChange } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface AdvisorEntry {
 	type?: string;
@@ -388,6 +389,262 @@ describe("AdvisorTranscriptRecorder", () => {
 			await fs.writeFile(transcript, `${lines.join("\n")}\n`);
 
 			expect((await loadAdvisorTranscriptCosts(sessionFile)).get("")).toBe(0.25);
+		});
+	});
+});
+
+describe("AdvisorTranscriptRecorder root relocation", () => {
+	/**
+	 * Harness emulating the owning session manager: holds the current session
+	 * file and delivers storage-only relocation events synchronously after the
+	 * path flips, exactly like `#moveOffSessionFile`/`rebaseSessionFile` do.
+	 */
+	function relocatableRecorder(
+		dir: string,
+		after?: Promise<unknown>,
+	): {
+		recorder: AdvisorTranscriptRecorder;
+		relocate: (to: string, ready?: Promise<void>, reason?: SessionFileChange["reason"]) => void;
+	} {
+		let sessionFile = path.join(dir, "sess.jsonl");
+		let changeCb: ((change: SessionFileChange) => void) | undefined;
+		const recorder = new AdvisorTranscriptRecorder(
+			() => sessionFile,
+			() => dir,
+			ADVISOR_TRANSCRIPT_FILENAME,
+			after,
+			cb => {
+				changeCb = cb;
+				return () => {
+					changeCb = undefined;
+				};
+			},
+		);
+		let generation = 0;
+		return {
+			recorder,
+			relocate(to, ready = Promise.resolve(), reason = "recovery") {
+				const from = sessionFile;
+				sessionFile = to;
+				changeCb?.({ from, to, generation: ++generation, reason, ready });
+			},
+		};
+	}
+
+	async function pathExists(file: string): Promise<boolean> {
+		return (await fs.stat(file).catch(() => null)) !== null;
+	}
+
+	async function readSessionId(file: string): Promise<unknown> {
+		const text = await Bun.file(file).text();
+		for (const line of text.trim().split("\n")) {
+			const entry = JSON.parse(line);
+			if (entry.type === "session") return entry.id;
+		}
+		return undefined;
+	}
+
+	/** Usage inputs of the persisted assistant turns, in file order. */
+	async function recordedInputs(file: string): Promise<unknown[]> {
+		return (await readMessageEntries(file)).map(entry => entry.message?.usage?.input);
+	}
+
+	/** Rejected readiness without an unhandled-rejection report; the recorder awaits it. */
+	function failedSeed(message: string): Promise<void> {
+		const ready = Promise.reject(new Error(message));
+		ready.catch(() => {});
+		return ready;
+	}
+
+	it("gates records queued before and after a recovery on truthful seed readiness", async () => {
+		await withTempDir(async dir => {
+			const gate = Promise.withResolvers<void>();
+			const { recorder, relocate } = relocatableRecorder(dir, gate.promise);
+			const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const newTranscript = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+
+			// Accepted before the migration starts, still gated behind `after`.
+			recorder.record(assistantMessage("queued before migration", 1));
+			const seed = Promise.withResolvers<void>();
+			relocate(path.join(dir, "sibling.jsonl"), seed.promise);
+			gate.resolve();
+			recorder.record(assistantMessage("queued after migration", 2));
+
+			// Publication at the new root must wait for the seed: an early create
+			// would make the seed's no-overwrite copy skip the transcript.
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(await pathExists(newTranscript)).toBe(false);
+
+			seed.resolve();
+			await recorder.close();
+
+			expect(await recordedInputs(newTranscript)).toEqual([1, 2]);
+			// The vacated root was never written or recreated.
+			expect(await pathExists(path.join(dir, "sess"))).toBe(false);
+			expect(await pathExists(oldTranscript)).toBe(false);
+		});
+	});
+
+	it("rebases the open writer onto the recovered root with the same advisor session id", async () => {
+		await withTempDir(async dir => {
+			const { recorder, relocate } = relocatableRecorder(dir);
+			const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const newTranscript = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+			recorder.record(assistantMessage("before recovery", 1));
+			// Writer open at the old root, its bytes durable there.
+			await recorder.flush();
+
+			const seed = Promise.withResolvers<void>();
+			relocate(path.join(dir, "sibling.jsonl"), seed.promise);
+			recorder.record(assistantMessage("after recovery", 2));
+			seed.resolve();
+			await recorder.close();
+
+			// The settled writer's journal is republished complete at the current
+			// root; the queued-after record follows it there.
+			expect(await recordedInputs(newTranscript)).toEqual([1, 2]);
+			// No post-recovery writes land at the vacated path.
+			expect(await recordedInputs(oldTranscript)).toEqual([1]);
+			// Same advisor session, repointed — never recreated under a fresh id.
+			expect(await readSessionId(newTranscript)).toBe(await readSessionId(oldTranscript));
+		});
+	});
+
+	it("follows chained relocations deterministically", async () => {
+		await withTempDir(async dir => {
+			const { recorder, relocate } = relocatableRecorder(dir);
+			const a = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const b = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+			const c = path.join(dir, "third", ADVISOR_TRANSCRIPT_FILENAME);
+			recorder.record(assistantMessage("seeded at A", 1));
+			await recorder.flush();
+
+			const seedAB = Promise.withResolvers<void>();
+			relocate(path.join(dir, "sibling.jsonl"), seedAB.promise);
+			const seedBC = Promise.withResolvers<void>();
+			relocate(path.join(dir, "third.jsonl"), seedBC.promise);
+			recorder.record(assistantMessage("queued across both", 2));
+
+			seedAB.resolve();
+			seedBC.resolve();
+			await recorder.close();
+
+			// Each hop's republication carried exactly the bytes settled so far.
+			expect(await recordedInputs(a)).toEqual([1]);
+			expect(await recordedInputs(b)).toEqual([1]);
+			expect(await recordedInputs(c)).toEqual([1, 2]);
+			const id = await readSessionId(a);
+			expect(await readSessionId(b)).toBe(id);
+			expect(await readSessionId(c)).toBe(id);
+		});
+	});
+
+	it("waits out the seed so its copied history is not skipped", async () => {
+		await withTempDir(async dir => {
+			const first = new AdvisorTranscriptRecorder(
+				() => path.join(dir, "sess.jsonl"),
+				() => dir,
+			);
+			first.record(assistantMessage("history", 1));
+			await first.close();
+			const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const newTranscript = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+
+			const { recorder, relocate } = relocatableRecorder(dir);
+			// Emulate the owning manager's artifact seed: readiness resolves only
+			// after the old root's bytes exist at the new root (no-overwrite copy).
+			const copy = Promise.withResolvers<void>();
+			const ready = copy.promise.then(() =>
+				fs.cp(path.join(dir, "sess"), path.join(dir, "sibling"), {
+					recursive: true,
+					force: false,
+					errorOnExist: false,
+				}),
+			);
+			relocate(path.join(dir, "sibling.jsonl"), ready);
+			recorder.record(assistantMessage("after seed", 2));
+
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(await pathExists(newTranscript)).toBe(false);
+
+			copy.resolve();
+			await recorder.close();
+
+			// Seeded history plus the queued record — nothing lost, same advisor id.
+			expect(await recordedInputs(newTranscript)).toEqual([1, 2]);
+			expect(await readSessionId(newTranscript)).toBe(await readSessionId(oldTranscript));
+		});
+	});
+
+	it("follows a move whose rename already carried the transcript", async () => {
+		await withTempDir(async dir => {
+			const { recorder, relocate } = relocatableRecorder(dir);
+			const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const newTranscript = path.join(dir, "moved", ADVISOR_TRANSCRIPT_FILENAME);
+			recorder.record(assistantMessage("before move", 1));
+			await recorder.flush();
+
+			// `moveTo` relocates the artifact tree inline and only then notifies
+			// with already-settled readiness.
+			await fs.rename(path.join(dir, "sess"), path.join(dir, "moved"));
+			relocate(path.join(dir, "moved.jsonl"), Promise.resolve(), "move");
+			recorder.record(assistantMessage("after move", 2));
+			await recorder.close();
+
+			expect(await recordedInputs(newTranscript)).toEqual([1, 2]);
+			// The rename vacated the old path; nothing recreated it.
+			expect(await pathExists(oldTranscript)).toBe(false);
+		});
+	});
+
+	it("surfaces a failed seed while moving the live writer off the foreign root", async () => {
+		await withTempDir(async dir => {
+			const warn = spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				const { recorder, relocate } = relocatableRecorder(dir);
+				const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+				const newTranscript = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+				recorder.record(assistantMessage("before failed seed", 1));
+				await recorder.flush();
+
+				relocate(path.join(dir, "sibling.jsonl"), failedSeed("seed boom"));
+				recorder.record(assistantMessage("after failed seed", 2));
+				await recorder.close();
+
+				expect(warn).toHaveBeenCalledWith("Advisor transcript relocation: artifact seed failed", expect.anything());
+				// The writer could not stay on the foreign old root; the complete
+				// bytes at the continuing root come from the republished journal —
+				// verified by the rebase — never assumed from the failed copy.
+				expect(await recordedInputs(newTranscript)).toEqual([1, 2]);
+				expect(await recordedInputs(oldTranscript)).toEqual([1]);
+				expect(await readSessionId(newTranscript)).toBe(await readSessionId(oldTranscript));
+			} finally {
+				warn.mockRestore();
+			}
+		});
+	});
+
+	it("fabricates no history at the new root when the seed failed before any writer opened", async () => {
+		await withTempDir(async dir => {
+			const warn = spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				const gate = Promise.withResolvers<void>();
+				const { recorder, relocate } = relocatableRecorder(dir, gate.promise);
+				const oldTranscript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+				const newTranscript = path.join(dir, "sibling", ADVISOR_TRANSCRIPT_FILENAME);
+				recorder.record(assistantMessage("only genuine bytes", 7));
+				relocate(path.join(dir, "sibling.jsonl"), failedSeed("seed boom"));
+				gate.resolve();
+				await recorder.close();
+
+				expect(warn).toHaveBeenCalledWith("Advisor transcript relocation: artifact seed failed", expect.anything());
+				// The new root holds exactly the bytes genuinely published there;
+				// the vacated root was never recreated.
+				expect(await recordedInputs(newTranscript)).toEqual([7]);
+				expect(await pathExists(oldTranscript)).toBe(false);
+			} finally {
+				warn.mockRestore();
+			}
 		});
 	});
 });

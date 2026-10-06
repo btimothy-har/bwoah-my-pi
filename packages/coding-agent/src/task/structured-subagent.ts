@@ -511,7 +511,10 @@ export async function reserveStructuredSubagentId(
 
 interface ArtifactLease {
 	sessionFile: string | null;
+	/** Launch-time artifact root: initial placement. Stale after a storage-only relocation of the owning tree. */
 	artifactsDir: string;
+	/** CURRENT owned artifact root of the continuing tree (follows recovery/move). Consult at every publication point. */
+	resolveArtifactsDir: () => string;
 	temporary: boolean;
 	unregister: (() => void) | undefined;
 	/**
@@ -531,6 +534,7 @@ function createArtifactLease(
 	artifactsDir: string,
 	temporary: boolean,
 	unregister: (() => void) | undefined,
+	resolveArtifactsDir?: () => string,
 ): ArtifactLease {
 	let holdCount = 0;
 	let cleanupRequested = false;
@@ -555,6 +559,9 @@ function createArtifactLease(
 	return {
 		sessionFile,
 		artifactsDir,
+		// Durable leases track the owning session's CURRENT artifact root
+		// (rebound through recovery/move); temporary leases never relocate.
+		resolveArtifactsDir: resolveArtifactsDir ?? (() => artifactsDir),
 		temporary,
 		unregister,
 		requestCleanup: async () => {
@@ -586,7 +593,16 @@ async function leaseArtifacts(
 	if (sessionFile) {
 		const artifactsDir = sessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		return createArtifactLease(sessionFile, artifactsDir, false, undefined);
+		// Track the continuing tree by artifact-manager identity: the SAME
+		// object is rebound through recovery/move (its dir is then the current
+		// owned root), while an actual new session replaces the object — and
+		// this lease's tree stays at the launch-time root. Calling the getter
+		// here also forces lazy creation so the identity is capturable.
+		const managerAtLease = session.getArtifactManager?.() ?? null;
+		return createArtifactLease(sessionFile, artifactsDir, false, undefined, () => {
+			const current = managerAtLease ? (session.getArtifactManager?.() ?? null) : null;
+			return current && current === managerAtLease ? current.dir : artifactsDir;
+		});
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
@@ -660,6 +676,7 @@ function buildExecutorOptions(
 		sessionFile: lease.sessionFile,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
+		resolveArtifactsDir: lease.resolveArtifactsDir,
 		enableLsp: policy.enableLsp,
 		lspReadOnly: policy.lspReadOnly,
 		enableIrc: policy.enableIrc,
@@ -902,6 +919,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				mergeMode: clone.mergeMode,
 				discard: clone.disposition === "discard",
 				artifactsDir: lease.artifactsDir,
+				resolveArtifactsDir: lease.resolveArtifactsDir,
 				description: trimToUndefined(request.identity?.label),
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
 				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),

@@ -6,6 +6,7 @@ import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import type { GhLabel, GhUser } from "./gh-types";
+import { saveOutputArtifactText } from "./output-meta";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -317,13 +318,7 @@ export async function saveArtifactText(
 	toolType: string,
 	text: string,
 ): Promise<string | undefined> {
-	const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.(toolType)) ?? {};
-	if (!artifactPath || !artifactId) {
-		return undefined;
-	}
-
-	await Bun.write(artifactPath, text);
-	return artifactId;
+	return (await saveOutputArtifactText(session, toolType, text))?.id;
 }
 
 export function appendArtifactReference(text: string, artifactId: string | undefined, label: string): string {

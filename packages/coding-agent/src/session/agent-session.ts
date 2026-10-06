@@ -287,7 +287,7 @@ import type {
 	SteerOptions,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { writeArtifact } from "./artifacts";
+import { type ArtifactAllocation, writeArtifact } from "./artifacts";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -2261,6 +2261,18 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+
+		// A storage-only relocation (contested-write recovery mints a sibling
+		// session id, /move keeps the id) is not a conversation change: sync the
+		// observed session id through the existing identity internals so
+		// id-scoped consumers (collab room rotation, Tern reporting, advisor
+		// cost hydration) follow a committed recovery, while accepted turns and
+		// queued conversation work are left untouched.
+		this.addDisposer(
+			this.sessionManager.onSessionFileChanged(() => {
+				this.#syncAgentSessionId();
+			}),
+		);
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -2882,16 +2894,35 @@ export class AgentSession implements SettingsScope {
 			}).content;
 			return `${headTail}\nFull output: artifact://${rawArtifactId}`;
 		}
+		let allocation: ArtifactAllocation | undefined;
 		try {
-			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
-			if (artifactPath && artifactId) {
+			allocation = await this.sessionManager.allocateArtifactPath("async");
+			// Resolve the write location only now: a storage-only recovery between
+			// allocation and publication redirects the write to the current root.
+			const artifactPath = allocation.lease ? await allocation.lease.resolvePath() : allocation.path;
+			if (artifactPath && allocation.id) {
 				await writeArtifact(artifactPath, result);
-				return `${preview}\nFull output: artifact://${artifactId}`;
+				// Settlement failure means the bytes are not provably in the current
+				// root; fall through to the bare preview rather than advertising an
+				// unrecoverable reference.
+				await allocation.lease?.complete();
+				return `${preview}\nFull output: artifact://${allocation.id}`;
 			}
 		} catch (error) {
 			logger.warn("Failed to persist async follow-up artifact", {
 				error: error instanceof Error ? error.message : String(error),
 			});
+		} finally {
+			// Release the reservation on every non-settled path (resolve/write
+			// failure or missing path) so it cannot pin relocation readiness;
+			// complete() is idempotent, so the success path's call is not repeated.
+			if (allocation?.lease) {
+				try {
+					await allocation.lease.complete();
+				} catch {
+					// Already logged above when the artifact reference was at stake.
+				}
+			}
 		}
 		return preview;
 	}

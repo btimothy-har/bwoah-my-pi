@@ -1,12 +1,28 @@
 import { $ } from "bun";
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { type } from "@oh-my-pi/omptype";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import {
+	createAgentSession,
+	type CreateAgentSessionResult,
+	type ExtensionFactory,
+} from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -1266,4 +1282,257 @@ describe("nested clone beneath a discard parent", () => {
 			await fs.rm(repoRoot, { recursive: true, force: true });
 		}
 	});
+});
+
+describe("isolated clone prepared-hook rebinding (actual runner)", () => {
+	// Mock only the provider so this exercises the mandatory clone's real binding path.
+	const MOCK_API_SOURCE = "test/structured-subagent-isolated-hooks";
+	const HOOK_MARKER = ".prepared-hook-ran";
+	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "OMP_WORKTREE_DIR"] as const;
+
+	interface HookObservation {
+		cwd: string;
+		activeTools: string[];
+		registeredTools: string[];
+	}
+
+	const HOOK_PROBE_AGENT: AgentDefinition = {
+		name: "hook-probe",
+		description: "Prepared-hook probe",
+		systemPrompt: "Probe the clone.",
+		source: "bundled",
+	};
+
+	let savedEnv: Record<string, string | undefined> = {};
+	let root = "";
+	let repoRoot = "";
+	let worktreesRoot = "";
+	let authStorage: AuthStorage | undefined;
+	let modelRegistry: ModelRegistry;
+	let observations: HookObservation[];
+	let parentSessions: AgentSession[];
+
+	function restoreEnvValue(key: string, value: string | undefined): void {
+		if (value === undefined) {
+			delete process.env[key];
+			delete Bun.env[key];
+			return;
+		}
+		process.env[key] = value;
+		Bun.env[key] = value;
+	}
+
+	beforeEach(async () => {
+		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-hooks-"));
+		const home = path.join(root, "home");
+		await fs.mkdir(home, { recursive: true });
+		restoreEnvValue("HOME", home);
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		setAgentDir(path.join(home, ".omp", "agent"));
+		worktreesRoot = path.join(root, "wt");
+		restoreEnvValue("OMP_WORKTREE_DIR", worktreesRoot);
+		setWorktreesDir(worktreesRoot);
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		registerMockApi(MOCK_API_SOURCE);
+
+		repoRoot = path.join(root, "repo");
+		await fs.mkdir(repoRoot, { recursive: true });
+		await $`git init -q -b main`.cwd(repoRoot);
+		await $`git config user.email repro@example.com`.cwd(repoRoot);
+		await $`git config user.name Repro`.cwd(repoRoot);
+		await Bun.write(path.join(repoRoot, "seed.txt"), "seed\n");
+		await $`git add seed.txt`.cwd(repoRoot);
+		await $`git commit -q -m seed`.cwd(repoRoot);
+
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("mock", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		observations = [];
+		parentSessions = [];
+	});
+
+	afterEach(async () => {
+		await AgentLifecycleManager.global().dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+		for (const parent of parentSessions.splice(0)) await parent.dispose();
+		unregisterCustomApis(MOCK_API_SOURCE);
+		authStorage?.close();
+		setWorktreesDir(undefined);
+		for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
+		__resetDirsFromEnvForTests();
+		if (root) await removeWithRetries(root);
+	});
+
+	// The parent never emits session_start; only fresh and revived child binds record.
+	function hookProbeFactory(): ExtensionFactory {
+		return pi => {
+			pi.registerTool({
+				name: "hooktool",
+				label: "hooktool",
+				description: "Extension-registered probe that must stay inert inside restricted clones",
+				parameters: type({}),
+				async execute() {
+					throw new Error("hooktool must never execute");
+				},
+			});
+			pi.on("session_start", async (_event, ctx) => {
+				await pi.setActiveTools([...pi.getActiveTools(), "todo", "hooktool", "mcp__ambient__probe"]);
+				observations.push({
+					cwd: ctx.cwd,
+					activeTools: pi.getActiveTools(),
+					registeredTools: pi.getAllTools().map(tool => tool.name),
+				});
+				await Bun.write(path.join(ctx.cwd, HOOK_MARKER), ctx.cwd);
+			});
+		};
+	}
+
+	// Structured dispatch consumes ToolSession, not the SDK's AgentSession.
+	function toolSessionFor(
+		parent: AgentSession,
+		buses: Pick<CreateAgentSessionResult, "eventBus" | "subagentEventBus">,
+	): ToolSession {
+		return {
+			get cwd() {
+				return parent.sessionManager.getCwd();
+			},
+			hasUI: false,
+			settings: parent.settings,
+			authStorage,
+			modelRegistry,
+			eventBus: buses.eventBus,
+			subagentEventBus: buses.subagentEventBus,
+			getSessionFile: () => parent.sessionManager.getSessionFile() ?? null,
+			getSessionSpawns: () => "*",
+			getSessionAgents: () => parent.getSessionAgents(),
+			getModelString: () => (parent.model ? `${parent.model.provider}/${parent.model.id}` : undefined),
+			getPlanModeState: () => parent.getPlanModeState(),
+			resolveRelatedWorkspace: parent.resolveRelatedWorkspace,
+			effectiveExtensionRoots: () => parent.effectiveExtensionRoots,
+			extensionPaths: parent.extensionPaths,
+			preparedExtensions: parent.preparedExtensions,
+			customToolPaths: [],
+		} as unknown as ToolSession;
+	}
+
+	async function spawnHookProbe(agent: AgentDefinition): Promise<string> {
+		if (!authStorage) throw new Error("beforeEach did not complete");
+		const primary = createMockModel({
+			handler: context =>
+				(context.tools ?? []).some(tool => tool.name === "yield")
+					? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+					: { content: ["label"] },
+		});
+		const prewalkTarget = createMockModel({ id: "mock-prewalk-model", handler: () => ({ content: ["unused"] }) });
+		const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [
+			primary,
+			prewalkTarget,
+			...catalogAvailable(kind),
+		]);
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+
+		const created = await createAgentSession({
+			cwd: repoRoot,
+			agentDir: path.join(root, "agent"),
+			authStorage,
+			modelRegistry,
+			model: primary,
+			settings: Settings.isolated({
+				"async.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": true,
+				"todo.reminders": false,
+				"advisor.enabled": false,
+				"task.agentIdleTtlMs": 0,
+				"isolation.backend": "rcopy",
+				modelRoles: { default: "mock/mock-model", smol: "mock/mock-prewalk-model" },
+			}),
+			sessionManager: SessionManager.inMemory(repoRoot),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			extensions: [hookProbeFactory()],
+		});
+		parentSessions.push(created.session);
+
+		const settled = await runStructuredSubagent({
+			session: toolSessionFor(created.session, created),
+			invocationKind: "task",
+			assignment: "Probe the clone.",
+			agent: agent.name,
+			model: "mock/mock-model",
+			identity: { id: "HookProbe" },
+			keepAlive: true,
+			enableIrc: false,
+			enableLsp: false,
+		});
+		expect(settled.result.exitCode).toBe(0);
+		expect(settled.result.cloneDisposition).toBe("discard");
+		return settled.result.id;
+	}
+
+	async function expectCloneCwd(observed: string): Promise<void> {
+		expect(path.resolve(observed)).not.toBe(path.resolve(repoRoot));
+		const realClone = await fs.realpath(observed);
+		const realWorktrees = await fs.realpath(worktreesRoot);
+		expect(realClone.startsWith(`${realWorktrees}${path.sep}`)).toBe(true);
+	}
+
+	it("rebinds trusted parent hooks at the clone cwd for fresh and same-process revived runs", async () => {
+		const id = await spawnHookProbe(HOOK_PROBE_AGENT);
+
+		expect(observations).toHaveLength(1);
+		const cloneCwd = observations[0]!.cwd;
+		await expectCloneCwd(cloneCwd);
+		expect(await Bun.file(path.join(cloneCwd, HOOK_MARKER)).exists()).toBe(true);
+		expect(await Bun.file(path.join(repoRoot, HOOK_MARKER)).exists()).toBe(false);
+		expect(await $`git status --porcelain=v1`.cwd(repoRoot).text()).toBe("");
+		expect(observations[0]!.activeTools).not.toContain("todo");
+		expect(observations[0]!.activeTools).not.toContain("hooktool");
+		expect(observations[0]!.registeredTools).not.toContain("hooktool");
+		expect(observations[0]!.activeTools.some(name => name.startsWith("mcp__"))).toBe(false);
+
+		await AgentLifecycleManager.global().park(id);
+		await AgentLifecycleManager.global().ensureLive(id);
+		expect(observations).toHaveLength(2);
+		expect(observations[1]!.cwd).toBe(cloneCwd);
+		expect(observations[1]!.activeTools).not.toContain("todo");
+		expect(observations[1]!.activeTools).not.toContain("hooktool");
+		await AgentLifecycleManager.global().release(id);
+	}, 30_000);
+
+	it("preserves the definition's explicit todo grant inside the clone, fresh and revived", async () => {
+		const id = await spawnHookProbe({ ...HOOK_PROBE_AGENT, tools: ["todo"] });
+
+		expect(observations).toHaveLength(1);
+		expect(observations[0]!.activeTools).toContain("todo");
+		expect(observations[0]!.activeTools).not.toContain("hooktool");
+		expect(observations[0]!.activeTools.some(name => name.startsWith("mcp__"))).toBe(false);
+
+		await AgentLifecycleManager.global().park(id);
+		await AgentLifecycleManager.global().ensureLive(id);
+		expect(observations).toHaveLength(2);
+		expect(observations[1]!.activeTools).toContain("todo");
+		await AgentLifecycleManager.global().release(id);
+	}, 30_000);
+
+	it("preserves the prewalk todo gate for the clone's trusted hooks", async () => {
+		await spawnHookProbe({ ...HOOK_PROBE_AGENT, prewalk: true });
+
+		expect(observations).toHaveLength(1);
+		// Armed prewalk needs todo without a definition grant; custom tools stay excluded.
+		expect(observations[0]!.activeTools).toContain("todo");
+		expect(observations[0]!.activeTools).not.toContain("hooktool");
+	}, 30_000);
 });

@@ -1,6 +1,10 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type OutputArtifactError,
+	type OutputArtifactLease,
+	OutputSink,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
 import {
@@ -77,6 +81,8 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/** Managed allocation lease; the sink resolves the open path lazily and settles it on close. */
+	artifactLease?: OutputArtifactLease;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -448,6 +454,7 @@ export async function executeWithKernelBase<
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
+		artifactLease: options?.artifactLease,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),

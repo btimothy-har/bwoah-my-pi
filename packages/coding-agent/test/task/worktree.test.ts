@@ -18,6 +18,14 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import {
+	ISOLATION_OWNER_FILE,
+	readIsolationCleanup,
+	readIsolationOwner,
+	writeIsolationCleanup,
+	type IsolationCleanupRecord,
+	type IsolationOwner,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -285,6 +293,114 @@ describe("worktree isolation helpers", () => {
 					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 				}
 				setWorktreesDir(undefined);
+			}
+		});
+
+		// Registration ordering regression: the run's disposition and the owner
+		// identity must be durable in the real on-disk metadata BEFORE isoStart
+		// materializes the slot — for the first candidate and every fallback —
+		// so a crash mid-setup never leaves a discard run looking preservable.
+		// The seam reads the actual files from inside the mocked isoStart.
+		it("persists the discard disposition before every backend candidate starts", async () => {
+			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
+			vi.spyOn(natives, "isoResolve").mockReturnValue({
+				kind: natives.IsoBackendKind.Btrfs,
+				candidates: [natives.IsoBackendKind.Btrfs, natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			vi.spyOn(natives, "isoIsUnavailableError").mockImplementation(message =>
+				message.startsWith("ISO_UNAVAILABLE:"),
+			);
+			const seam: {
+				backend: Parameters<typeof natives.isoStart>[0];
+				record: IsolationCleanupRecord | undefined;
+				owner: IsolationOwner | undefined;
+			}[] = [];
+			vi.spyOn(natives, "isoStart").mockImplementation(async (backend, _source, mergedDir) => {
+				const baseDir = path.dirname(mergedDir);
+				seam.push({
+					backend,
+					record: await readIsolationCleanup(baseDir),
+					owner: await readIsolationOwner(baseDir),
+				});
+				if (seam.length === 1) throw unavailable;
+			});
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-discard-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			try {
+				const handle = await ensureIsolation(repo, "discard-registration", undefined, "discard");
+
+				expect(seam.map(entry => entry.backend)).toEqual([
+					natives.IsoBackendKind.Btrfs,
+					natives.IsoBackendKind.Rcopy,
+				]);
+				for (const entry of seam) {
+					expect(entry.record?.disposition).toBe("discard");
+					expect(entry.record?.state).toBe("active");
+					expect(entry.owner?.pid).toBe(process.pid);
+					expect(entry.owner?.id).toBe("discard-registration");
+				}
+				// Each candidate is its own generation; the surviving one is the handle's.
+				expect(seam[0]?.record?.generation).not.toBe(seam[1]?.record?.generation);
+				expect(seam[1]?.record?.generation).toBe(handle.generation);
+				expect(handle.fellBack).toBe(true);
+				await cleanupIsolation(handle, { kind: "discard" });
+			} finally {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			}
+		});
+
+		// Stale-slot reclaim: a finished, teardown-authorized previous generation
+		// is removed and the NEW generation re-registered wholesale — with the
+		// new run's disposition, not inherited from the stale record.
+		it("re-registers a reclaimed stale slot with the new run's disposition", async () => {
+			vi.spyOn(natives, "isoResolve").mockReturnValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			const seam: (IsolationCleanupRecord | undefined)[] = [];
+			vi.spyOn(natives, "isoStart").mockImplementation(async (_backend, _source, mergedDir) => {
+				seam.push(await readIsolationCleanup(path.dirname(mergedDir)));
+			});
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-stale-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			try {
+				// Run 1 (default disposition) establishes the deterministic slot.
+				const first = await ensureIsolation(repo, "stale-slot-reclaim");
+				expect(seam[0]?.disposition).toBe("preserve");
+				const baseDir = path.dirname(first.mergedDir);
+				// Simulate its completed release: ready + explicit authorization,
+				// owner marker gone (e.g. trash relocation already removed it). A
+				// respawn of the same id may reclaim the slot.
+				await writeIsolationCleanup(baseDir, {
+					...(await readIsolationCleanup(baseDir))!,
+					state: "ready",
+					authorization: { kind: "explicit" },
+				});
+				await fs.rm(path.join(baseDir, ISOLATION_OWNER_FILE), { force: true });
+
+				const second = await ensureIsolation(repo, "stale-slot-reclaim", undefined, "discard");
+
+				expect(second.generation).not.toBe(first.generation);
+				expect(seam).toHaveLength(2);
+				expect(seam[1]?.generation).toBe(second.generation);
+				expect(seam[1]?.disposition).toBe("discard");
+				await cleanupIsolation(second, { kind: "discard" });
+			} finally {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			}
 		});
 

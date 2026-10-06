@@ -27,7 +27,7 @@ import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, normalizePathForComparison, Serial, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	currentIsolationClaim,
 	isIsolationOwnerLive,
@@ -40,6 +40,7 @@ import {
 	writeIsolationCleanup,
 	writeIsolationOwner,
 	type IsolationCleanupRecord,
+	type IsolationOwner,
 } from "./isolation-ownership";
 /**
  * Directories inside an isolation wrapper holding the merged working view.
@@ -462,16 +463,21 @@ async function claimForTeardown(
 	dir: string,
 	generation: string,
 ): Promise<IsolationCleanupRecord | undefined> {
+	// Building the current-process claim probes the process start token (slow
+	// I/O): capture it before waiting on the root lease, not inside the
+	// section, and reuse it for the same-process liveness check below.
+	const claim = await currentIsolationClaim();
+	const currentProcessToken = claim.startToken ?? null;
 	return withIsolationMetadataLock(
 		root,
 		async () => {
 			const current = await readIsolationCleanup(dir).catch(() => undefined);
 			if (!current || current.generation !== generation) return undefined;
-			if (current.claim && (await isIsolationOwnerLive(current.claim))) return undefined;
+			if (current.claim && (await isIsolationOwnerLive(current.claim, currentProcessToken))) return undefined;
 			await writeIsolationCleanup(dir, {
 				...current,
 				state: inTrash(root, dir) ? "trash" : "deleting",
-				claim: await currentIsolationClaim(),
+				claim,
 			});
 			return current;
 		},
@@ -599,13 +605,55 @@ function isLockContention(error: unknown): boolean {
 	return error instanceof Error && error.message.includes("Failed to acquire lock");
 }
 
-/** Metadata lock over the worktree root; `options` forwards to the file lock (e.g. `{ retries: 1 }` for background skips). */
+/**
+ * In-process admission queue per canonical worktree root, ahead of the
+ * cross-process OS lease. Local sections for one root run FIFO and never
+ * overlap — including callers that spell the same existing root through a
+ * symlink alias — while distinct roots progress independently. `Serial`
+ * chains each section off its predecessor's settlement, so a failed section
+ * (or failed acquisition) releases the lease and never poisons later work.
+ */
+interface RootLockQueue {
+	serial: Serial;
+	/** Admissions that reserved a queue slot and have not yet settled. */
+	pending: number;
+}
+
+const rootLockQueues = new Map<string, RootLockQueue>();
+
+/**
+ * Metadata lock over the worktree root; `options` forwards to the file lock
+ * (e.g. `{ retries: 1 }` for background skips). Both the queue key and the OS
+ * lease stem use the same canonical root spelling so aliases cannot split
+ * either serialization layer.
+ *
+ * A `{ retries: 1 }` call is a background skip: when any local section owns
+ * or awaits this root it rejects immediately with the same contention
+ * classification the OS lease produces, instead of queueing behind foreground
+ * work (and instead of running later, which would reorder the pass). With no
+ * local contention it reserves a slot and performs exactly one OS attempt.
+ */
 export function withIsolationMetadataLock<T>(
 	root: string,
 	fn: () => Promise<T>,
 	options?: { retries?: number },
 ): Promise<T> {
-	return withFileLock(path.join(root, ISOLATION_GC_LOCK_STEM), fn, options);
+	const canonical = normalizePathForComparison(root);
+	const existing = rootLockQueues.get(canonical);
+	if (options?.retries === 1 && existing !== undefined) {
+		return Promise.reject(
+			new Error(`Failed to acquire lock for ${path.join(canonical, ISOLATION_GC_LOCK_STEM)} after 1 attempts`),
+		);
+	}
+	const queue = existing ?? { serial: new Serial(), pending: 0 };
+	rootLockQueues.set(canonical, queue);
+	queue.pending += 1;
+	return queue.serial
+		.run(() => withFileLock(path.join(canonical, ISOLATION_GC_LOCK_STEM), fn, options))
+		.finally(() => {
+			queue.pending -= 1;
+			if (queue.pending === 0 && rootLockQueues.get(canonical) === queue) rootLockQueues.delete(canonical);
+		});
 }
 
 /** The managed isolation wrapper containing `dir`, when `dir` lives inside one. */
@@ -620,10 +668,17 @@ export function managedSourceWrapper(root: string, dir: string): string | undefi
 }
 
 interface SlotParams {
-	id: string;
+	/**
+	 * Prepared current-process identity, captured by the caller before any
+	 * lock wait: publishing it and probing the start token are slow I/O that
+	 * must not run under the lease. `owner.id` names the task.
+	 */
+	owner: IsolationOwner;
 	generation: string;
 	backend: number;
 	sourceBaseDir: string | undefined;
+	/** Disposition of the NEW generation, persisted at initial registration. */
+	disposition: IsolationCleanupRecord["disposition"];
 }
 
 /**
@@ -639,10 +694,11 @@ export async function claimSlotForNewGeneration(
 	baseDir: string,
 	params: SlotParams,
 ): Promise<IsolationCleanupRecord | undefined> {
+	const currentProcessToken = params.owner.startToken ?? null;
 	return withIsolationMetadataLock(root, async () => {
 		const existing = await readIsolationCleanup(baseDir).catch(() => undefined);
 		if (existing) {
-			const stale = await findReclaimableOccupant(root, baseDir, existing);
+			const stale = await findReclaimableOccupant(root, baseDir, existing, currentProcessToken);
 			if (stale) return stale;
 			const owner = await readIsolationOwner(baseDir).catch(() => undefined);
 			throw new Error(
@@ -657,7 +713,7 @@ export async function claimSlotForNewGeneration(
 		// persist the authorization so removeAuthorizedWrapper can act on it.
 		if ((await findMergedDir(baseDir)) !== undefined) {
 			const owner = await readIsolationOwner(baseDir).catch(() => undefined);
-			if (owner && (await isIsolationOwnerLive(owner))) {
+			if (owner && (await isIsolationOwnerLive(owner, currentProcessToken))) {
 				throw new Error(
 					`isolation slot ${baseDir} is occupied by a live legacy sandbox owned by pid ${owner.pid}` +
 						`; the owning process must stop it first (or use \`omp worktree clear --all\`)` +
@@ -688,11 +744,11 @@ async function registerIsolationGenerationUnlocked(baseDir: string, params: Slot
 		generation: params.generation,
 		backend: params.backend,
 		detached: false,
-		disposition: "preserve",
+		disposition: params.disposition,
 		...(params.sourceBaseDir ? { sourceBaseDir: params.sourceBaseDir } : {}),
 		state: "active",
 	});
-	await writeIsolationOwner(baseDir, params.id);
+	await writeIsolationOwner(baseDir, params.owner);
 }
 
 /**
@@ -719,14 +775,15 @@ async function findReclaimableOccupant(
 	root: string,
 	baseDir: string,
 	existing: IsolationCleanupRecord,
+	currentProcessToken?: string | null,
 ): Promise<IsolationCleanupRecord | undefined> {
 	if (!existing.authorization) return undefined;
 	if (existing.state !== "ready" && existing.state !== "deleting" && existing.state !== "trash") return undefined;
-	if (existing.claim && (await isIsolationOwnerLive(existing.claim))) return undefined;
+	if (existing.claim && (await isIsolationOwnerLive(existing.claim, currentProcessToken))) return undefined;
 	const owner = await readIsolationOwner(baseDir).catch(() => undefined);
 	// A trash relocation may have already removed the owner marker; the
 	// authorization was validated when the entry was marked ready.
-	if (owner && (await isIsolationOwnerLive(owner))) return undefined;
+	if (owner && (await isIsolationOwnerLive(owner, currentProcessToken))) return undefined;
 	if (!owner && !inTrash(root, baseDir) && existing.state === "ready") {
 		// Owner marker missing at the original path is unknown ownership
 		// unless evidence was already verified for this generation.

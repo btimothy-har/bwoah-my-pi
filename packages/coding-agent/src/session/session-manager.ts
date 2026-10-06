@@ -30,7 +30,7 @@ import {
 import type { StructuredSubagentSchemaMode, SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
 import type { ManagedSubagentExecution } from "../task/types";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
-import { ArtifactManager } from "./artifacts";
+import { type ArtifactAllocation, ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
@@ -117,6 +117,8 @@ import { recordSessionRecap, recordSessionTitle } from "./session-index";
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
+/** `details.kind` of the metadata-only marker staged when foreign entries were adopted past the active leaf. */
+const FOREIGN_ADOPTION_BRANCH_MARKER = "foreign-adoption-branch";
 /**
  * Read-back-and-retry passes one full rewrite makes after meeting another
  * writer's entries. Each pass re-reads the file, so only a writer that appends
@@ -188,6 +190,26 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
  * Failures are logged, never thrown.
  */
 export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+	try {
+		await copySessionArtifactsChecked(sourceSessionFile, destinationSessionFile);
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to copy session artifacts", {
+				sourceArtifactsDir: artifactsDirectoryFor(sourceSessionFile),
+				destinationArtifactsDir: artifactsDirectoryFor(destinationSessionFile),
+				error: toError(error).message,
+			});
+		}
+	}
+}
+
+/**
+ * Throwing variant of {@link copySessionArtifacts} for managed relocation
+ * chains: recovery readiness must reflect the seed's real outcome, never a
+ * best-effort copy that silently fell short. A missing source directory is
+ * still success (nothing to seed); every other failure rejects.
+ */
+async function copySessionArtifactsChecked(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
 	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
@@ -205,13 +227,8 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 			});
 		}
 	} catch (error) {
-		if (!isEnoent(error)) {
-			logger.warn("Failed to copy session artifacts", {
-				sourceArtifactsDir,
-				destinationArtifactsDir,
-				error: toError(error).message,
-			});
-		}
+		if (isEnoent(error)) return;
+		throw error;
 	}
 }
 
@@ -786,6 +803,36 @@ export interface SessionPersistenceNotice {
 }
 
 /**
+ * A storage-only relocation of this manager's session file, delivered exactly
+ * once at commit to current subscribers via {@link SessionManager.onSessionFileChanged}.
+ *
+ * Distinct from {@link SessionPersistenceNotice}: notices are user-facing
+ * warnings replayed to every late subscriber, while this event is the
+ * transactional hook owners (registry, live children, roster) use to rebind
+ * the exact references of the continuing tree. It is NOT a conversation
+ * change: `"recovery"` minted a sibling with a new session id and ancestry
+ * but the conversation continues; `"move"` carried the same session (and id)
+ * to a new directory. No history is replayed — subscribers initialize from
+ * current state explicitly.
+ */
+export interface SessionFileChange {
+	/** The session file in use before the transition. */
+	readonly from: string;
+	/** The session file in use now. */
+	readonly to: string;
+	/** Monotonic per-manager transition counter. */
+	readonly generation: number;
+	readonly reason: "recovery" | "move";
+	/**
+	 * Settles once the transition's artifact seed/relocation finished; rejects
+	 * when it failed. Consumers publishing into the artifacts tree must join
+	 * this (success or failure) before touching the new root, and must not
+	 * treat a resolved-but-failed copy as proof the old tree's bytes moved.
+	 */
+	readonly ready: Promise<void>;
+}
+
+/**
  * Thrown by {@link SessionManager.forkFrom} when the fork source is missing.
  * The CLI maps this to a clean session-resolution failure at its own boundary
  * (this module must not import `main.ts`, where `SessionResolutionError` lives).
@@ -942,9 +989,21 @@ export class SessionManager {
 	#sessionFileClaim: { sessionFile: string; release: (() => void) | undefined } | undefined;
 	/**
 	 * The background artifact copy a move to `sessionFile` started (see
-	 * {@link #moveOffSessionFile}). Never rejects.
+	 * {@link #moveOffSessionFile}). Its `done` is the tracked transition
+	 * promise: it REJECTS when the seed failed, so managed readiness never
+	 * reports a best-effort copy as success.
 	 */
 	#pendingArtifactCopy: { sessionFile: string; done: Promise<void> } | undefined;
+	/**
+	 * Chain of every root artifact transition (recovery seeds, in order:
+	 * A→B→C never starts C's seed before B's finished, and an explicit move
+	 * joins the tail before renaming the tree). Rejects when the latest
+	 * transition failed; flush/close join the full chain.
+	 */
+	#artifactTransitionTail: Promise<void> = Promise.resolve();
+	/** Subscribers to storage-only session file relocations (no replay). */
+	#sessionFileChangeCallbacks = new Set<(change: SessionFileChange) => void>();
+	#sessionFileGeneration = 0;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#executionCwd = cwd;
@@ -1103,10 +1162,33 @@ export class SessionManager {
 			this.#index.insert(entry);
 			adopted++;
 		}
-		this.#index.setLeaf(leaf);
-		this.#expectedDiskSize = diskSize;
-		if (adopted > 0)
+		if (adopted > 0) {
+			// The loader reconstructs the active leaf from the last PHYSICAL
+			// journal entry, so restoring the in-memory leaf alone is lost on a
+			// close/reopen that sees no later local append: stage a metadata-only
+			// branch marker (empty summary — never sent to the model, same
+			// pattern as discardEntryDurably) as a child of the preserved leaf,
+			// physically last, and let the owning retried rewrite publish it
+			// durably. #recordEntry would immediately invoke persistence and
+			// recursively supersede the rewrite this adoption is repairing, so
+			// insert directly and defer the notification until durability.
+			const marker: BranchSummaryEntry = {
+				type: "branch_summary",
+				id: generateId(this.#index),
+				parentId: leaf,
+				timestamp: nowIso(),
+				fromId: leaf ?? "root",
+				summary: "",
+				details: { kind: FOREIGN_ADOPTION_BRANCH_MARKER },
+			};
+			this.#entries.push(marker);
+			this.#index.insert(marker);
+			this.#pendingDurabilityNotifications.push(marker);
 			logger.warn("Kept session entries another writer added", { sessionFile: this.#sessionFile, adopted });
+		} else {
+			this.#index.setLeaf(leaf);
+		}
+		this.#expectedDiskSize = diskSize;
 	}
 
 	/**
@@ -1200,13 +1282,49 @@ export class SessionManager {
 		this.#expectedDiskSize = null;
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
-		this.#artifactManager = null;
-		this.#artifactManagerSessionFile = null;
-		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
+		// Chain the seed behind every earlier transition (A→B→C never starts C's
+		// seed before B's finished, so C is never seeded from an incomplete B),
+		// and keep the SAME artifact manager object: rebind retargets it
+		// synchronously, preserving the id high-water mark and every outstanding
+		// allocation, so adopting children and handed-out leases follow the
+		// continuing tree instead of a fresh allocator rescanning the new root.
+		const seed = this.#trackArtifactTransition(() => copySessionArtifactsChecked(from, to));
+		this.#pendingArtifactCopy = { sessionFile: to, done: seed };
+		if (this.#artifactManager && this.#artifactManagerSessionFile === from) {
+			this.#artifactManager.rebind(to.slice(0, -JSONL_SUFFIX_LENGTH), seed);
+			this.#artifactManagerSessionFile = to;
+		}
 		this.#rememberBreadcrumb(this.getSessionHome(), to);
 		this.#claimSessionFile();
 		this.#notifyPersistenceNotice({ reason, from, to });
+		this.#notifySessionFileChanged({
+			from,
+			to,
+			generation: ++this.#sessionFileGeneration,
+			reason: "recovery",
+			ready: seed,
+		});
 		return to;
+	}
+
+	/**
+	 * Chain a root artifact transition behind every previous one and join it
+	 * from flush/close. The returned promise (and the stored tail) rejects when
+	 * THIS transition's work rejects; an earlier failure never blocks a later
+	 * transition from running.
+	 */
+	#trackArtifactTransition(work: () => Promise<void>): Promise<void> {
+		const done = this.#artifactTransitionTail.catch(() => undefined).then(work);
+		// Attach handling now so a transition nobody flushed/closed yet never
+		// reports an unhandled rejection; observers (flush/close, the
+		// SessionFileChange readiness, ArtifactManager) still see it reject.
+		void done.catch(() => undefined);
+		this.#artifactTransitionTail = done;
+		return done;
+	}
+
+	#notifySessionFileChanged(change: SessionFileChange): void {
+		for (const observer of this.#sessionFileChangeCallbacks) this.#invokePersistenceObserver(observer, change);
 	}
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
@@ -2055,6 +2173,10 @@ export class SessionManager {
 		const pendingCopy = this.#pendingArtifactCopy;
 		this.#artifactManager = new ArtifactManager(
 			sessionFile.slice(0, -JSONL_SUFFIX_LENGTH),
+			// Readiness rejects truthfully when the seed failed: allocations and
+			// lookups against this root fail closed instead of proceeding on an
+			// unseeded directory. The failure is also reported through the
+			// SessionFileChange readiness and the flush/close transition chain.
 			pendingCopy?.sessionFile === sessionFile ? pendingCopy.done : undefined,
 		);
 		this.#artifactManagerSessionFile = sessionFile;
@@ -2134,6 +2256,7 @@ export class SessionManager {
 	}
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		const previousSessionId = this.#sessionId;
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
@@ -2154,8 +2277,22 @@ export class SessionManager {
 		this.#titleSource = snapshot.titleSource;
 		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
 		this.#hasTitleSlot = snapshot.hasTitleSlot;
-		this.#artifactManager = null;
-		this.#artifactManagerSessionFile = null;
+		// A rollback of the SAME continuing session (rollbackMove) must keep the
+		// shared artifact manager object: adopted children and outstanding
+		// allocations hold it, and resetting to a fresh allocator would split
+		// the id space. Only an actual session switch resets it.
+		const restoredArtifactsDir = artifactsDirectoryFor(snapshot.sessionFile);
+		if (
+			this.#artifactManager &&
+			snapshot.sessionId === previousSessionId &&
+			restoredArtifactsDir !== null &&
+			this.#artifactManager.dir === restoredArtifactsDir
+		) {
+			this.#artifactManagerSessionFile = snapshot.sessionFile ?? null;
+		} else {
+			this.#artifactManager = null;
+			this.#artifactManagerSessionFile = null;
+		}
 		this.#adoptedArtifactManager = null;
 
 		// Home-keyed: the restored header carries the canonical home even when
@@ -2375,6 +2512,89 @@ export class SessionManager {
 	}
 
 	/**
+	 * Subscribe to storage-only relocations of this manager's session file
+	 * ({@link SessionFileChange}). Delivered exactly once at commit; nothing is
+	 * replayed, so initialize from current state explicitly if needed. This is
+	 * NOT a conversation-change signal: the same continuing tree keeps running.
+	 */
+	onSessionFileChanged(cb: (change: SessionFileChange) => void): () => void {
+		this.#sessionFileChangeCallbacks.add(cb);
+		return () => {
+			this.#sessionFileChangeCallbacks.delete(cb);
+		};
+	}
+
+	/**
+	 * Storage-only rebase of this session's file onto `sessionFile`: the SAME
+	 * session (id, header, home, execution binding, entries) continues at the
+	 * new path. Used when the owning tree's root relocated (recovery or move)
+	 * and this child's transcript must follow it. Unlike {@link moveTo} nothing
+	 * about the workspace changes; unlike recovery, no sibling id is minted.
+	 * The old bytes stay in place — the old root may belong to another owner —
+	 * and the full current journal is republished at the destination before the
+	 * writer reopens there.
+	 */
+	async rebaseSessionFile(sessionFile: string, reason: SessionFileChange["reason"] = "recovery"): Promise<void> {
+		if (!this.#persist) throw new Error("Cannot rebase a non-persistent session file.");
+		const from = this.#sessionFile;
+		if (!from) throw new Error("Cannot rebase a session that has no session file.");
+		const to = path.resolve(sessionFile);
+		if (path.resolve(from) === to) return;
+		if (this.#released) throw new Error("Cannot rebase a session after terminal release.");
+		this.#sessionFileRelocating = { source: from, dest: to };
+		try {
+			// Repoint FIRST: whatever fails below, this manager never reopens or
+			// appends at the vacated old path again — after a rebase failure the
+			// old root may belong to a foreign owner, so later writes retry the
+			// full in-memory journal at the new root (or stay latched).
+			this.#sessionFile = to;
+			this.#sessionFileClaim?.release?.();
+			this.#sessionFileClaim = undefined;
+			const existed = this.#storage.existsSync(from);
+			this.#storage.ensureDirSync(path.dirname(to));
+			await this.#drainAndCloseWriter();
+			this.#clearDiskError();
+			if (existed) {
+				// Republish the whole journal at the new path: appends that raced
+				// the relocation window went to the old path, and a root seed may
+				// already have placed a stale copied prefix at `to`. The expected
+				// size guards exactly that seeded/prior body; a mismatch falls
+				// into the normal read-back-and-retry recovery.
+				this.#expectedDiskSize = this.#storage.existsSync(to) ? this.#storage.statSync(to).size : null;
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#forceFileCreation = true;
+				this.#claimSessionFile();
+				await this.#rewriteAtomically();
+			}
+			// This child's own artifact stem follows its transcript; an adopted
+			// (shared, parent-owned) manager is rebound by the owning root
+			// instead. The seed is chained onto every earlier transition.
+			const seed = this.#trackArtifactTransition(() => copySessionArtifactsChecked(from, to));
+			this.#pendingArtifactCopy = { sessionFile: to, done: seed };
+			if (this.#artifactManager && this.#artifactManagerSessionFile === from) {
+				this.#artifactManager.rebind(to.slice(0, -JSONL_SUFFIX_LENGTH), seed);
+				this.#artifactManagerSessionFile = to;
+			}
+			this.#notifySessionFileChanged({
+				from,
+				to,
+				generation: ++this.#sessionFileGeneration,
+				reason,
+				ready: seed,
+			});
+		} catch (error) {
+			// Fail closed at the NEW root: latch the failure so a later append
+			// takes the full-rewrite path at `to` (self-healing when transient)
+			// instead of ever writing the vacated old path again.
+			this.#noteDiskFailure(error);
+			throw error;
+		} finally {
+			this.#sessionFileRelocating = null;
+		}
+	}
+
+	/**
 	 * Start a new session and persist its header before returning.
 	 *
 	 * The durable empty boundary prevents a later process on another terminal
@@ -2481,6 +2701,7 @@ export class SessionManager {
 		}
 
 		let sessionFileExisted = false;
+		let movedFromSessionFile: string | undefined;
 		// Track source+dest for concurrent completed appends during relocation
 		// (see `#sessionFileRelocating`). Existence of either path decides the
 		// live write target — not a `#diskEpoch` bump, which would cancel any
@@ -2508,6 +2729,13 @@ export class SessionManager {
 					newArtifactsDir !== null &&
 					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
+
+				// A recovery seed still copying into the current artifact tree must
+				// finish before the tree is renamed away: its destination would
+				// otherwise vanish mid-copy. A failed seed does not block an
+				// explicit move (the failure stays latched on the transition tail
+				// for flush/close).
+				await this.#artifactTransitionTail.catch(() => undefined);
 
 				let sessionMoved = false;
 				let artifactsRenamed = false;
@@ -2580,10 +2808,27 @@ export class SessionManager {
 				// holds no bytes this manager wrote, so a recreate-from-memory must
 				// publish against an absent file rather than a stale size.
 				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
-				this.#artifactManager = null;
-				this.#artifactManagerSessionFile = null;
+				// Keep the SAME shared artifact manager object across the move:
+				// the rename carried the whole artifact tree (open descriptors
+				// follow a renamed inode), so rebinding to the new directory needs
+				// no seed. Resetting to a fresh allocator would split the id space
+				// from adopted children holding this object.
+				if (this.#artifactManager && this.#artifactManagerSessionFile === oldSessionFile) {
+					if (artifactPathChanged && newArtifactsDir) {
+						// `carried` only on a verified whole-directory rename: open
+						// sinks' pinned paths then name the same inodes at the new
+						// root. A merged destination is copy semantics — outstanding
+						// allocations keep their old paths and settle by publication.
+						this.#artifactManager.rebind(newArtifactsDir, Promise.resolve(), { carried: artifactsRenamed });
+					}
+					this.#artifactManagerSessionFile = newSessionFile;
+				} else {
+					this.#artifactManager = null;
+					this.#artifactManagerSessionFile = null;
+				}
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
+				if (sessionPathChanged) movedFromSessionFile = oldSessionFile;
 			}
 
 			this.#executionCwd = resolvedCwd;
@@ -2614,6 +2859,17 @@ export class SessionManager {
 			}
 
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
+			if (movedFromSessionFile && this.#sessionFile) {
+				// The physical relocation already completed inline (session file
+				// rename plus artifact tree move above), so readiness is settled.
+				this.#notifySessionFileChanged({
+					from: movedFromSessionFile,
+					to: this.#sessionFile,
+					generation: ++this.#sessionFileGeneration,
+					reason: "move",
+					ready: Promise.resolve(),
+				});
+			}
 		} finally {
 			this.#sessionFileRelocating = null;
 		}
@@ -2753,7 +3009,16 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			await this.#storage.drain();
 		});
-		await this.#pendingArtifactCopy?.done;
+		// Join every artifact root transition (recovery seeds chained in order):
+		// flush must not return while a seed is still copying. A failed seed is
+		// reported by the SessionFileChange readiness and lease settlement; it
+		// is not a transcript durability failure, so it does not latch here.
+		await this.#artifactTransitionTail.catch(error => {
+			logger.warn("Session artifact relocation failed", {
+				sessionFile: this.#sessionFile,
+				error: toError(error).message,
+			});
+		});
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -2828,56 +3093,74 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		// Closing gives up this process's ownership claim; a later write reclaims it.
-		const claim = this.#sessionFileClaim;
-		claim?.release?.();
-		if (claim) claim.release = undefined;
-		// A prior `flushSync` can self-conflict with this manager's own
-		// unconfirmed deferred publish; drain despite the latch so that
-		// publish can still confirm before we give up on the transcript.
-		await this.#scheduleDiskWork(
-			async () => {
-				const hadWriter = this.#writer !== undefined;
-				await this.#closeWriterHandle();
-				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-					this.#fileIsCurrent = true;
-			},
-			{ ignorePriorError: true },
-		);
-		await this.#pendingArtifactCopy?.done;
-		await this.#dropIfEmptyAndNoDraft();
-		// Wait for any queued backing writes (IndexedSessionStorage per-path
-		// tail) to become durable so a graceful shutdown does not exit while
-		// a fire-and-forget publish is still on the wire.
-		await this.#scheduleDiskWork(
-			async () => {
-				await this.#storage.drain();
-			},
-			{ ignorePriorError: true },
-		);
-		if (
-			this.#diskFailure &&
-			this.#sessionFile &&
-			this.#storage.defersSyncPublish &&
-			!this.#entriesReleased &&
-			this.#shouldHaveSessionFile()
-		) {
-			// Deferred-publish only: a synchronous backend's drain() is a
-			// no-op, so any failure there is a genuine external conflict or a
-			// permanent write failure, not a self-race this retry can catch
-			// up on. seal() disabled the ordinary mid-life repair path, so
-			// close() issues the terminal write directly instead.
-			const operationError = this.#diskFailure;
-			const sessionFile = this.#sessionFile;
+		// The ownership claim is held through ALL terminal work below —
+		// writer close, artifact transition tail, storage drain, and the
+		// deferred authoritative publish — and released in `finally` against
+		// the CURRENT claim. Releasing early lets a contender claim the file
+		// while this manager is still writing, and a close-time recovery that
+		// moved to a sibling would leak that sibling's claim. A later write
+		// reclaims the current path (claim release is idempotent).
+		try {
+			// A prior `flushSync` can self-conflict with this manager's own
+			// unconfirmed deferred publish; drain despite the latch so that
+			// publish can still confirm before we give up on the transcript.
 			await this.#scheduleDiskWork(
 				async () => {
-					await this.#publishAuthoritativeBody(sessionFile, operationError);
-					this.#clearDiskError();
+					const hadWriter = this.#writer !== undefined;
+					await this.#closeWriterHandle();
+					if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+						this.#fileIsCurrent = true;
 				},
 				{ ignorePriorError: true },
-			).catch(() => undefined);
+			);
+			// Join every artifact root transition (chained recovery seeds) before
+			// the claim is released: a new owner scanning the sibling must see
+			// the seeded tree complete. Failures are reported by the change
+			// readiness/leases, not latched as transcript failures.
+			await this.#artifactTransitionTail.catch(error => {
+				logger.warn("Session artifact relocation failed", {
+					sessionFile: this.#sessionFile,
+					error: toError(error).message,
+				});
+			});
+			await this.#dropIfEmptyAndNoDraft();
+			// Wait for any queued backing writes (IndexedSessionStorage per-path
+			// tail) to become durable so a graceful shutdown does not exit while
+			// a fire-and-forget publish is still on the wire.
+			await this.#scheduleDiskWork(
+				async () => {
+					await this.#storage.drain();
+				},
+				{ ignorePriorError: true },
+			);
+			if (
+				this.#diskFailure &&
+				this.#sessionFile &&
+				this.#storage.defersSyncPublish &&
+				!this.#entriesReleased &&
+				this.#shouldHaveSessionFile()
+			) {
+				// Deferred-publish only: a synchronous backend's drain() is a
+				// no-op, so any failure there is a genuine external conflict or a
+				// permanent write failure, not a self-race this retry can catch
+				// up on. seal() disabled the ordinary mid-life repair path, so
+				// close() issues the terminal write directly instead.
+				const operationError = this.#diskFailure;
+				const sessionFile = this.#sessionFile;
+				await this.#scheduleDiskWork(
+					async () => {
+						await this.#publishAuthoritativeBody(sessionFile, operationError);
+						this.#clearDiskError();
+					},
+					{ ignorePriorError: true },
+				).catch(() => undefined);
+			}
+			if (this.#diskFailure) throw this.#diskFailure;
+		} finally {
+			const claim = this.#sessionFileClaim;
+			claim?.release?.();
+			if (claim) claim.release = undefined;
 		}
-		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
 	/**
@@ -3216,7 +3499,7 @@ export class SessionManager {
 		return this.#artifactManagerForSession();
 	}
 
-	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
+	async allocateArtifactPath(toolType: string): Promise<ArtifactAllocation> {
 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
 	}
 

@@ -289,6 +289,24 @@ export class AgentRegistry {
 		ref.activity = gist;
 	}
 
+	/**
+	 * Repoint a ref's session file in place after a storage-only relocation of
+	 * its owning tree (contested-write recovery, `/move`, or a parent's rebase
+	 * cascade). Unlike {@link attachSession} this also works on parked refs: no
+	 * live session is installed and lifecycle/adoption ownership, timers, and
+	 * in-flight CAS expectations are preserved because the exact ref object is
+	 * mutated, never replaced. Fails closed when `expected` no longer owns the
+	 * id. `null` clears the file (release paths).
+	 */
+	setSessionFile(id: string, sessionFile: string | null, expected: AgentRefExpectation): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		if (ref.sessionFile === sessionFile) return true;
+		ref.sessionFile = sessionFile;
+		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
 	attachSession(
 		id: string,
 		session: AgentSession,

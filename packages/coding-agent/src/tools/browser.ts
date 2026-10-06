@@ -36,6 +36,7 @@ import {
 	runInTab,
 } from "./browser/tab-supervisor";
 import { renderTabCall } from "./browser/tab-call";
+import { saveOutputArtifactText } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -596,14 +597,7 @@ async function runBrowser(
 
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */
 async function saveBrowserOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
-	try {
-		const alloc = await session.allocateOutputArtifact?.("browser-original");
-		if (!alloc?.path || !alloc.id) return undefined;
-		await Bun.write(alloc.path, fullText);
-		return alloc.id;
-	} catch {
-		return undefined;
-	}
+	return (await saveOutputArtifactText(session, "browser-original", fullText))?.id;
 }
 
 function describeBrowser(handle: BrowserHandle): string {

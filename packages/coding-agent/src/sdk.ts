@@ -157,6 +157,7 @@ import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { handleSessionFileChange } from "./registry/session-tree-migration";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -5047,6 +5048,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		// Storage-only relocations (contested-write recovery, /move) keep the
+		// conversation and every accepted turn; only the transcript's on-disk
+		// location changes. Repoint this session's own ref immediately, and for
+		// the root session rebase the exact owned descendant refs/live children
+		// onto the continuing tree (in place — adoption and release ownership
+		// survive, no unregister/re-register).
+		const ownedAgentRef = registeredAgentRef;
+		disposeCallbacks.add(
+			sessionManager.onSessionFileChanged(change => {
+				handleSessionFileChange(agentRegistry, resolvedAgentId, ownedAgentRef, change, {
+					root: agentKind === "main",
+				});
+			}),
+		);
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and

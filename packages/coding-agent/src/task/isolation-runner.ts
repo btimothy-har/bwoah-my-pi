@@ -210,8 +210,15 @@ export interface IsolatedRunOptions {
 	mergeMode: "patch" | "branch";
 	/** Never persist changes made in this clone. */
 	discard: boolean;
-	/** Output dir for `${agentId}.patch` artifacts (patch mode and branch-mode commit failures). */
+	/** Launch-time output dir for `${agentId}.patch` artifacts (patch mode and branch-mode commit failures). */
 	artifactsDir: string;
+	/**
+	 * Current owned artifact root of the continuing tree; consulted at every
+	 * publication point so recovery evidence is published and verified at the
+	 * live location (never a prefix-rewrite of previously verified evidence).
+	 * Falls back to {@link IsolatedRunOptions.artifactsDir} when unset.
+	 */
+	resolveArtifactsDir?: () => string | undefined;
 	/** Human description carried onto the branch commit (branch mode). */
 	description?: string;
 	/** Build a commit-message callback (`task.isolation.commits === "ai"`). */
@@ -492,6 +499,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
 	};
+	// Publication points resolve the CURRENT owned artifact root: a storage-only
+	// relocation of the owning session during the run made the launch-time dir
+	// part of a foreign tree, and evidence must be published (and recorded) at
+	// the live location rather than rewritten by path prefix afterwards.
+	const currentArtifactsDir = (): string => opts.resolveArtifactsDir?.() ?? opts.artifactsDir;
 	/**
 	 * Publish the final cumulative snapshot against the original baseline.
 	 * Never merges, deletes the clone, or creates a recovery branch; a capture
@@ -503,7 +515,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			const baseline = taskBaseline as WorktreeBaseline;
 			let patchResult: IsolationPatchArtifacts;
 			try {
-				patchResult = await writeIsolationPatch(handle.mergedDir, baseline, opts.artifactsDir, opts.agentId);
+				patchResult = await writeIsolationPatch(handle.mergedDir, baseline, currentArtifactsDir(), opts.agentId);
 			} catch (captureErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
@@ -579,26 +591,25 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	};
 	try {
 		if (!opts.discard && !taskBaseline) throw new Error("Isolation baseline is required to capture changes.");
-		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
+		// The discard disposition is persisted by the initial registration
+		// inside ensureIsolation, so a crash before execution already leaves a
+		// record that authorizes cleanup without any recovery evidence.
+		handle = await ensureIsolation(
+			opts.context.repoRoot,
+			opts.agentId,
+			opts.preferredBackend,
+			opts.discard ? "discard" : "preserve",
+		);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		// Persist the discard disposition before execution so a crash leaves a
-		// record that authorizes cleanup without any recovery evidence.
-		if (opts.discard) {
-			await withIsolationMetadataLock(path.resolve(getWorktreesDir()), async () => {
-				const record = await readIsolationCleanup(path.dirname(isolationDir)).catch(() => undefined);
-				if (record && record.disposition !== "discard") {
-					await writeIsolationCleanup(path.dirname(isolationDir), { ...record, disposition: "discard" });
-				}
-			});
-		}
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			discardChanges: opts.discard,
 			parentRepoRoot: opts.context.repoRoot,
 			worktree: isolationDir,
+			// The SDK rebinds prepared factories to the clone; source paths must not
+			// re-import the parent's extension graph or custom-tool registrations.
 			preloadedExtensionPaths: undefined,
-			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
@@ -637,7 +648,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// Backup before branch construction: the patch (not just the branch)
 			// must survive the clone's deletion, per the patch-only recovery rule.
 			try {
-				lastPublished = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				lastPublished = await writeIsolationPatch(isolationDir, baseline, currentArtifactsDir(), opts.agentId);
 				opts.preserveRecoveryFiles?.(lastPublished.artifacts);
 			} catch (backupErr) {
 				retainWorkspace = true;
@@ -676,7 +687,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
-					const patchResult = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+					const patchResult = await writeIsolationPatch(
+						isolationDir,
+						baseline,
+						currentArtifactsDir(),
+						opts.agentId,
+					);
 					return rememberAgentArtifacts({
 						...result,
 						...patchResultFields(patchResult),
@@ -702,7 +718,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// only in memory until written; the workspace goes away in `finally`.
 			try {
 				const nestedPatchPaths = await persistNestedPatches(
-					opts.artifactsDir,
+					currentArtifactsDir(),
 					opts.agentId,
 					commitResult?.nestedPatches ?? [],
 				);
@@ -732,7 +748,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (result.exitCode === 0) {
 			try {
-				const patchResult = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				const patchResult = await writeIsolationPatch(isolationDir, baseline, currentArtifactsDir(), opts.agentId);
 				// Evidence for oneShotSequence's snapshot authorization: a
 				// successful one-shot run must never fall back to `explicit`
 				// (evidence-free).
@@ -758,9 +774,10 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} finally {
 		/** Preserve the recovery story, then release the hold exactly once. */
 		const transferHoldToRecovery = async (): Promise<void> => {
+			const artifactsDir = currentArtifactsDir();
 			opts.preserveRecoveryFiles?.(
 				[`${opts.agentId}.jsonl`, `${opts.agentId}.md`].map(file => ({
-					path: path.join(opts.artifactsDir, file),
+					path: path.join(artifactsDir, file),
 				})),
 			);
 			await opts.releaseArtifactHold?.();

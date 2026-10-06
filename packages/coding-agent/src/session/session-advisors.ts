@@ -1325,6 +1325,11 @@ export class SessionAdvisors {
 				this.#advisorCostSnapshotBarrier
 					? Promise.all([this.#advisorRecorderClosed, this.#advisorCostSnapshotBarrier])
 					: this.#advisorRecorderClosed,
+				// Storage-only relocations of the owning session (contested-write
+				// recovery, /move, a live child's root-following rebase) retarget
+				// this advisor's transcript publication onto the continuing root;
+				// the recorder unsubscribes on close.
+				cb => this.#host.sessionManager.onSessionFileChanged(cb),
 			);
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,

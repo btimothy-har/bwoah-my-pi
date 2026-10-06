@@ -63,7 +63,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger, prompt, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { writeArtifact } from "./artifacts";
+import { type ArtifactAllocation, writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -895,7 +895,7 @@ export class SessionMaintenance {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
-		let reservedArtifact: { id?: string; path?: string } = {};
+		let reservedArtifact: ArtifactAllocation = {};
 		try {
 			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
 		} catch {
@@ -918,10 +918,27 @@ export class SessionMaintenance {
 		if (opts.toolResultsOnly && savings < config.minSavings) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
-		if (reservedArtifact.path && reservedArtifact.id) {
+		if (reservedArtifact.id && (reservedArtifact.path || reservedArtifact.lease)) {
+			const lease = reservedArtifact.lease;
 			try {
-				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+				// Resolve the write location only now: a storage-only recovery between
+				// reservation and publication redirects the write to the current root.
+				const artifactPath = lease ? await lease.resolvePath() : reservedArtifact.path;
+				if (!artifactPath) throw new Error("shake artifact allocation resolved no path");
+				await writeArtifact(artifactPath, this.#shakeArtifactText(regions));
+				// Publication succeeded; settle the lease so the finalized bytes land in
+				// the current root. A settlement failure must drop the artifact reference.
+				await lease?.complete();
 			} catch {
+				// Release the reservation even on failure so it cannot pin relocation
+				// readiness; complete() is idempotent and fails closed on missing bytes.
+				if (lease) {
+					try {
+						await lease.complete();
+					} catch {
+						// Settlement failure is already terminal for this artifact reference.
+					}
+				}
 				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
 				artifactId = undefined;
 				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));

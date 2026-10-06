@@ -5,11 +5,15 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import {
 	collectIsolationCleanup,
+	ISOLATION_GC_LOCK_STEM,
 	managedSourceWrapper,
 	removeAuthorizedWrapper,
+	withIsolationMetadataLock,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-cleanup";
 import {
 	currentIsolationClaim,
+	currentIsolationOwner,
+	isIsolationOwnerLive,
 	ISOLATION_CLEANUP_FILE,
 	ISOLATION_OWNER_FILE,
 	readIsolationCleanup,
@@ -18,7 +22,9 @@ import {
 	writeIsolationOwner,
 	type IsolationCleanupRecord,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
-import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { __internalsForTesting, normalizePathForComparison, setWorktreesDir } from "@oh-my-pi/pi-utils";
+
+const { tryAcquireLock, getLockPath } = __internalsForTesting;
 
 /**
  * Regression coverage for automatic reclamation: only wrappers carrying a
@@ -71,7 +77,7 @@ describe("isolation cleanup collector", () => {
 		await fs.mkdir(path.join(dir, "m", "sub"), { recursive: true });
 		await fs.mkdir(path.join(dir, "m", ".git"), { recursive: true });
 		await Bun.write(path.join(dir, "m", "work.txt"), "payload\n");
-		await writeIsolationOwner(dir, name.slice(1));
+		await writeIsolationOwner(dir, await currentIsolationOwner(name.slice(1)));
 		await writeIsolationCleanup(dir, record(overrides));
 		return dir;
 	}
@@ -247,5 +253,226 @@ describe("isolation cleanup collector", () => {
 		);
 		expect(managedSourceWrapper(base, path.join(base, "my-named-worktree", "sub"))).toBeUndefined();
 		expect(managedSourceWrapper(base, "/elsewhere/repo")).toBeUndefined();
+	});
+});
+
+/**
+ * Regression coverage for the in-process root queue ahead of the OS lease:
+ * many task launches against one worktree root must serialize FIFO without
+ * overlapping sections or burning the bounded OS retry budget, while the
+ * background collector's `{ retries: 1 }` skip must keep failing fast.
+ */
+describe("isolation metadata lock queue", () => {
+	let base: string;
+	const extraDirs: string[] = [];
+
+	beforeEach(async () => {
+		base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-lock-"));
+	});
+
+	afterEach(async () => {
+		await fs.rm(base, { recursive: true, force: true });
+		await Promise.all(extraDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	});
+
+	it("runs same-root sections FIFO without overlap, across alias spellings", async () => {
+		// A symlink spelling of the same root: identical canonical identity,
+		// different lexical path. It must join the same queue and lease.
+		const aliasParent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-lock-alias-"));
+		extraDirs.push(aliasParent);
+		const alias = path.join(aliasParent, "root");
+		await fs.symlink(base, alias);
+		const order: string[] = [];
+		let active = 0;
+		let maxActive = 0;
+		const gate = Promise.withResolvers<void>();
+		const section = (name: string, root: string, hold: boolean) =>
+			withIsolationMetadataLock(root, async () => {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				try {
+					if (hold) await gate.promise;
+					order.push(name);
+				} finally {
+					active -= 1;
+				}
+			});
+		// Synchronous admissions fix the queue order; the first section holds
+		// the lease until every later call has queued behind it. The alias
+		// spelling must join the SAME queue, not a parallel one.
+		const first = section("first", base, true);
+		const rest = [section("second", alias, false), section("third", base, false), section("fourth", alias, false)];
+		gate.resolve();
+		await Promise.all([first, ...rest]);
+		expect(order).toEqual(["first", "second", "third", "fourth"]);
+		expect(maxActive).toBe(1);
+	});
+
+	it("lets an independent root proceed while another root's section is held", async () => {
+		const other = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-lock-other-"));
+		extraDirs.push(other);
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		const events: string[] = [];
+		const held = withIsolationMetadataLock(base, async () => {
+			events.push("held:start");
+			started.resolve();
+			await gate.promise;
+			events.push("held:end");
+		});
+		await started.promise;
+		await withIsolationMetadataLock(other, async () => {
+			events.push("other");
+		});
+		expect(events).toEqual(["held:start", "other"]);
+		gate.resolve();
+		await held;
+		expect(events).toEqual(["held:start", "other", "held:end"]);
+	});
+
+	it("releases the lease after a throwing section and keeps successors in order", async () => {
+		const order: string[] = [];
+		const failing = withIsolationMetadataLock(base, async () => {
+			order.push("failing");
+			throw new Error("boom");
+		});
+		const successor = withIsolationMetadataLock(base, async () => {
+			order.push("successor");
+		});
+		await expect(failing).rejects.toThrow("boom");
+		await successor;
+		expect(order).toEqual(["failing", "successor"]);
+		// The OS lease was really released: a fresh section acquires immediately.
+		await withIsolationMetadataLock(base, async () => {
+			order.push("after");
+		});
+		expect(order).toEqual(["failing", "successor", "after"]);
+	});
+
+	it("fails retries:1 immediately under local contention and never runs the section later", async () => {
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		const order: string[] = [];
+		const held = withIsolationMetadataLock(base, async () => {
+			order.push("held");
+			started.resolve();
+			await gate.promise;
+		});
+		await started.promise;
+		// A locally queued waiter (not yet holding the lease) is contention too.
+		const waiter = withIsolationMetadataLock(base, async () => {
+			order.push("waiter");
+		});
+		let skippedRan = false;
+		const skipped = withIsolationMetadataLock(
+			base,
+			async () => {
+				skippedRan = true;
+			},
+			{ retries: 1 },
+		);
+		await expect(skipped).rejects.toThrow("Failed to acquire lock");
+		expect(skippedRan).toBe(false);
+		gate.resolve();
+		// The queue fully drains here; the skipped section never entered the
+		// FIFO (it was rejected at admission), so it cannot run later either.
+		await Promise.all([held, waiter]);
+		expect(order).toEqual(["held", "waiter"]);
+		expect(skippedRan).toBe(false);
+		// The queue settled cleanly: a later background attempt succeeds.
+		await withIsolationMetadataLock(
+			base,
+			async () => {
+				skippedRan = true;
+			},
+			{ retries: 1 },
+		);
+		expect(skippedRan).toBe(true);
+	});
+
+	it("makes one OS attempt for retries:1 against an external holder; normal calls wait for handoff", async () => {
+		// Hold the real canonical lease the way another process would.
+		const canonical = normalizePathForComparison(base);
+		const external = tryAcquireLock(getLockPath(path.join(canonical, ISOLATION_GC_LOCK_STEM)));
+		if (!external) throw new Error("fixture failed to acquire the root lease");
+		try {
+			// No local queue active: a background skip performs one OS attempt
+			// and settles as contention instead of retrying forever.
+			let skipRan = false;
+			await expect(
+				withIsolationMetadataLock(
+					base,
+					async () => {
+						skipRan = true;
+					},
+					{ retries: 1 },
+				),
+			).rejects.toThrow("Failed to acquire lock");
+			expect(skipRan).toBe(false);
+
+			// A normal local call waits on the OS lease rather than entering.
+			let entered = false;
+			const waiting = withIsolationMetadataLock(base, async () => {
+				entered = true;
+			});
+			// Flush microtasks so the first OS acquisition attempt has run: with
+			// the external lease held it must fail and wait (a canonicalization
+			// split would let it acquire a DIFFERENT lock file instantly).
+			for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+			expect(entered).toBe(false);
+			external.release();
+			await waiting;
+			expect(entered).toBe(true);
+		} finally {
+			external.release();
+		}
+	});
+});
+
+/**
+ * The optional current-process token snapshot must preserve the liveness
+ * contract: it substitutes the fresh token probe only for THIS process, a
+ * token mismatch still means a recycled pid, and an unavailable snapshot
+ * (`null`) stays conservative. Foreign pids always re-probe.
+ */
+describe("isolation owner liveness token snapshot", () => {
+	it("keeps a matching snapshot live and a mismatching one recycled for the current pid", async () => {
+		const claim = await currentIsolationClaim();
+		if (claim.startToken === undefined) {
+			// Windows reports no start token: pid-only liveness, snapshot irrelevant.
+			await expect(isIsolationOwnerLive({ pid: process.pid }, null)).resolves.toBe(true);
+			return;
+		}
+		const token = claim.startToken;
+		await expect(isIsolationOwnerLive({ pid: process.pid, startToken: token }, token)).resolves.toBe(true);
+		// Recorded token no longer matches this process instance: recycled.
+		await expect(
+			isIsolationOwnerLive({ pid: process.pid, startToken: "not-the-current-token" }, token),
+		).resolves.toBe(false);
+	});
+
+	it("treats an unavailable snapshot conservatively and re-probes foreign pids", async () => {
+		// null = the platform could not report a token: never proof of death.
+		await expect(isIsolationOwnerLive({ pid: process.pid, startToken: "not-the-current-token" }, null)).resolves.toBe(
+			true,
+		);
+		// A reaped pid (spawned and exited, so kill reports ESRCH) is dead
+		// regardless of any snapshot.
+		const reaped = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+		await reaped.exited;
+		await expect(isIsolationOwnerLive({ pid: reaped.pid }, null)).resolves.toBe(false);
+		if (process.platform === "win32") return;
+		// A foreign live pid is probed fresh; the current-process snapshot must
+		// not be applied to it. Its real token differs from the recorded one.
+		const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+		try {
+			const claim = await currentIsolationClaim();
+			await expect(
+				isIsolationOwnerLive({ pid: child.pid, startToken: "not-the-child-token" }, claim.startToken ?? null),
+			).resolves.toBe(false);
+		} finally {
+			child.kill();
+			await child.exited;
+		}
 	});
 });

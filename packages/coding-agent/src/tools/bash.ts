@@ -49,7 +49,7 @@ import { startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveInlineByteCapBudget } from "./output-meta";
+import { resolveInlineByteCapBudget, saveOutputArtifactText } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
@@ -317,14 +317,7 @@ function findBashApprovalPatternRule(
 }
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
-	try {
-		const alloc = await session.allocateOutputArtifact?.("bash-original");
-		if (!alloc?.path || !alloc.id) return undefined;
-		await Bun.write(alloc.path, originalText);
-		return alloc.id;
-	} catch {
-		return undefined;
-	}
+	return (await saveOutputArtifactText(session, "bash-original", originalText))?.id;
 }
 
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
@@ -844,7 +837,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			"bash",
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+				const {
+					path: artifactPath,
+					id: artifactId,
+					lease: artifactLease,
+				} = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
 				try {
@@ -857,6 +854,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						filesystem: this.#urlFilesystem(runSignal, options.approvalTier).shellFilesystem(),
 						artifactPath,
 						artifactId,
+						artifactLease,
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							latestText = tailBuffer.text();
@@ -1490,7 +1488,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 
 		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+		const {
+			path: artifactPath,
+			id: artifactId,
+			lease: artifactLease,
+		} = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
@@ -1509,6 +1511,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					env: backendPreflight?.env,
 					artifactPath,
 					artifactId,
+					artifactLease,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
@@ -1520,6 +1523,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					filesystem: this.#urlFilesystem(signal, approvalTier).shellFilesystem(),
 					artifactPath,
 					artifactId,
+					artifactLease,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});

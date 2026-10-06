@@ -10,6 +10,7 @@ import { formatBytes, getWorktreeDir, getWorktreesDir, logger, Snowflake } from 
 import type { SettingValueOf } from "../config/registry";
 import { withRepoLock } from "../utils/repo-lock";
 import {
+	currentIsolationOwner,
 	readIsolationCleanup,
 	writeIsolationCleanup,
 	type IsolationCleanupAuthorization,
@@ -596,6 +597,7 @@ export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	disposition: IsolationCleanupRecord["disposition"] = "preserve",
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
@@ -606,6 +608,11 @@ export async function ensureIsolation(
 	let fallbackReason = resolution.reason ?? null;
 	const root = path.resolve(getWorktreesDir());
 	const sourceBaseDir = managedSourceWrapper(root, repoRoot);
+	// Build the current-process owner identity once, before the candidate
+	// loop: the start-token probe is slow I/O that must not run under the
+	// root metadata lease, and every candidate registration publishes the
+	// same identity.
+	const owner = await currentIsolationOwner(id);
 
 	for (const candidate of candidates) {
 		const generation = crypto.randomUUID();
@@ -613,12 +620,15 @@ export async function ensureIsolation(
 		// Register the cleanup record, generation, and source dependency under
 		// the root metadata lock before any backend touches the slot. An
 		// unauthorized occupant (live owner, unknown legacy clone, retained
-		// recovery workspace) fails setup instead of being silently wiped.
+		// recovery workspace) fails setup instead of being silently wiped. The
+		// run's disposition is part of this initial registration so a crash
+		// before teardown never leaves a discard run looking preservable.
 		const stale = await claimSlotForNewGeneration(root, baseDir, {
-			id,
+			owner,
 			generation,
 			backend: candidate,
 			sourceBaseDir,
+			disposition,
 		});
 		if (stale) {
 			await removeAuthorizedWrapper(root, baseDir);
@@ -627,10 +637,11 @@ export async function ensureIsolation(
 			// concurrent `omp worktree clear` sees a live clone with no
 			// verifiable owner.
 			await registerIsolationGeneration(root, baseDir, {
-				id,
+				owner,
 				generation,
 				backend: candidate,
 				sourceBaseDir,
+				disposition,
 			});
 		}
 		try {

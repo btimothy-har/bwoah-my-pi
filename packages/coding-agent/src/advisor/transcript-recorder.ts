@@ -4,7 +4,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
-import { SessionManager } from "../session/session-manager";
+import { type SessionFileChange, SessionManager } from "../session/session-manager";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -146,6 +146,26 @@ export async function loadAdvisorTranscriptCosts(
 }
 
 /**
+ * A vacated advisor transcript path fenced by the owning session's committed
+ * storage-only relocation. Queued records captured the vacated path; the fence
+ * retargets them onto the continuing root once the transition's seed readiness
+ * settles, so no record publishes into the old root after the fence and no
+ * record opens the new file before the seed finished (an early create would
+ * make the seed's no-overwrite copy skip the transcript, silently dropping its
+ * history). A→B→C chains resolve one fence at a time through the serial write
+ * queue; each fence is backed by an actual republication, never a bare alias.
+ */
+interface RelocationFence {
+	/** Advisor transcript path under the continuing root. */
+	readonly target: string;
+	readonly reason: SessionFileChange["reason"];
+	/** Truthful readiness of the owning transition's artifact seed/relocation. */
+	readonly ready: Promise<void>;
+	/** Shared settle so the barrier and the first queued record migrate exactly once. */
+	settled?: Promise<void>;
+}
+
+/**
  * Append-only persister for an advisor agent's transcript.
  *
  * The advisor is a passive reviewer with its own model usage, so — like a task
@@ -187,6 +207,9 @@ export class AdvisorTranscriptRecorder {
 	#replayCursor = 0;
 	/** Target file {@link #replayWindow} belongs to; a switch starts a fresh window. */
 	#windowFile: string | undefined;
+	/** Vacated transcript path → fence, keyed per committed relocation of the owning session. */
+	#relocationFences = new Map<string, RelocationFence>();
+	#unsubscribeSessionFileChange: (() => void) | undefined;
 
 	/**
 	 * @param filename Transcript filename within the session dir. Defaults to
@@ -195,12 +218,16 @@ export class AdvisorTranscriptRecorder {
 	 * @param after Optional barrier the queue starts behind — used on the advisor
 	 *   on→off→on toggle so a fresh recorder's first `open` waits for the prior
 	 *   recorder's `close` and the two never hold the same file at once.
+	 * @param onSessionFileChanged Subscription to the owning session manager's
+	 *   storage-only relocations so a continuing root's recovery/move retargets
+	 *   this recorder's publication, including records already queued at commit.
 	 */
 	constructor(
 		private readonly resolveSessionFile: () => string | undefined,
 		private readonly resolveCwd: () => string,
 		filename: string = ADVISOR_TRANSCRIPT_FILENAME,
 		after?: Promise<unknown>,
+		onSessionFileChanged?: (cb: (change: SessionFileChange) => void) => () => void,
 	) {
 		this.#filename = filename;
 		this.#queue = after
@@ -209,6 +236,7 @@ export class AdvisorTranscriptRecorder {
 					() => {},
 				)
 			: Promise.resolve();
+		this.#unsubscribeSessionFileChange = onSessionFileChanged?.(change => this.#fenceVacatedTarget(change));
 	}
 
 	/**
@@ -233,11 +261,13 @@ export class AdvisorTranscriptRecorder {
 			default:
 				return;
 		}
-		const sessionFile = this.resolveSessionFile();
-		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return;
-		const file = path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename);
-		// A new target file starts a fresh replay window: positions from the prior
-		// session's turns must never suppress the new file's first delta.
+		const file = this.#advisorFileFor(this.resolveSessionFile());
+		if (!file) return;
+		// A relocation keeps the same transcript (and its already-persisted
+		// deltas) alive at the new root, so the replay window follows the fence
+		// chain instead of resetting; only a genuine session switch starts a
+		// fresh window.
+		this.#windowFile = this.#relocatedPath(this.#windowFile);
 		if (file !== this.#windowFile) {
 			this.#windowFile = file;
 			this.#replayWindow = [];
@@ -267,13 +297,27 @@ export class AdvisorTranscriptRecorder {
 		}
 		const cwd = this.resolveCwd();
 		this.#enqueue(async () => {
-			if (file !== this.#file) {
+			let target = await this.#settleFencesFor(file);
+			for (;;) {
+				if (target === this.#file) break;
 				await this.#closeManager();
-				this.#manager = await SessionManager.open(file, undefined, undefined, {
+				const opened = await SessionManager.open(target, undefined, undefined, {
 					initialCwd: cwd,
 					suppressBreadcrumb: true,
 				});
-				this.#file = file;
+				if (!this.#relocationFences.has(target)) {
+					this.#manager = opened;
+					this.#file = target;
+					break;
+				}
+				// A relocation committed while the open was in flight: this
+				// manager's journal reflects the vacated path (after a move,
+				// nothing at all), so publishing from it could clobber the
+				// relocated transcript. Discard it unappended and re-resolve.
+				await opened.close().catch(err => {
+					logger.debug("advisor transcript close failed", { err: String(err) });
+				});
+				target = await this.#settleFencesFor(target);
 			}
 			this.#manager?.appendMessage(persisted);
 		});
@@ -330,7 +374,103 @@ export class AdvisorTranscriptRecorder {
 
 	/** Flush and close the writer, releasing the session file. */
 	close(): Promise<void> {
+		this.#unsubscribeSessionFileChange?.();
+		this.#unsubscribeSessionFileChange = undefined;
 		return this.#enqueueResult(() => this.#closeManager());
+	}
+
+	/** This recorder's transcript path for a given owning session file. */
+	#advisorFileFor(sessionFile: string | undefined): string | undefined {
+		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return undefined;
+		return path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename);
+	}
+
+	/** Follow committed relocation fences from `file` to its current path (synchronous aliases only). */
+	#relocatedPath(file: string | undefined): string | undefined {
+		let current = file;
+		// Bounded by the fence count: a pathological move cycle (A→B→A) yields
+		// a stale window key instead of spinning.
+		let steps = this.#relocationFences.size + 1;
+		while (current !== undefined && steps-- > 0) {
+			const fence = this.#relocationFences.get(current);
+			if (!fence) return current;
+			current = fence.target;
+		}
+		return current;
+	}
+
+	/**
+	 * Fence the vacated transcript path when the owning session's storage-only
+	 * relocation commits. The event fires synchronously inside the owning
+	 * manager's disk queue, so this only registers the fence and schedules the
+	 * settle barrier on the recorder's own queue — never awaits the owner.
+	 */
+	#fenceVacatedTarget(change: SessionFileChange): void {
+		const vacated = this.#advisorFileFor(change.from);
+		const target = this.#advisorFileFor(change.to);
+		if (!vacated || !target || vacated === target) return;
+		const fence: RelocationFence = { target, reason: change.reason, ready: change.ready };
+		this.#relocationFences.set(vacated, fence);
+		// Settle even when no further records arrive, so an open writer is
+		// drained and republished instead of lingering on the foreign old root.
+		this.#enqueue(() => this.#settleFence(vacated, fence));
+	}
+
+	/**
+	 * Resolve a record's captured target through every fence registered since
+	 * capture, settling each one (seed readiness + writer rebase) before
+	 * following it. Chained relocations resolve deterministically: the serial
+	 * queue settles one fence at a time, in commit order.
+	 */
+	async #settleFencesFor(captured: string): Promise<string> {
+		let target = captured;
+		const visited = new Set<string>([captured]);
+		for (;;) {
+			const fence = this.#relocationFences.get(target);
+			if (!fence) return target;
+			await this.#settleFence(target, fence);
+			if (visited.has(fence.target)) {
+				// Defensive: a pathological move cycle (A→B→A) must not spin.
+				logger.warn("Advisor transcript relocation cycle detected", { from: captured, to: fence.target });
+				return fence.target;
+			}
+			visited.add(fence.target);
+			target = fence.target;
+		}
+	}
+
+	#settleFence(vacated: string, fence: RelocationFence): Promise<void> {
+		fence.settled ??= (async () => {
+			try {
+				await fence.ready;
+			} catch (error) {
+				// Truthful readiness: the seed failed, so the new root may lack
+				// copied bytes. The live writer still cannot remain in the
+				// foreign old root — the rebase below republishes the complete
+				// journal, which is self-sufficient — but the failure must
+				// surface rather than read as a durable seeded relocation.
+				logger.warn("Advisor transcript relocation: artifact seed failed", {
+					from: vacated,
+					to: fence.target,
+					err: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (!this.#manager || this.#file !== vacated) return;
+			try {
+				await this.#manager.rebaseSessionFile(fence.target, fence.reason);
+				this.#file = fence.target;
+			} catch (error) {
+				// Fail closed: drop the writer rather than keep a reference to
+				// bytes that never landed at the continuing root.
+				logger.warn("Advisor transcript republication failed", {
+					from: vacated,
+					to: fence.target,
+					err: error instanceof Error ? error.message : String(error),
+				});
+				await this.#closeManager();
+			}
+		})();
+		return fence.settled;
 	}
 
 	async #closeManager(): Promise<void> {

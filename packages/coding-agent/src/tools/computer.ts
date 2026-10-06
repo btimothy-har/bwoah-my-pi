@@ -13,6 +13,7 @@ import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/pro
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
 import { renderCallChain, renderFunctionRun } from "./run-code";
+import { saveOutputArtifactText } from "./output-meta";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
@@ -312,12 +313,5 @@ function populateCapabilityDetails(
 
 /** Persist over-cap computer run output as a session artifact; mirrors the browser run save path. */
 async function saveComputerOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
-	try {
-		const alloc = await session.allocateOutputArtifact?.("computer-original");
-		if (!alloc?.path || !alloc.id) return undefined;
-		await Bun.write(alloc.path, fullText);
-		return alloc.id;
-	} catch {
-		return undefined;
-	}
+	return (await saveOutputArtifactText(session, "computer-original", fullText))?.id;
 }

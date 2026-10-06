@@ -449,6 +449,33 @@ interface RegistryWithPersistedRosterLatches extends AgentRegistry {
 }
 
 /**
+ * In-flight storage-only root migrations (contested-write recovery, `/move`),
+ * keyed by the resolved DESTINATION root session file. While a migration is
+ * rebasing the continuing tree's owned refs/live children onto the new root,
+ * a roster scan of that root would otherwise replace old-root owned parked
+ * refs with stale seeded copies midway through. A settled-successfully entry
+ * drops; a FAILED migration's entry stays latched so scans keep failing closed
+ * (in-memory peers) until the owner's next migration supersedes it — a
+ * half-migrated root must never be scanned as if complete.
+ */
+const rootMigrationBarriers = new Map<string, Promise<void>>();
+
+/** Gate roster scans of `rootSessionFile` on the migration rebasing that root. */
+export function registerRootMigrationBarrier(rootSessionFile: string, migration: Promise<void>): void {
+	const key = path.resolve(rootSessionFile);
+	rootMigrationBarriers.set(key, migration);
+	migration.then(
+		() => {
+			if (rootMigrationBarriers.get(key) === migration) rootMigrationBarriers.delete(key);
+		},
+		() => {
+			// Keep the rejected barrier latched: scans of this root degrade to
+			// in-memory peers until a superseding migration proves the tree.
+		},
+	);
+}
+
+/**
  * A settled latch is reusable only while every parked ref its scan restored
  * still matches registry identity/session. A missing ref (released) or one
  * re-targeted at a different session file (superseded by another root's scan)
@@ -534,6 +561,25 @@ export async function ensurePersistedRoster(
 		return undefined;
 	}
 	if (!root) return undefined;
+
+	// A storage-only migration rebasing this root's owned refs must settle
+	// before the scan: scanning the new root midway would replace old-root
+	// owned parked refs with seeded copies and strand live-child rebases. A
+	// FAILED migration means the tree was never proven: degrade to in-memory
+	// peers (retryable on the next call) instead of scanning a half-migrated
+	// root.
+	const migration = rootMigrationBarriers.get(root);
+	if (migration) {
+		try {
+			await migration;
+		} catch (error) {
+			logger.warn("Persisted agent roster scan skipped: root migration failed; using in-memory peers", {
+				rootSessionFile: root,
+				error: rosterScanError(error),
+			});
+			return root;
+		}
+	}
 
 	const taggedRegistry = registry as RegistryWithPersistedRosterLatches;
 	let latches = taggedRegistry[kPersistedRosterLatches];

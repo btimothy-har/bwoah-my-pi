@@ -35,6 +35,35 @@ const ELLIPSIS = "…";
 /** First failed artifact I/O operation; safe to persist without exposing filesystem errors. */
 export type OutputArtifactError = "open" | "write" | "flush" | "end";
 
+/**
+ * Settlement handle for a managed output-artifact allocation.
+ *
+ * Domain-neutral: the owner (e.g. the session's artifact manager) decides
+ * where bytes live and when they are published; the writer (an OutputSink or
+ * a raw publisher) only promises two things:
+ *
+ * - Call {@link OutputArtifactLease.resolvePath} immediately before
+ *   opening/writing — never earlier. The resolved location tracks the owner's
+ *   current root across storage-only recovery/relocation, so an allocation
+ *   made before a move still opens in the live directory.
+ * - Call {@link OutputArtifactLease.complete} exactly once at settlement —
+ *   after the descriptor is flushed and ended, after a raw write finishes,
+ *   or when the allocation was never opened at all — so a reserved allocation
+ *   never pins the owner's relocation readiness. After `complete()` resolves,
+ *   `resolvePath()` reports the finalized current-root location, which is the
+ *   only path a caller may advertise.
+ *
+ * `complete()` is idempotent (later calls share the first settlement) and
+ * must fail closed: a missing or failed file never becomes a complete
+ * artifact.
+ */
+export interface OutputArtifactLease {
+	/** Resolve the path to open/write at, awaiting any pending relocation seed. */
+	resolvePath(): Promise<string>;
+	/** Finalize owned bytes into the owner's current root and release the reservation. */
+	complete(): Promise<void>;
+}
+
 /** Captured output with inline truncation and artifact storage metadata. */
 export interface OutputSummary {
 	output: string;
@@ -68,6 +97,15 @@ export interface OutputSummary {
 export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
+	/**
+	 * Managed allocation lease for the artifact. When present, the sink opens
+	 * at `artifactLease.resolvePath()` — resolved lazily at first spill, so a
+	 * storage-only recovery between allocation and open redirects the write —
+	 * and settles the lease exactly once when the descriptor ends, whether the
+	 * caller reached `dump()` or bailed through `dispose()`. Unmanaged hosts
+	 * keep passing only `artifactPath`.
+	 */
+	artifactLease?: OutputArtifactLease;
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -913,6 +951,7 @@ export class OutputSink {
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
+	readonly #artifactLease?: OutputArtifactLease;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
@@ -941,6 +980,7 @@ export class OutputSink {
 		const {
 			artifactPath,
 			artifactId,
+			artifactLease,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -951,6 +991,7 @@ export class OutputSink {
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
+		this.#artifactLease = artifactLease;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -1050,7 +1091,7 @@ export class OutputSink {
 		// representation differs, overflows memory, hits the column cap, or a
 		// prior chunk already opened the artifact.
 		if (
-			this.#artifactPath &&
+			(this.#artifactPath !== undefined || this.#artifactLease !== undefined) &&
 			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {
 			this.#writeToFile(chunk);
@@ -1307,22 +1348,37 @@ export class OutputSink {
 	}
 
 	async #createFileSink(): Promise<void> {
-		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
+		if (this.#fileReady || this.#artifactError) return;
+		// Later buffer mutations are already queued; snapshot retained bytes before yielding.
+		const head = this.#head;
+		const buffer = this.#buffer;
+		// Resolve a managed allocation lazily, at open time: a storage-only
+		// recovery or move between allocation and first spill redirects the open
+		// to the owner's current root instead of recreating the vacated one.
+		let artifactPath = this.#artifactPath;
+		if (this.#artifactLease) {
+			try {
+				artifactPath = await this.#artifactLease.resolvePath();
+			} catch {
+				this.#recordArtifactError("open");
+				return;
+			}
+		}
+		if (!artifactPath) return;
 		try {
-			const sink = Bun.file(this.#artifactPath).writer();
-			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
+			const sink = Bun.file(artifactPath).writer();
+			this.#file = { path: artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
 
 			// Head-retained bytes precede the rolling tail buffer in the capture.
 			// Route through #emitToSink so they count against the artifact head
 			// budget — a direct sink.write would let them escape the cap.
-			if (this.#head.length > 0) {
-				this.#emitToSink(this.#head);
+			if (head.length > 0) {
+				this.#emitToSink(head);
 			}
 
-			// Flush existing buffer to file BEFORE it gets trimmed further.
-			if (this.#buffer.length > 0) {
-				this.#emitToSink(this.#buffer);
+			if (buffer.length > 0) {
+				this.#emitToSink(buffer);
 			}
 
 			// Drain any chunks that arrived while the sink was being created.
@@ -1549,25 +1605,42 @@ export class OutputSink {
 	}
 
 	async #closeFile(): Promise<void> {
-		if (this.#fileCreation) {
-			await this.#fileCreation;
-		}
-		if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
-		const file = this.#file;
-		if (!file) return;
-		// Capture failures must not replace the command's result. Always close,
-		// even when tail replay or flushing fails, and never advertise that file.
 		try {
-			this.#flushArtifactTailIfCapped();
+			if (this.#fileCreation) {
+				await this.#fileCreation;
+			}
 			if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
-			if (!this.#artifactError) await file.sink.flush();
-		} catch {
-			this.#recordArtifactError("flush");
+			const file = this.#file;
+			if (file) {
+				// Capture failures must not replace the command's result. Always close,
+				// even when tail replay or flushing fails, and never advertise that file.
+				try {
+					this.#flushArtifactTailIfCapped();
+					if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
+					if (!this.#artifactError) await file.sink.flush();
+				} catch {
+					this.#recordArtifactError("flush");
+				} finally {
+					try {
+						await file.sink.end();
+					} catch {
+						this.#recordArtifactError("end");
+					}
+				}
+			}
 		} finally {
-			try {
-				await file.sink.end();
-			} catch {
-				this.#recordArtifactError("end");
+			// Settle the managed allocation exactly once, whether the descriptor
+			// was opened and ended, never spilled, or failed to open: an unsettled
+			// reservation would pin the owner's relocation readiness forever. Runs
+			// after `end()` so the owned bytes are durable before the owner
+			// finalizes them into the current root. A settlement failure means the
+			// bytes are not provably recoverable there — never advertise the file.
+			if (this.#artifactLease) {
+				try {
+					await this.#artifactLease.complete();
+				} catch {
+					this.#recordArtifactError("end");
+				}
 			}
 		}
 	}
