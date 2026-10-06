@@ -256,5 +256,4 @@ describe("bundled agent parsing", () => {
 			}),
 		).toEqual({ patterns: ["anthropic/opus"], role: undefined });
 	});
-
 });
