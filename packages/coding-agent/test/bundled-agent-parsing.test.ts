@@ -200,19 +200,15 @@ describe("bundled agent parsing", () => {
 		});
 		const activeModelPattern = "codex/sol:medium";
 
-		for (const [name, role, model] of [
-			["task", "task", "anthropic/sonnet"],
-			["sonic", "smol", "fast/hy3"],
-		] as const) {
-			const agent = getBundledAgent(name);
-			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings, activeModelPattern })).toEqual({
-				patterns: [model],
-				role,
-			});
-		}
-		for (const agent of loadBundledAgents().filter(agent => !["task", "sonic"].includes(agent.name))) {
+		const task = getBundledAgent("task");
+		expect(resolveAgentModelSelection({ agentModel: task?.model, settings, activeModelPattern })).toEqual({
+			patterns: ["anthropic/sonnet"],
+			role: "task",
+		});
+		for (const agent of loadBundledAgents().filter(agent => !["task", "scout", "sonic"].includes(agent.name))) {
 			// Specialists pinned to the smol role keep it; @default agents inherit
-			// the active model without a role identity.
+			// the active model without a role identity. Scout and sonic pin the
+			// tiny role instead; their routing is covered below.
 			const expected = agent.model?.includes("@smol")
 				? { patterns: ["fast/hy3"], role: "smol" }
 				: { patterns: [activeModelPattern], role: undefined };
@@ -226,4 +222,39 @@ describe("bundled agent parsing", () => {
 			role: undefined,
 		});
 	});
+
+	it("routes scout and sonic through the tiny role with smol fallback", () => {
+		const activeModelPattern = "codex/sol:medium";
+
+		const tinyConfigured = Settings.isolated({
+			modelRoles: { default: "anthropic/opus", smol: "fast/hy3", tiny: "quick/nano" },
+		});
+		for (const name of ["scout", "sonic"] as const) {
+			const agent = getBundledAgent(name);
+			expect(
+				resolveAgentModelSelection({ agentModel: agent?.model, settings: tinyConfigured, activeModelPattern }),
+			).toEqual({ patterns: ["quick/nano"], role: "tiny" });
+		}
+
+		const tinyUnset = Settings.isolated({
+			modelRoles: { default: "anthropic/opus", smol: "fast/hy3" },
+		});
+		for (const name of ["scout", "sonic"] as const) {
+			const agent = getBundledAgent(name);
+			expect(
+				resolveAgentModelSelection({ agentModel: agent?.model, settings: tinyUnset, activeModelPattern }),
+			).toEqual({ patterns: ["fast/hy3"], role: "tiny" });
+		}
+
+		const scout = getBundledAgent("scout");
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "anthropic/opus",
+				agentModel: scout?.model,
+				settings: tinyConfigured,
+				activeModelPattern,
+			}),
+		).toEqual({ patterns: ["anthropic/opus"], role: undefined });
+	});
+
 });

@@ -58,8 +58,9 @@ import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
- * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
- * carries `model: "@task"` (inherits the session's strong model).
+ * carries `model: "@tiny"` (the configured fast/low-latency role, falling back
+ * to `@smol`) and `task` carries `model: "@task"` (inherits the session's
+ * strong model).
  * Resolution goes through {@link resolveAgentModelSelection} exactly like a
  * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.
  */
