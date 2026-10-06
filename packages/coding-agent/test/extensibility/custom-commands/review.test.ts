@@ -6,8 +6,10 @@ import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-co
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -42,14 +44,37 @@ function makeManyFileDiff(fileCount: number): string {
 	).join("\n");
 }
 
+/** One file whose added lines push the diff past the 50,000-character snapshot threshold. */
+function makeLargeSingleFileDiff(): string {
+	const lineCount = 2000;
+	const added = Array.from({ length: lineCount }, (_, idx) => `+export const bigLine${idx} = ${idx};`);
+	return [
+		"diff --git a/src/big.ts b/src/big.ts",
+		"--- a/src/big.ts",
+		"+++ b/src/big.ts",
+		`@@ -0,0 +1,${lineCount} @@`,
+		...added,
+		"",
+	].join("\n");
+}
+
 interface SelectCall {
 	title: string;
 	options: string[];
 }
-
 interface NotifyCall {
 	message: string;
 	type: "info" | "warning" | "error" | undefined;
+}
+
+interface InputCall {
+	title: string;
+	placeholder: string | undefined;
+}
+
+interface StatusCall {
+	key: string;
+	text: string | undefined;
 }
 
 function makePrDiffLookup(unified: string): ViewLookupResult<PrDiffPayload> {
@@ -105,6 +130,7 @@ describe("ReviewCommand", () => {
 		hasUI?: boolean;
 		selectedMode?: string;
 		selectResults?: string[];
+		inputResults?: Array<string | undefined>;
 		editorValue?: string | undefined;
 		sessionEntries?: SessionEntry[];
 		branchEntries?: SessionEntry[];
@@ -113,6 +139,8 @@ describe("ReviewCommand", () => {
 		sessionState?: { sessionId: string; cwd: string };
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
+		onInputCall?: (call: InputCall) => void;
+		onStatusCall?: (call: StatusCall) => void;
 		onNotify?: (call: NotifyCall) => void;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
@@ -120,6 +148,7 @@ describe("ReviewCommand", () => {
 			sessionId: options?.sessionId ?? "review-session",
 			cwd: options?.sessionCwd ?? tmpDir,
 		};
+		const inputResults = [...(options?.inputResults ?? [])];
 		return {
 			hasUI: options?.hasUI ?? true,
 			sessionManager: {
@@ -132,8 +161,15 @@ describe("ReviewCommand", () => {
 				select: (title: string, selectOptions: string[]) => {
 					options?.onSelectCall?.({ title, options: selectOptions });
 					return Promise.resolve(
-						selectResults.shift() ?? options?.selectedMode ?? "4. Custom review instructions",
+						selectResults.shift() ?? options?.selectedMode ?? "5. Custom review instructions",
 					);
+				},
+				input: (title: string, placeholder?: string) => {
+					options?.onInputCall?.({ title, placeholder });
+					return Promise.resolve(inputResults.shift());
+				},
+				setStatus: (key: string, text: string | undefined) => {
+					options?.onStatusCall?.({ key, text });
 				},
 				editor: (
 					title: string,
@@ -572,28 +608,6 @@ describe("ReviewCommand", () => {
 		]);
 	});
 
-	it("preserves the existing menu shape when no recent PR is detected", async () => {
-		const dir = await createTempDir();
-		let reviewModeOptions: string[] = [];
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			editorValue: "Review docs",
-			onSelectCall: call => {
-				if (call.title === "Review Mode") reviewModeOptions = call.options;
-			},
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(reviewModeOptions).toEqual([
-			"1. Review against a base branch (PR Style)",
-			"2. Review uncommitted changes",
-			"3. Review a specific commit",
-			"4. Custom review instructions",
-		]);
-	});
-
 	it("keeps base branch review mode working with resolved SHAs", async () => {
 		const dir = await createTempDir();
 		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
@@ -626,6 +640,117 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("skill://code-review");
 	});
 
+	it("reviews a PR picked from the open pull request list", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" }, url: "https://github.com/owner/repo/pull/42" },
+			{ number: 43, title: "WIP thing", author: { login: "hubot" }, isDraft: true },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#42");
+		expect(result!).toContain("src/pr.ts");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
+		expect(listSpy).toHaveBeenCalled();
+	});
+
+	it("searches open pull requests and reviews a filtered pick", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const fullList = [
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+			{ number: 43, title: "Other work", author: { login: "hubot" } },
+		];
+		const filteredList = [{ number: 7, title: "Filtered match", author: { login: "octocat" } }];
+		const listSpy = spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
+			const searchIndex = args.indexOf("--search");
+			return (searchIndex === -1 ? fullList : filteredList) as never;
+		});
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const selectCalls: SelectCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#7  Filtered match  @octocat"],
+			inputResults: ["match"],
+			onSelectCall: call => {
+				selectCalls.push(call);
+			},
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#7");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 7 });
+		expect(
+			listSpy.mock.calls.some(
+				call => (call[1] as string[]).includes("--search") && (call[1] as string[]).includes("match"),
+			),
+		).toBe(true);
+		const filteredSelect = selectCalls.find(
+			call => call.title === 'Open pull requests in owner/repo matching "match"',
+		);
+		expect(filteredSelect?.options).toContain("#7  Filtered match  @octocat");
+	});
+
+	it("keeps the picker open when a search request fails", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
+			if (args.includes("--search")) throw new Error("gh: rate limited");
+			return [{ number: 42, title: "Fix login", author: { login: "octocat" } }] as never;
+		});
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const notifications: NotifyCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#42  Fix login  @octocat"],
+			inputResults: ["login"],
+			onNotify: call => {
+				notifications.push(call);
+			},
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(notifications).toContainEqual({
+			message: "Failed to list open pull requests in owner/repo: gh: rate limited",
+			type: "error",
+		});
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#42");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
+	});
+
+	it("resolves a numeric search query directly without a search request", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…"],
+			inputResults: ["#123"],
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#123");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+		expect(listSpy).toHaveBeenCalledTimes(1);
+		expect(listSpy.mock.calls.every(call => !(call[1] as string[]).includes("--search"))).toBe(true);
+	});
 	it("resolves base-branch review against a real repo without a range revspec", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-real-"));
 		try {
@@ -887,6 +1012,107 @@ describe("ReviewCommand", () => {
 		expect(result).toBeUndefined();
 		expect(artifactStores["review-session"]).toEqual([]);
 		expect(artifactStores.replacement).toEqual([]);
+	});
+
+	it("freezes a picked PR's complete diff bytes into the acquiring session's real artifact store", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-snapshot-"));
+		const manager = SessionManager.create(dir, path.join(dir, "sessions"));
+		try {
+			await manager.ensureOnDisk();
+			const largeDiff = makeLargeSingleFileDiff();
+			spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+			spyOn(github, "json").mockResolvedValue([
+				{
+					number: 42,
+					title: "Fix login",
+					author: { login: "octocat" },
+					url: "https://github.com/owner/repo/pull/42",
+				},
+			]);
+			const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(largeDiff));
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const base = createContext({
+				selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
+			});
+			const ownedCtx = {
+				...base,
+				sessionManager: {
+					getSessionId: () => manager.getSessionId(),
+					getCwd: () => manager.getCwd(),
+					getEntries: () => [],
+					getBranch: () => [],
+					getArtifactManager: () => manager.getArtifactManager(),
+				},
+			} as unknown as HookCommandContext;
+
+			const result = await command.execute([], ownedCtx);
+
+			expect(result).toBeDefined();
+			const refMatch = result!.match(/artifact:\/\/(\d+)/);
+			expect(refMatch).not.toBeNull();
+
+			// The source moves after the snapshot; the frozen bytes must not.
+			diffSpy.mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+
+			const artifactPath = await manager.getArtifactPath(refMatch![1]!);
+			expect(artifactPath).not.toBeNull();
+			expect(await Bun.file(artifactPath!).text()).toBe(largeDiff);
+		} finally {
+			await manager.close();
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("persists nothing when the session changes during a picked PR's acquisition", async () => {
+		const acquiringDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-acquiring-"));
+		const replacementDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-replacement-"));
+		const acquiring = SessionManager.create(acquiringDir, path.join(acquiringDir, "sessions"));
+		const replacement = SessionManager.create(replacementDir, path.join(replacementDir, "sessions"));
+		try {
+			await acquiring.ensureOnDisk();
+			await replacement.ensureOnDisk();
+			let current = acquiring;
+			spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+			spyOn(github, "json").mockResolvedValue([
+				{
+					number: 42,
+					title: "Fix login",
+					author: { login: "octocat" },
+					url: "https://github.com/owner/repo/pull/42",
+				},
+			]);
+			// The session is replaced inside the network-bound diff fetch, before
+			// persistTargetForSession runs; neither real store may receive bytes.
+			spyOn(gh, "getOrFetchPrDiff").mockImplementation(async () => {
+				current = replacement;
+				return makePrDiffLookup(makeLargeSingleFileDiff());
+			});
+			const command = new ReviewCommand({ cwd: acquiringDir } as unknown as CustomCommandAPI);
+			const base = createContext({
+				selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
+			});
+			const ownedCtx = {
+				...base,
+				sessionManager: {
+					getSessionId: () => current.getSessionId(),
+					getCwd: () => current.getCwd(),
+					getEntries: () => [],
+					getBranch: () => [],
+					getArtifactManager: () => current.getArtifactManager(),
+				},
+			} as unknown as HookCommandContext;
+
+			const result = await command.execute([], ownedCtx);
+
+			expect(result).toBeUndefined();
+			expect(await acquiring.getArtifactManager()?.listFiles()).toEqual([]);
+			expect(await replacement.getArtifactManager()?.listFiles()).toEqual([]);
+		} finally {
+			await acquiring.close();
+			await replacement.close();
+			await removeWithRetries(acquiringDir);
+			await removeWithRetries(replacementDir);
+		}
 	});
 
 	it("renders headless review requests through the reviewer task prompt", async () => {

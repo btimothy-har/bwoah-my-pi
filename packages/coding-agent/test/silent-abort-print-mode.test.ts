@@ -53,6 +53,7 @@ function createMockSession(
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
 			onExecutionCwdFallback: () => () => {},
+			onPersistenceNotice: () => () => {},
 		},
 		extensionRunner: undefined,
 		subscribe: () => () => {},

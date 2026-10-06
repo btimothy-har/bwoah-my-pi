@@ -66,6 +66,7 @@ function printSession(manager: MCPManager, refreshGate?: Promise<void>, onRefres
 			onPersistenceError: () => () => {},
 			// Fork print-mode reports vanished execution worktrees on stderr.
 			onExecutionCwdFallback: () => () => {},
+			onPersistenceNotice: () => () => {},
 		},
 		refreshMCPTools: async (tools: Array<{ name: string }>) => {
 			onRefreshStarted?.();

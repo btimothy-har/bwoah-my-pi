@@ -39,6 +39,7 @@ function createFlushHarness(): FlushHarness {
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
 			onExecutionCwdFallback: () => () => {},
+			onPersistenceNotice: () => () => {},
 		},
 		settings: Settings.isolated(),
 		getLastAssistantMessage: () => undefined,

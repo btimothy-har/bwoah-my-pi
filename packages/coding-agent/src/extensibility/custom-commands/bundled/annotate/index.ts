@@ -220,7 +220,7 @@ export async function runCodeReviewCommand(
 	const parsed = extractReviewPrRefFromArgs(splitReviewArgs(args));
 	const focus = parsed.extraInstructions || undefined;
 	const invocation = { sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.sessionManager.getCwd() };
-	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx);
+	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx, cwd);
 	if (!choice) return undefined;
 	const acquired =
 		choice.kind === "pr"

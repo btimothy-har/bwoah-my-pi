@@ -72,6 +72,7 @@ function createDelayedSession(
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
 			onExecutionCwdFallback: () => () => {},
+			onPersistenceNotice: () => () => {},
 			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 				modeChanges.push({ mode, data });
 				return "mode-change";
@@ -306,6 +307,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 				onExecutionCwdFallback: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
@@ -369,6 +371,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 				onExecutionCwdFallback: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
@@ -415,6 +418,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 				onExecutionCwdFallback: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,

@@ -10,6 +10,7 @@ import type {
 import type { StructuredSubagentSchemaMode, SubagentCloneDisposition } from "@oh-my-pi/pi-tui/tools/task";
 import type { ManagedSubagentExecution } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
+import type { RetryFallbackRole } from "./retry-fallback-chains";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -259,6 +260,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
+	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
 	/**
@@ -366,6 +369,8 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
+	subagentCost: number;
 }
 /**
  * True when a raw JSONL line is a complete `message` record carrying an
