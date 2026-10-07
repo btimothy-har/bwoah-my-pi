@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Bwoah My Pi shows `+bwoah` in human-facing versions and refuses upstream app self-update; update the source checkout with `bun setup`, while `omp update --plugins` remains supported ([#42](https://github.com/btimothy-har/bwoah-my-pi/issues/42))
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
 - Inside a Tern pane, `/fork` opens the fork in a new pane beside the original, which keeps the original session
 - Roughly halved browser `extract` time in text mode on large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
@@ -59,6 +60,7 @@
 - Fixed quadratic slowdown in `omp cleanse` on large tsc/clippy/golangci output ([#14706](https://github.com/can1357/oh-my-pi/pull/14706) by [@H4vC](https://github.com/H4vC))
 - Fixed documents served as `application/octet-stream` being downloaded twice ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
 - Fixed collab TUI guests rebuilding the transcript per token ([#14715](https://github.com/can1357/oh-my-pi/pull/14715) by [@H4vC](https://github.com/H4vC))
+- Fixed stale archive listings after rapid same-size rewrites that preserve modification times.
 
 ## [18.7.0] - 2026-10-06
 

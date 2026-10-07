@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
+import { APP_UPDATE_REFUSAL } from "../../src/cli/fork";
 import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 
@@ -7,14 +9,63 @@ const npmjs = fixedNpmRegistry();
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
 
-describe("runUpdateCommand fetch cancellation", () => {
+describe("runUpdateCommand fork refusal", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function stubRegistryFetch(urls: string[]) {
+		return Object.assign(
+			async (input: FetchInput) => {
+				urls.push(String(input));
+				return Response.json({ version: "999.0.0" });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+	}
+
+	it("refuses app updates before any release-metadata request, output, or channel read", async () => {
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(stubRegistryFetch(urls));
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		const err = await runUpdateCommand({ force: false, check: true }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+
+		expect(err).toBeInstanceOf(CliUsageError);
+		expect((err as Error).message).toBe(APP_UPDATE_REFUSAL);
+		// The refusal precedes every upstream effect: no request, no version log.
+		expect(urls).toEqual([]);
+		expect(logSpy).not.toHaveBeenCalled();
+	});
+
+	it("refuses forced canary channel switches without contacting upstream metadata", async () => {
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(stubRegistryFetch(urls));
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		const err = await runUpdateCommand({ force: true, check: false, channel: "canary" }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+
+		expect(err).toBeInstanceOf(CliUsageError);
+		expect((err as Error).message).toBe(APP_UPDATE_REFUSAL);
+		// App flags never bypass the refusal or reach release metadata.
+		expect(urls).toEqual([]);
+		expect(logSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("getLatestRelease fetch cancellation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
 	it("checks release metadata with a timeout signal", async () => {
 		let requestSignal: AbortSignal | undefined;
-		vi.spyOn(console, "log").mockImplementation(() => {});
 		const fetchStub = Object.assign(
 			async (_input: FetchInput, init?: FetchInit) => {
 				requestSignal = init?.signal ?? undefined;
@@ -24,7 +75,7 @@ describe("runUpdateCommand fetch cancellation", () => {
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
-		await runUpdateCommand({ force: false, check: true });
+		await getLatestRelease({ registries: npmjs });
 
 		expect(requestSignal).toBeInstanceOf(AbortSignal);
 	});

@@ -1777,6 +1777,42 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("alpha.txt");
 		});
 
+		it("does not retain a stale archive index when colliding timestamps later settle", async () => {
+			const archivePath = path.join(testDir, "coarse-clock.zip");
+			const pinnedMtime = new Date("2024-01-01T00:00:00Z");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+			const snapshot = await Bun.file(archivePath).stat();
+			const originalFile = Bun.file;
+			const clock = vi.spyOn(Date, "now").mockReturnValue(Math.ceil(snapshot.ctimeMs));
+			// Model a filesystem returning identical metadata for two rapid writes.
+			const fileSpy = vi.spyOn(Bun, "file").mockImplementation((filePath, options) => {
+				const file =
+					typeof filePath === "number"
+						? originalFile(filePath, options)
+						: typeof filePath === "string" || filePath instanceof URL
+							? originalFile(filePath, options)
+							: originalFile(filePath, options);
+				if (filePath === archivePath) vi.spyOn(file, "stat").mockResolvedValue(snapshot);
+				return file;
+			});
+			try {
+				expect(getTextOutput(await readTool.execute("coarse-before", { path: archivePath }))).toContain(
+					"alpha.txt",
+				);
+				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+				// No intervening read: the old snapshot must not become eligible later.
+				clock.mockReturnValue(Math.ceil(snapshot.ctimeMs) + 10_000);
+				const output = getTextOutput(await readTool.execute("coarse-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				fileSpy.mockRestore();
+				clock.mockRestore();
+			}
+		});
+
 		it("should list zip archives without inflating member payloads", async () => {
 			const archivePath = path.join(testDir, "header-only.zip");
 			fs.writeFileSync(

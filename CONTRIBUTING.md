@@ -1,5 +1,21 @@
 # Contributing to omp
 
+## About this fork
+
+This repository is a personal fork of [Oh My Pi](https://github.com/can1357/oh-my-pi), maintained for the owner's use. It is generally not open to external contributions.
+
+For generally useful OMP changes, prefer contributing through the [upstream contribution guide](https://github.com/can1357/oh-my-pi/blob/main/CONTRIBUTING.md). You are also welcome to fork this repository and maintain your own customizations.
+
+### Fork-owned changes
+
+The owner sets the scope and publication approval for changes to this fork. PR summaries may be drafted by an assistant; a separately authored contributor sentence and upstream prior-discussion procedures are not required here. Keep changes focused, preserve upstream licensing and attribution, exercise the changed behavior, and report verification and blockers honestly.
+
+Retained upstream engineering guidance remains applicable unless a fork-specific policy explicitly says otherwise. Upstream contribution procedures below apply when submitting changes to upstream, not when maintaining this fork.
+
+---
+
+**Upstream reference.** The rest of this guide describes upstream OMP's contribution process, not this fork's contribution policy.
+
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.
 

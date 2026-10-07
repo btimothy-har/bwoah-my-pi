@@ -12,18 +12,20 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 export default class Update extends Command {
 	static description = commandHelp.description;
 	static flags = {
-		force: Flags.boolean({ char: "f", description: "Force update", default: false }),
-		check: Flags.boolean({ char: "c", description: "Check for updates without installing", default: false }),
+		force: Flags.boolean({
+			char: "f",
+			description: "Force reinstall (refused: app self-update is not supported in this fork)",
+			default: false,
+		}),
+		check: Flags.boolean({ char: "c", description: "Check for app updates (refused in this fork)", default: false }),
 		plugins: Flags.boolean({ char: "l", description: "Update installed plugins", default: false }),
-		canary: Flags.boolean({ description: "Switch to the canary channel and update", default: false }),
-		stable: Flags.boolean({ description: "Switch back to the stable channel", default: false }),
+		canary: Flags.boolean({ description: "Canary channel (app updates refused in this fork)", default: false }),
+		stable: Flags.boolean({ description: "Stable channel (app updates refused in this fork)", default: false }),
 	};
 
 	static examples = [
-		"omp update",
-		"omp update --check",
-		"omp update --canary",
-		"# If GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN\n  GITHUB_TOKEN=... omp update",
+		"omp update --plugins",
+		"# App self-update is not supported in this fork: update your source checkout and run bun setup",
 	];
 
 	async run(): Promise<void> {

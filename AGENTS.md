@@ -1,5 +1,22 @@
 # Development Rules
 
+## Fork maintenance
+
+This repository (`btimothy-har/bwoah-my-pi`) is a personal fork of
+[Oh My Pi](https://github.com/can1357/oh-my-pi). It tracks upstream, keeps the
+`omp` command and `.omp` state compatible, and diverges only where approved
+fork requirements say so.
+
+- SHOULD keep fork-specific behavior in separate fork-owned modules and workflows. Refrain from directly changing upstream implementations unless necessary.
+- When upstream integration is necessary, prefer minimal imports, argument substitutions, or entry-point hooks; explain why each is needed. Preserve upstream inner workings rather than copying subsystems or monkey-patching them; NEVER add dormant hooks for deferred features.
+- Implement complete, verified increments; preserve unrelated work. Commits, pushes, releases, and GitHub-side Actions changes REQUIRE their own authorization.
+- Select GitHub destinations (remote, branch, issue/PR target) from inspected push-remote/CLI evidence, NEVER from fork-parent metadata.
+- During upstream syncs: reassess each divergence and retire it only after proving upstream equivalence. Recheck Actions enablement whenever a sync adds or renames workflows — disabled state is repository configuration, not a tracked YAML property.
+- NEVER restore the retired protected-path inventory, mandatory merge-only ruleset, or core prompt patch.
+- Attribute fork changes to this repository and upstream changes to [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi); never blend them.
+- Owner-authorized PRs in this fork MAY use assistant-drafted summaries; upstream contributor-authored-text and prior-discussion requirements are reference-only here. Preserve template sections/checklists, engineering checks, verification evidence, and changelog attribution; publication still REQUIRES owner authorization.
+- `## Releasing` below is upstream-only: this fork has no release workflow, and `bun run release` MUST NOT run here.
+
 ## Default Context
 
 This repo contains multiple packages, but **`packages/coding-agent/`** is the primary focus. Unless otherwise specified, assume work refers to this package.
@@ -33,6 +50,7 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 ### Pull requests
 
 When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.
+For owner-authorized changes to this fork, use the fork-specific contribution policy above instead of upstream contributor procedures.
 
 - MUST read `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md` first. Preserve the template sections and checklist, including when shortening an existing description.
 - MUST obtain at least one sentence written by the contributor in their own words explaining what changed and why, as required by `CONTRIBUTING.md`. If it is missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
