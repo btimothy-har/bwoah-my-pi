@@ -44,6 +44,7 @@ interface ResolvedArchiveReadPath {
  * decoded solid blocks, so caching those would pin up to their in-memory limit.
  */
 const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { zip: true, asar: true, iso: true };
+const ARCHIVE_CACHE_SETTLE_MS = 1_000;
 
 interface CachedArchiveReader {
 	reader: ArchiveReader;
@@ -73,6 +74,12 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 		.stat()
 		.catch(() => null);
 	if (!stat) return openArchive(absolutePath);
+	// Coarse ctime ticks can cover multiple writes. Do not cache a snapshot
+	// while its timestamp can still be shared by a subsequent rewrite.
+	if (Date.now() - stat.ctimeMs < ARCHIVE_CACHE_SETTLE_MS) {
+		archiveReaderCache.delete(absolutePath);
+		return openArchive(absolutePath);
+	}
 	const cached = archiveReaderCache.get(absolutePath);
 	if (
 		cached &&
