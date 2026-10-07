@@ -26,6 +26,38 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 **60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.
 
+## Bwoah My Pi
+
+This repository is a personal fork of [Oh My Pi](https://github.com/can1357/oh-my-pi), maintained for the owner's use and free to diverge from upstream. It keeps the `omp` command and existing `~/.omp` configuration, credentials, sessions, and history.
+
+### Running from source
+
+This pass provides source-checkout usage; binary distribution and a fork installer are deferred.
+
+Prerequisites: Git; Bun `>= 1.4` (the root `packageManager` constraint); the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (rustup resolves it automatically); and native build tools — Xcode Command Line Tools on macOS. Nix users can get the pinned Bun and Rust toolchains via `nix develop` (see the Development section below).
+
+Clone into a durable checkout and run setup from its root:
+
+```sh
+git clone https://github.com/btimothy-har/bwoah-my-pi.git
+cd bwoah-my-pi
+bun setup
+```
+
+Then run `bun dev` for development, or the linked `omp` command.
+
+`bun setup` installs workspace dependencies, builds the native addon from this checkout, and replaces the selected Bun global-bin `omp` launcher (typically `~/.bun/bin/omp`) with a link to this checkout. It does not relocate `~/.omp` configuration, credentials, sessions, or history.
+
+Updating the checkout is a manual Git operation: pull the branch you track, then rerun `bun setup`. After changing Rust crates or `packages/natives`, also run `bun run build:native`.
+
+App self-update and upstream update notifications are disabled in this fork. `omp update --plugins` still updates plugins.
+
+For general OMP documentation, use the [upstream repository](https://github.com/can1357/oh-my-pi); upstream does not maintain or support this fork.
+
+---
+
+**Upstream reference.** The remainder of this README is retained from upstream [Oh My Pi](https://github.com/can1357/oh-my-pi). Its installation methods (installer, Homebrew, npm, Nix), pull-request notice, and general documentation describe the upstream project, not this fork — use the source setup above for Bwoah My Pi.
+
 > [!NOTE]
 > Pull requests are **temporarily open to everyone** as a trial. We previously
 > required a vouch before accepting PRs; that requirement is lifted for now
