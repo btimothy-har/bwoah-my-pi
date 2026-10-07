@@ -1,0 +1,79 @@
+name: "Bwoah CI hosted prerequisites"
+description: >
+   Provisions only what the GitHub-hosted ubuntu-22.04 image lacks for the
+   fork's Bazel/cargo-deny validation jobs, mirroring the relevant parts of
+   the omp-kata image build (infra/runner.Dockerfile): Bazelisk (keep the
+   version in sync with BAZELISK_VERSION there), llvm tooling for the Apple
+   Foundation Models dylib check, and the Swift toolchain's runtime
+   libraries. Bazel itself is fetched by bazelisk per .bazelversion on first
+   use; no prewarm, no remote cache, no canonical-runner tooling.
+
+inputs:
+   rust:
+      description: >
+         Install the repository-pinned Rust toolchain (rust-toolchain.toml)
+         for the one host-cargo consumer, cargo-deny's `cargo fetch --locked`.
+         Bazel jobs are hermetic — rules_rust downloads its own toolchains —
+         so they leave this off.
+      required: false
+      default: "false"
+
+runs:
+   using: composite
+   steps:
+      - name: Install system packages (LLVM tooling, Swift runtime deps)
+        shell: bash
+        run: |
+           # llvm: host llvm-objdump verifies the darwin-arm64 addon's dylibs
+           # (native_addons_cross). libstdc++6/libsqlite3-0/libncurses6: the
+           # pinned swift.org toolchain's host runtime deps
+           # (bazel/toolchains/swift/linux.bzl); libuuid1/zlib1g are already
+           # present on the runner image.
+           sudo apt-get -o Dpkg::Use-Pty=0 update
+           sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Use-Pty=0 \
+             install -y --no-install-recommends llvm libstdc++6 libsqlite3-0 libncurses6
+
+      - name: Verify Python 3 for SDK unpacking
+        shell: bash
+        run: |
+           # Preinstalled on GitHub-hosted images; assert rather than install
+           # so a future image change surfaces as an explicit prerequisite
+           # error (bazel/toolchains/darwin/sdk.bzl unpacks the Apple SDK
+           # with a stdlib-only python3 script).
+           command -v python3 >/dev/null 2>&1 || {
+             echo "::error::python3 is required on the exec host for macOS SDK unpacking (bazel/toolchains/darwin/sdk.bzl)"
+             exit 1
+           }
+
+      - name: Install Bazelisk 1.29.0
+        shell: bash
+        run: |
+           # Release binary installed the same way infra/runner.Dockerfile
+           # does (no checksum there to mirror); bump both together. Bazel
+           # version comes from .bazelversion and is downloaded into
+           # BAZELISK_HOME on this job's first bazelisk invocation.
+           arch="$(dpkg --print-architecture)"
+           curl -fsSL --retry 3 -o "$RUNNER_TEMP/bazelisk" \
+             "https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-${arch}"
+           sudo install -m 0755 "$RUNNER_TEMP/bazelisk" /usr/local/bin/bazelisk
+           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+           bazelisk --version
+
+      - name: Provision repository-pinned Rust toolchain
+        if: inputs.rust == 'true'
+        shell: bash
+        run: |
+           # rustup resolves rust-toolchain.toml (channel + components) for
+           # this directory and installs the pin when missing; cargo then
+           # resolves to it for cargo-deny's fetch/deny runs.
+           channel="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+           if [ -z "$channel" ]; then
+             echo "::error::could not read the toolchain channel from rust-toolchain.toml"
+             exit 1
+           fi
+           command -v rustup >/dev/null 2>&1 || {
+             echo "::error::rustup is required to provision the pinned Rust toolchain ($channel); install https://rustup.rs or use an image that ships it"
+             exit 1
+           }
+           rustup show active-toolchain || rustup toolchain install "$channel"
+           cargo --version
