@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Bwoah My Pi shows `+bwoah` in human-facing versions and refuses upstream app self-update; update the source checkout with `bun setup`, while `omp update --plugins` remains supported ([#42](https://github.com/btimothy-har/bwoah-my-pi/issues/42))
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
 - Inside a Tern pane, `/fork` opens the fork in a new pane beside the original, which keeps the original session
 - Roughly halved browser `extract` time in text mode on large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))

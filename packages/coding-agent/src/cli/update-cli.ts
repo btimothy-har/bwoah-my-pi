@@ -10,11 +10,13 @@ import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { APP_UPDATE_REFUSAL, APP_UPDATES_SUPPORTED } from "./fork";
 import {
 	isTimeoutError,
 	isUnsupportedProxyError,
@@ -2226,6 +2228,10 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
+	// Fork policy: refuse app self-updates before any effect — no version log,
+	// channel read, release-metadata request, or install discovery. No app flag
+	// reaches this point as a bypass; plugins take the separate plugin branch.
+	if (!APP_UPDATES_SUPPORTED) throw new CliUsageError(APP_UPDATE_REFUSAL);
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;

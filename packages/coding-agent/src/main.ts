@@ -41,6 +41,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { APP_UPDATES_SUPPORTED, DISPLAY_VERSION } from "./cli/fork";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -232,6 +233,11 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+	// Fork policy: never contact upstream release metadata for the app-update
+	// banner; app updates come from the source checkout, not the updater.
+	if (!APP_UPDATES_SUPPORTED) {
+		return;
+	}
 	if (!cfgStartupCheckUpdate.get(settings)) {
 		return;
 	}
@@ -1723,7 +1729,7 @@ export async function runRootCommand(
 		const notifs: (InteractiveModeNotify | null)[] = [];
 
 		if (parsedArgs.version) {
-			writeStartupNotice(parsedArgs, `${VERSION}\n`);
+			writeStartupNotice(parsedArgs, `${DISPLAY_VERSION}\n`);
 			process.exit(0);
 		}
 
@@ -2567,7 +2573,7 @@ export async function runRootCommand(
 					logger.endTiming();
 					await runInteractiveMode(
 						session,
-						VERSION,
+						DISPLAY_VERSION,
 						startupChangelog,
 						notifs,
 						versionCheckPromise,
