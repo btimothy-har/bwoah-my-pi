@@ -9,8 +9,9 @@
  * The backend below drives the REAL `IndexedSessionStorage`/`SessionManager`
  * path; it is not a general-purpose mock.
  */
-
 import { describe, expect, it } from "bun:test";
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -18,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 class FakeBackend implements SessionStorageBackend {
 	readonly files = new Map<string, string>();
@@ -328,5 +330,76 @@ describe("SessionManager + indexed backend durability", () => {
 		const body = backend.files.get(sessionFile) ?? "";
 		expect(body).toContain("first turn");
 		expect(body).toContain("second turn");
+	});
+	it("publishes a fallback-owned branch under its virtual custom bucket", async () => {
+		const tempDir = await TempDir.create("@omp-indexed-session-home-");
+		const home = tempDir.join("missing-home");
+		const runtime = tempDir.join("runtime");
+		const bucket = tempDir.join("virtual-bucket");
+		await fsp.mkdir(runtime);
+
+		const backend = new FakeBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		let source: SessionManager | undefined;
+		let resumed: SessionManager | undefined;
+		try {
+			source = SessionManager.create(home, bucket, storage);
+			source.appendMessage({ role: "user", content: "virtual home conversation", timestamp: 1 });
+			source.appendMessage(assistantMessage("indexed fallback assistant"));
+			await source.flush();
+			await storage.drain();
+			const sourceFile = source.getSessionFile();
+			if (!sourceFile) throw new Error("Expected indexed source file");
+			await source.close();
+			source = undefined;
+			await storage.drain();
+			const sourceBody = backend.files.get(sourceFile);
+			if (!sourceBody) throw new Error("Expected published indexed source");
+
+			resumed = await SessionManager.open(sourceFile, undefined, storage, { initialCwd: runtime });
+			expect(resumed.getCwd()).toBe(runtime);
+			expect(resumed.getSessionHome()).toBe(home);
+			const branchPoint = resumed.getLeafId();
+			if (!branchPoint) throw new Error("Expected a branch point");
+			const branchFile = resumed.createBranchedSession(branchPoint);
+			if (!branchFile) throw new Error("Expected indexed branch file");
+			await resumed.flush();
+			await storage.drain();
+
+			const branchBody = backend.files.get(branchFile);
+			if (!branchBody) throw new Error("Expected published indexed branch");
+			const branchHeaderLine = branchBody.split("\n").find(line => {
+				try {
+					const entry: unknown = JSON.parse(line);
+					return typeof entry === "object" && entry !== null && "type" in entry && entry.type === "session";
+				} catch {
+					return false;
+				}
+			});
+			if (!branchHeaderLine) throw new Error("Expected branch header");
+			const branchHeader: unknown = JSON.parse(branchHeaderLine);
+			if (
+				typeof branchHeader !== "object" ||
+				branchHeader === null ||
+				!("cwd" in branchHeader) ||
+				!("id" in branchHeader)
+			) {
+				throw new Error("Expected branch header ownership fields");
+			}
+
+			expect(path.dirname(branchFile)).toBe(bucket);
+			expect(branchHeader.cwd).toBe(home);
+			expect(branchHeader.id).toBe(resumed.getSessionId());
+			expect(branchBody).toContain("virtual home conversation");
+			expect(branchBody).toContain("indexed fallback assistant");
+			expect(backend.files.get(sourceFile)).toBe(sourceBody);
+			expect(await fsp.stat(home).catch(() => undefined)).toBeUndefined();
+		} finally {
+			await resumed?.close();
+			await source?.close();
+			await storage.drain();
+			await tempDir.remove();
+		}
 	});
 });

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -6,9 +6,13 @@ import * as path from "node:path";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import {
+	parseTerminalBreadcrumb,
+	readCwdIdentity,
+	writeTerminalBreadcrumb,
+} from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import * as ttyIdModule from "@oh-my-pi/pi-tui/ttyid";
 import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
@@ -20,11 +24,34 @@ function getHeader(entries: unknown[]): SessionHeader | undefined {
 	);
 }
 
-function writeBreadcrumb(cwd: string, sessionFile: string, fresh = false): string {
-	const terminalId = getTerminalId();
+function writeBreadcrumb(
+	cwd: string,
+	sessionFile: string,
+	fresh = false,
+	runtimeFallback?: { cwd: string; sessionId: string },
+): string {
+	const terminalId = ttyIdModule.getTerminalId();
 	if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
-	writeTerminalBreadcrumb(cwd, sessionFile, fresh);
+	writeTerminalBreadcrumb(cwd, sessionFile, fresh, runtimeFallback ? { runtimeFallback } : undefined);
 	return path.join(getTerminalSessionsDir(), terminalId);
+}
+
+function writeRawFallbackBreadcrumb(home: string, sessionFile: string, fallbackCwd: string, sessionId: string): string {
+	const terminalId = ttyIdModule.getTerminalId();
+	if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+	const cwdIdentity = readCwdIdentity(fallbackCwd);
+	if (!cwdIdentity) throw new Error("Expected a fallback cwd identity");
+	const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
+	fs.mkdirSync(path.dirname(breadcrumbFile), { recursive: true });
+	fs.writeFileSync(
+		breadcrumbFile,
+		`${path.resolve(home)}\n${path.resolve(sessionFile)}\nruntime-fallback ${JSON.stringify({
+			cwd: path.resolve(fallbackCwd),
+			cwdIdentity,
+			sessionId,
+		})}\n`,
+	);
+	return breadcrumbFile;
 }
 
 /** Simulate `mv` / `git worktree move`: same directory inode at a new path. */
@@ -42,6 +69,24 @@ function stripHeaderCwd(file: string): void {
 		return JSON.stringify(obj);
 	});
 	fs.writeFileSync(file, rewritten.join("\n"));
+}
+
+function setHeaderCwdEmpty(file: string): string {
+	const lines = fs.readFileSync(file, "utf8").split("\n");
+	const headerIndex = lines.findIndex(line => {
+		if (!line.trim()) return false;
+		const value: unknown = JSON.parse(line);
+		return typeof value === "object" && value !== null && "type" in value && value.type === "session";
+	});
+	if (headerIndex < 0) throw new Error("Expected a session header");
+	const header: unknown = JSON.parse(lines[headerIndex]);
+	if (typeof header !== "object" || header === null || Array.isArray(header) || !("cwd" in header)) {
+		throw new Error("Expected a session header with a cwd field");
+	}
+	header.cwd = "";
+	lines[headerIndex] = JSON.stringify(header);
+	fs.writeFileSync(file, lines.join("\n"));
+	return lines[headerIndex];
 }
 
 describe("SessionManager.continueRecent relocation", () => {
@@ -64,6 +109,7 @@ describe("SessionManager.continueRecent relocation", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
 		else process.env.TMUX_PANE = originalTmuxPane;
 		if (originalAgentDir) {
@@ -116,7 +162,7 @@ describe("SessionManager.continueRecent relocation", () => {
 		if (!oldFile) throw new Error("Expected persisted session file");
 		await session.close();
 
-		const terminalId = getTerminalId();
+		const terminalId = ttyIdModule.getTerminalId();
 		if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
 		fs.writeFileSync(path.join(getTerminalSessionsDir(), terminalId), `${cwdA}\n${oldFile}\n`);
 		await renameProjectDir(cwdA, cwdB);
@@ -482,6 +528,343 @@ describe("SessionManager.continueRecent relocation", () => {
 			expect(resumed.getCwd()).toBe(path.resolve(cwdB));
 			expect(fs.existsSync(legacyFile)).toBe(true);
 			expect(getHeader(await loadEntriesFromFile(movedFile))?.cwd).toBe(path.resolve(cwdB));
+		} finally {
+			await resumed.close();
+		}
+	});
+	it("resumes the H-owned conversation from its runtime fallback without a sessionDir", async () => {
+		const home = path.join(testAgentDir, "canonical-home");
+		const fallback = path.join(testAgentDir, "runtime-fallback");
+		const bucket = path.join(testAgentDir, "custom-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "conversation owned by H", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(sessionFile));
+			expect(resumed.getSessionId()).toBe(sessionId);
+			expect(resumed.getSessionHome()).toBe(path.resolve(home));
+			expect(resumed.getCwd()).toBe(path.resolve(fallback));
+			expect(resumed.getSessionDir()).toBe(path.resolve(bucket));
+			expect(JSON.stringify(resumed.getEntries())).toContain("conversation owned by H");
+			expect(fs.existsSync(home)).toBe(false);
+
+			const persisted = await loadEntriesFromFile(sessionFile);
+			expect(getHeader(persisted)?.cwd).toBe(path.resolve(home));
+			expect(JSON.stringify(persisted)).toContain("conversation owned by H");
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("does not use a fallback hint from an unrelated launch cwd", async () => {
+		const home = path.join(testAgentDir, "hinted-home");
+		const fallback = path.join(testAgentDir, "hinted-fallback");
+		const unrelated = path.join(testAgentDir, "unrelated-launch");
+		const bucket = path.join(testAgentDir, "hinted-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		fs.mkdirSync(unrelated, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "must not be hijacked", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(unrelated);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(path.resolve(sessionFile));
+			expect(resumed.getSessionHome()).toBe(path.resolve(unrelated));
+			expect(resumed.getEntries()).toHaveLength(0);
+			expect(fs.existsSync(sessionFile)).toBe(true);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("does not use a fallback hint recorded by a different terminal", async () => {
+		const home = path.join(testAgentDir, "terminal-home");
+		const fallback = path.join(testAgentDir, "terminal-fallback");
+		const bucket = path.join(testAgentDir, "terminal-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const terminalId = vi.spyOn(ttyIdModule, "getTerminalId").mockReturnValue("fallback-origin-terminal");
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "terminal-local only", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		terminalId.mockReturnValue("different-terminal");
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(path.resolve(sessionFile));
+			expect(resumed.getEntries()).toHaveLength(0);
+			expect(fs.existsSync(sessionFile)).toBe(true);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("rejects a fallback hint when the fallback path has been replaced", async () => {
+		const home = path.join(testAgentDir, "replaced-home");
+		const fallback = path.join(testAgentDir, "replaced-fallback");
+		const retiredFallback = path.join(testAgentDir, "retired-fallback");
+		const bucket = path.join(testAgentDir, "replaced-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "old fallback inode", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+
+		writeRawFallbackBreadcrumb(home, sessionFile, fallback, sessionId);
+		const oldIdentity = readCwdIdentity(fallback);
+		if (!oldIdentity) throw new Error("Expected the original fallback identity");
+		await fsp.rm(home, { recursive: true, force: true });
+		await fsp.rename(fallback, retiredFallback);
+		fs.mkdirSync(fallback, { recursive: true });
+		expect(readCwdIdentity(fallback)).not.toEqual(oldIdentity);
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(path.resolve(sessionFile));
+			expect(resumed.getEntries()).toHaveLength(0);
+			expect(fs.existsSync(sessionFile)).toBe(true);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("rejects fallback candidates whose id or header home contradicts the hint", async () => {
+		for (const mismatch of ["id", "home"] as const) {
+			const home = path.join(testAgentDir, `mismatch-home-${mismatch}`);
+			const breadcrumbHome = mismatch === "home" ? path.join(testAgentDir, "different-breadcrumb-home") : home;
+			const fallback = path.join(testAgentDir, `mismatch-fallback-${mismatch}`);
+			const bucket = path.join(testAgentDir, `mismatch-bucket-${mismatch}`);
+			fs.mkdirSync(home, { recursive: true });
+			fs.mkdirSync(breadcrumbHome, { recursive: true });
+			fs.mkdirSync(fallback, { recursive: true });
+			const source = SessionManager.create(home, bucket);
+			source.appendMessage({ role: "user", content: `mismatched ${mismatch}`, timestamp: 1 });
+			source.appendMessage(makeAssistantMessage());
+			await source.flush();
+			const sessionFile = source.getSessionFile();
+			const sessionId = source.getSessionId();
+			if (!sessionFile) throw new Error("Expected persisted session file");
+			await source.close();
+			writeBreadcrumb(breadcrumbHome, sessionFile, false, {
+				cwd: fallback,
+				sessionId: mismatch === "id" ? `${sessionId}-different` : sessionId,
+			});
+			await fsp.rm(home, { recursive: true, force: true });
+			if (breadcrumbHome !== home) await fsp.rm(breadcrumbHome, { recursive: true, force: true });
+
+			const resumed = await SessionManager.continueRecent(fallback);
+			try {
+				expect(resumed.getSessionFile()).not.toBe(path.resolve(sessionFile));
+				expect(resumed.getEntries()).toHaveLength(0);
+				expect(fs.existsSync(sessionFile)).toBe(true);
+			} finally {
+				await resumed.close();
+			}
+		}
+	});
+
+	it("does not let a malformed fallback hint select its transcript", async () => {
+		const home = path.join(testAgentDir, "malformed-hint-home");
+		const fallback = path.join(testAgentDir, "malformed-hint-fallback");
+		const bucket = path.join(testAgentDir, "malformed-hint-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "malformed hint must not select", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		const terminalId = ttyIdModule.getTerminalId();
+		if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+		const fallbackIdentity = readCwdIdentity(fallback);
+		if (!fallbackIdentity) throw new Error("Expected a fallback cwd identity");
+		fs.writeFileSync(
+			path.join(getTerminalSessionsDir(), terminalId),
+			`${home}\n${sessionFile}\nruntime-fallback ${JSON.stringify({
+				cwd: "relative/fallback",
+				cwdIdentity: fallbackIdentity,
+				sessionId,
+			})}\n`,
+		);
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(path.resolve(sessionFile));
+			expect(resumed.getEntries()).toHaveLength(0);
+			expect(fs.existsSync(sessionFile)).toBe(true);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("restores a legacy empty-cwd session's private home without rewriting its header", async () => {
+		const home = path.join(testAgentDir, "legacy-home");
+		const fallback = path.join(testAgentDir, "legacy-fallback");
+		const bucket = path.join(testAgentDir, "legacy-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "legacy conversation", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		setHeaderCwdEmpty(sessionFile);
+		const originalBytes = fs.readFileSync(sessionFile, "utf8");
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(sessionFile));
+			expect(resumed.getSessionId()).toBe(sessionId);
+			expect(resumed.getSessionHome()).toBe(path.resolve(home));
+			expect(resumed.getCwd()).toBe(path.resolve(fallback));
+			expect(getHeader(await loadEntriesFromFile(sessionFile))?.cwd).toBe("");
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(originalBytes);
+		} finally {
+			await resumed.close();
+		}
+		expect(fs.readFileSync(sessionFile, "utf8")).toBe(originalBytes);
+	});
+
+	it("adopts a recovered home and removes the terminal-local fallback hint", async () => {
+		const home = path.join(testAgentDir, "recovered-home");
+		const fallback = path.join(testAgentDir, "recovered-fallback");
+		const bucket = path.join(testAgentDir, "recovered-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "recovered conversation", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionHome()).toBe(path.resolve(home));
+			expect(resumed.getCwd()).toBe(path.resolve(fallback));
+			await fsp.mkdir(home, { recursive: true });
+			resumed.adoptRecordedCwd();
+			expect(resumed.getSessionId()).toBe(sessionId);
+			expect(resumed.getSessionFile()).toBe(path.resolve(sessionFile));
+			expect(resumed.getCwd()).toBe(path.resolve(home));
+			const terminalId = ttyIdModule.getTerminalId();
+			if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+			const parsed = parseTerminalBreadcrumb(
+				fs.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8"),
+			);
+			expect(parsed?.runtimeFallback).toBeUndefined();
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("continues the same conversation under H when H reappears", async () => {
+		const home = path.join(testAgentDir, "home-reappeared");
+		const fallback = path.join(testAgentDir, "fallback-reappeared");
+		const bucket = path.join(testAgentDir, "bucket-reappeared");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "same transcript after recovery", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallback, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+		await fsp.mkdir(home, { recursive: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(sessionFile));
+			expect(resumed.getSessionId()).toBe(sessionId);
+			expect(resumed.getSessionHome()).toBe(path.resolve(home));
+			expect(resumed.getCwd()).toBe(path.resolve(home));
+			expect(JSON.stringify(resumed.getEntries())).toContain("same transcript after recovery");
+			const terminalId = ttyIdModule.getTerminalId();
+			if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+			const parsed = parseTerminalBreadcrumb(
+				fs.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8"),
+			);
+			expect(parsed?.runtimeFallback).toBeUndefined();
+		} finally {
+			await resumed.close();
+		}
+	});
+	it("matches a fallback hint through an equivalent symlink path", async () => {
+		const home = path.join(testAgentDir, "symlink-home");
+		const fallback = path.join(testAgentDir, "symlink-fallback");
+		const fallbackAlias = path.join(testAgentDir, "fallback-alias");
+		const bucket = path.join(testAgentDir, "symlink-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		fs.symlinkSync(fallback, fallbackAlias, "dir");
+		const source = SessionManager.create(home, bucket);
+		source.appendMessage({ role: "user", content: "symlink-equivalent fallback", timestamp: 1 });
+		source.appendMessage(makeAssistantMessage());
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		const sessionId = source.getSessionId();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+		writeBreadcrumb(home, sessionFile, false, { cwd: fallbackAlias, sessionId });
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback);
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(sessionFile));
+			expect(resumed.getSessionId()).toBe(sessionId);
+			expect(resumed.getSessionHome()).toBe(path.resolve(home));
+			expect(JSON.stringify(resumed.getEntries())).toContain("symlink-equivalent fallback");
 		} finally {
 			await resumed.close();
 		}
