@@ -229,7 +229,12 @@ async function loadReadlineInterface() {
 }
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
-	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+	const structuredOutput =
+		parsedArgs.mode === "json" ||
+		parsedArgs.mode === "rpc" ||
+		parsedArgs.mode === "rpc-ui" ||
+		parsedArgs.mode === "acp";
+	(structuredOutput ? process.stderr : process.stdout).write(text);
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
@@ -2058,9 +2063,9 @@ export async function runRootCommand(
 			throw error;
 		}
 
-		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager && !parsedArgs.noSession) {
+		if (sessionManager && !parsedArgs.noSession && parsedArgs.resume !== true) {
 			const previousCwd = cwd;
-			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
+			const recordedCwd = sessionManager.getSessionHome();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
 				settingsInstance,
@@ -2136,7 +2141,7 @@ export async function runRootCommand(
 			}
 			sessionManager = await SessionManager.open(selected.path);
 			const previousCwd = cwd;
-			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
+			const recordedCwd = sessionManager.getSessionHome();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
 				settingsInstance,

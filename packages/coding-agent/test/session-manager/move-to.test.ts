@@ -313,16 +313,26 @@ describe("SessionManager.moveTo", () => {
 		try {
 			const session = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: cwdA });
 			try {
+				expect(session.getCwd()).toBe(path.resolve(cwdA));
+				expect(session.getSessionHome()).toBe(path.resolve(deniedDir));
+				expect(session.getSessionDir()).toBe(path.resolve(deniedDir));
 				const snapshot = session.captureState();
 				await session.moveTo(cwdA);
 				const movedFile = session.getSessionFile()!;
 				expect(movedFile).not.toBe(deniedFile);
+				expect(session.getCwd()).toBe(path.resolve(cwdA));
+				expect(session.getSessionHome()).toBe(path.resolve(cwdA));
+				expect(getHeader(await loadEntriesFromFile(movedFile))?.cwd).toBe(path.resolve(cwdA));
 
 				await session.rollbackMove(snapshot);
 
 				expect(fs.existsSync(deniedFile)).toBe(true);
 				expect(fs.existsSync(movedFile)).toBe(false);
 				expect(session.getSessionFile()).toBe(deniedFile);
+				expect(session.getCwd()).toBe(path.resolve(cwdA));
+				expect(session.getSessionHome()).toBe(path.resolve(deniedDir));
+				expect(session.getSessionDir()).toBe(path.resolve(deniedDir));
+				expect(getHeader(await loadEntriesFromFile(deniedFile))?.cwd).toBe(deniedDir);
 			} finally {
 				await session.close();
 			}

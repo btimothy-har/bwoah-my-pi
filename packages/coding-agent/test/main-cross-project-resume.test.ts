@@ -22,6 +22,7 @@ import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-list
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import {
 	__resetDirsFromEnvForTests,
 	getProjectDir,
@@ -29,6 +30,8 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+
+import { makeAssistantMessage } from "./session-manager/helpers";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalPiProfile = process.env.PI_PROFILE;
@@ -89,6 +92,123 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 }
 
 const stubSettings = { get: () => undefined } as unknown as Settings;
+
+interface StartupSnapshot {
+	manager: SessionManager;
+	managerCwd: string;
+	sessionHome: string;
+	sessionFile: string | undefined;
+	sessionId: string;
+	sessionOptionsCwd: string;
+	settingsCwd: string;
+	projectCwd: string;
+	processCwd: string;
+	entries: string;
+	header: SessionHeader | null;
+	parsedContinue: boolean | undefined;
+}
+
+async function captureStartupSession(root: string, args: string[], settings: Settings): Promise<StartupSnapshot> {
+	const rawArgs = args;
+	const parsed = parseArgs(rawArgs);
+	parsed.noExtensions = true;
+	parsed.noSkills = true;
+	parsed.noRules = true;
+	parsed.noTools = true;
+	parsed.noLsp = true;
+	vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+	const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+	let snapshot: StartupSnapshot | undefined;
+	const stopAfterOptions = "stop after session options";
+	try {
+		await runRootCommand(parsed, rawArgs, {
+			discoverAuthStorage: async () => authStorage,
+			settings,
+			createAgentSession: async options => {
+				if (!options) throw new Error("Expected session startup options");
+				const manager = options.sessionManager;
+				if (!manager) throw new Error("Expected resumed session manager");
+				if (!options.cwd) throw new Error("Expected a startup cwd");
+				snapshot = {
+					manager,
+					managerCwd: manager.getCwd(),
+					sessionHome: manager.getSessionHome(),
+					sessionFile: manager.getSessionFile(),
+					sessionId: manager.getSessionId(),
+					sessionOptionsCwd: options.cwd,
+					settingsCwd: settings.getCwd(),
+					projectCwd: getProjectDir(),
+					processCwd: process.cwd(),
+					entries: JSON.stringify(manager.getEntries()),
+					header: manager.getHeader(),
+					parsedContinue: parsed.continue,
+				};
+				throw new Error(stopAfterOptions);
+			},
+		});
+	} catch (error) {
+		if (!(error instanceof Error) || error.message !== stopAfterOptions) throw error;
+	} finally {
+		authStorage.close();
+		await snapshot?.manager.close();
+	}
+	if (!snapshot) throw new Error("Startup did not reach session construction");
+	return snapshot;
+}
+
+function findSessionHeaderLine(contents: string): string {
+	const line = contents.split("\n").find(candidate => {
+		try {
+			const parsed: unknown = JSON.parse(candidate);
+			return typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "session";
+		} catch {
+			return false;
+		}
+	});
+	if (!line) throw new Error("Expected session header line");
+	return line;
+}
+
+async function seedFallbackSession(
+	home: string,
+	runtime: string,
+	sessionDir: string,
+	legacyHeader = false,
+): Promise<{ sessionFile: string; sessionId: string; headerLine: string }> {
+	await fsp.mkdir(home, { recursive: true });
+	await fsp.mkdir(sessionDir, { recursive: true });
+	const manager = SessionManager.create(home, sessionDir);
+	manager.appendMessage({ role: "user", content: "startup-owned conversation", timestamp: 1 });
+	manager.appendMessage(makeAssistantMessage());
+	await manager.flush();
+	const sessionFile = manager.getSessionFile();
+	if (!sessionFile) throw new Error("Expected persisted startup session");
+	const sessionId = manager.getSessionId();
+	await manager.close();
+
+	if (legacyHeader) {
+		const contents = await fsp.readFile(sessionFile, "utf8");
+		const originalHeaderLine = findSessionHeaderLine(contents);
+		const header: unknown = JSON.parse(originalHeaderLine);
+		if (typeof header !== "object" || header === null || !("cwd" in header)) {
+			throw new Error("Expected session cwd field");
+		}
+		header.cwd = "";
+		await fsp.writeFile(sessionFile, contents.replace(originalHeaderLine, JSON.stringify(header)));
+	}
+	const headerLine = findSessionHeaderLine(await fsp.readFile(sessionFile, "utf8"));
+	writeTerminalBreadcrumb(home, sessionFile, false, {
+		runtimeFallback: { cwd: runtime, sessionId },
+	});
+	await fsp.rm(home, { recursive: true, force: true });
+	return { sessionFile, sessionId, headerLine };
+}
+
+function useTerminalPane(pane: string): () => void {
+	const original = process.env.TMUX_PANE;
+	process.env.TMUX_PANE = pane;
+	return () => restoreEnv("TMUX_PANE", original);
+}
 
 describe("createSessionManager — cross-project --resume", () => {
 	let existingProject: string;
@@ -441,6 +561,145 @@ describe("runRootCommand — cross-project --resume", () => {
 		expect(resolveModelScope).toHaveBeenCalledTimes(1);
 		expect(resolveModelScope.mock.calls[0]?.[0]).toEqual(["model-resumed"]);
 	}, 15_000);
+	it("keeps --continue on the launch cwd while H is missing", async () => {
+		const restorePane = useTerminalPane("%resume-home-missing");
+		try {
+			const customBucket = path.join(root, "custom-sessions");
+			const source = await seedFallbackSession(resumedProject, launchProject, customBucket);
+			setProjectDir(launchProject);
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			const snapshot = await captureStartupSession(
+				root,
+				["--cwd", launchProject, "--continue", "--print"],
+				settings,
+			);
+
+			expect(snapshot.sessionFile).toBe(source.sessionFile);
+			expect(snapshot.sessionId).toBe(source.sessionId);
+			expect(snapshot.entries).toContain("startup-owned conversation");
+			expect(normalizePathForComparison(snapshot.sessionHome)).toBe(normalizePathForComparison(resumedProject));
+			for (const cwd of [
+				snapshot.managerCwd,
+				snapshot.sessionOptionsCwd,
+				snapshot.settingsCwd,
+				snapshot.projectCwd,
+				snapshot.processCwd,
+			]) {
+				expect(normalizePathForComparison(cwd)).toBe(normalizePathForComparison(launchProject));
+			}
+		} finally {
+			restorePane();
+		}
+	});
+
+	it("resumes the same --continue conversation in H after H reappears", async () => {
+		const restorePane = useTerminalPane("%resume-home-reappeared");
+		try {
+			const customBucket = path.join(root, "custom-sessions");
+			const source = await seedFallbackSession(resumedProject, launchProject, customBucket);
+			await fsp.mkdir(resumedProject);
+			setProjectDir(launchProject);
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			const snapshot = await captureStartupSession(
+				root,
+				["--cwd", launchProject, "--continue", "--print"],
+				settings,
+			);
+
+			expect(snapshot.sessionFile).toBe(source.sessionFile);
+			expect(snapshot.sessionId).toBe(source.sessionId);
+			expect(snapshot.entries).toContain("startup-owned conversation");
+			expect(normalizePathForComparison(snapshot.sessionHome)).toBe(normalizePathForComparison(resumedProject));
+			for (const cwd of [
+				snapshot.managerCwd,
+				snapshot.sessionOptionsCwd,
+				snapshot.settingsCwd,
+				snapshot.projectCwd,
+				snapshot.processCwd,
+			]) {
+				expect(normalizePathForComparison(cwd)).toBe(normalizePathForComparison(resumedProject));
+			}
+		} finally {
+			restorePane();
+		}
+	});
+
+	it("implicitly resumes a header-only H boundary and scopes startup to H", async () => {
+		const restorePane = useTerminalPane("%resume-home-empty-boundary");
+		try {
+			const customBucket = path.join(root, "custom-sessions");
+			const source = await seedFallbackSession(resumedProject, launchProject, customBucket);
+			const fallbackManager = await SessionManager.open(source.sessionFile, customBucket, undefined, {
+				initialCwd: launchProject,
+			});
+			await fallbackManager.newSession();
+			const boundaryFile = fallbackManager.getSessionFile();
+			const boundaryId = fallbackManager.getSessionId();
+			if (!boundaryFile) throw new Error("Expected persisted fresh boundary");
+			await fallbackManager.close();
+			const boundaryHeader = findSessionHeaderLine(await fsp.readFile(boundaryFile, "utf8"));
+			expect(path.dirname(boundaryFile)).toBe(customBucket);
+			expect(JSON.parse(boundaryHeader)).toMatchObject({ id: boundaryId, cwd: path.resolve(resumedProject) });
+			writeTerminalBreadcrumb(resumedProject, boundaryFile, true, {
+				runtimeFallback: { cwd: launchProject, sessionId: boundaryId },
+			});
+			await fsp.mkdir(resumedProject);
+			setProjectDir(launchProject);
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off", autoResume: true });
+			const snapshot = await captureStartupSession(root, ["--cwd", launchProject, "--print"], settings);
+
+			expect(snapshot.parsedContinue).toBeFalsy();
+			expect(snapshot.sessionFile).toBe(boundaryFile);
+			expect(snapshot.sessionId).toBe(boundaryId);
+			expect(snapshot.entries).toBe("[]");
+			for (const cwd of [
+				snapshot.managerCwd,
+				snapshot.sessionOptionsCwd,
+				snapshot.settingsCwd,
+				snapshot.projectCwd,
+				snapshot.processCwd,
+				snapshot.sessionHome,
+			]) {
+				expect(normalizePathForComparison(cwd)).toBe(normalizePathForComparison(resumedProject));
+			}
+		} finally {
+			restorePane();
+		}
+	});
+
+	it("adopts a legacy empty-cwd continuation into H without rewriting its header", async () => {
+		const restorePane = useTerminalPane("%resume-home-legacy");
+		try {
+			const customBucket = path.join(root, "custom-sessions");
+			const source = await seedFallbackSession(resumedProject, launchProject, customBucket, true);
+			await fsp.mkdir(resumedProject);
+			setProjectDir(launchProject);
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			const snapshot = await captureStartupSession(
+				root,
+				["--cwd", launchProject, "--continue", "--print"],
+				settings,
+			);
+
+			expect(snapshot.sessionFile).toBe(source.sessionFile);
+			expect(snapshot.sessionId).toBe(source.sessionId);
+			expect(snapshot.sessionHome).toBe(path.resolve(resumedProject));
+			expect(snapshot.header?.cwd).toBe("");
+			expect(findSessionHeaderLine(await fsp.readFile(source.sessionFile, "utf8"))).toBe(source.headerLine);
+			expect(snapshot.entries).toContain("startup-owned conversation");
+			for (const cwd of [
+				snapshot.managerCwd,
+				snapshot.sessionOptionsCwd,
+				snapshot.settingsCwd,
+				snapshot.projectCwd,
+				snapshot.processCwd,
+			]) {
+				expect(normalizePathForComparison(cwd)).toBe(normalizePathForComparison(resumedProject));
+			}
+		} finally {
+			restorePane();
+		}
+	});
 });
 
 describe("createSessionManager — cross-project --resume relocation (moved worktree)", () => {

@@ -3,8 +3,11 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { parseTerminalBreadcrumb, writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
 
@@ -157,6 +160,154 @@ describe("SessionManager.continueRecent /new boundary", () => {
 			expect(JSON.stringify(relaunched.getEntries())).toContain("real work");
 		} finally {
 			await relaunched.close();
+		}
+	});
+	it("mints a fresh H-owned identity for a matching fallback boundary", async () => {
+		const home = path.join(testAgentDir, "boundary-home");
+		const fallback = path.join(testAgentDir, "boundary-fallback");
+		const bucket = path.join(testAgentDir, "boundary-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const old = SessionManager.create(home, bucket);
+		old.appendMessage({ role: "user", content: "before fallback /new", timestamp: 1 });
+		old.appendMessage(makeAssistantMessage());
+		await old.flush();
+		const oldFile = old.getSessionFile();
+		const oldId = old.getSessionId();
+		if (!oldFile) throw new Error("Expected persisted prior session file");
+		await old.close();
+
+		const boundaryFile = path.join(bucket, "not-yet-materialized.jsonl");
+		const boundaryId = "fresh-boundary-id";
+		writeTerminalBreadcrumb(home, boundaryFile, true, {
+			runtimeFallback: { cwd: fallback, sessionId: boundaryId },
+		});
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const fresh = await SessionManager.continueRecent(fallback);
+		const newId = fresh.getSessionId();
+		try {
+			expect(fresh.getSessionFile()).not.toBe(path.resolve(boundaryFile));
+			expect(fresh.getSessionFile()).not.toBe(path.resolve(oldFile));
+			expect(newId).not.toBe(oldId);
+			expect(newId).not.toBe(boundaryId);
+			expect(fresh.getSessionHome()).toBe(path.resolve(home));
+			expect(fresh.getCwd()).toBe(path.resolve(fallback));
+			expect(fresh.getSessionDir()).toBe(path.resolve(bucket));
+			expect(fresh.getEntries()).toHaveLength(0);
+			await fresh.ensureOnDisk();
+			const freshFile = fresh.getSessionFile();
+			if (!freshFile) throw new Error("Expected a fresh session file");
+			expect(path.dirname(freshFile)).toBe(path.resolve(bucket));
+			expect(fs.existsSync(home)).toBe(false);
+			const entries = await loadEntriesFromFile(freshFile);
+			expect(entries.some(entry => entry.type === "session" && entry.cwd === path.resolve(home))).toBe(true);
+		} finally {
+			await fresh.close();
+		}
+		const terminalId = getTerminalId();
+		if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+		const breadcrumb = fs.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8");
+		const parsed = parseTerminalBreadcrumb(breadcrumb);
+		expect(parsed?.runtimeFallback?.sessionId).toBe(newId);
+	});
+
+	it("keeps a lazy H-owned boundary fresh and pins a relative explicit bucket across home adoption", async () => {
+		const home = path.join(testAgentDir, "adopt-home");
+		const fallback = path.join(testAgentDir, "adopt-fallback");
+		const bucket = path.join(testAgentDir, "adopt-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		fs.mkdirSync(bucket, { recursive: true });
+		const missingFile = path.join(bucket, "missing-boundary.jsonl");
+		writeTerminalBreadcrumb(home, missingFile, true, {
+			runtimeFallback: { cwd: fallback, sessionId: "unmaterialized-boundary" },
+		});
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const relativeBucket = path.relative(process.cwd(), bucket);
+		const fresh = await SessionManager.continueRecent(fallback, relativeBucket);
+		const firstId = fresh.getSessionId();
+		expect(fresh.getSessionDir()).toBe(path.resolve(bucket));
+		fs.mkdirSync(home, { recursive: true });
+		fresh.adoptRecordedCwd();
+		await fresh.close();
+
+		const terminalId = getTerminalId();
+		if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
+		const adoptedBreadcrumb = parseTerminalBreadcrumb(
+			fs.readFileSync(path.join(getTerminalSessionsDir(), terminalId), "utf8"),
+		);
+		expect(adoptedBreadcrumb?.fresh).toBe(true);
+		expect(adoptedBreadcrumb?.runtimeFallback).toBeUndefined();
+
+		const relaunched = await SessionManager.continueRecent(home, relativeBucket);
+		try {
+			expect(relaunched.getSessionId()).not.toBe(firstId);
+			expect(relaunched.getSessionHome()).toBe(path.resolve(home));
+			expect(relaunched.getCwd()).toBe(path.resolve(home));
+			expect(relaunched.getSessionDir()).toBe(path.resolve(bucket));
+			expect(relaunched.getEntries()).toHaveLength(0);
+		} finally {
+			await relaunched.close();
+		}
+	});
+
+	it("keeps a fallback fresh boundary inside an explicit sessionDir", async () => {
+		const home = path.join(testAgentDir, "contained-home");
+		const fallback = path.join(testAgentDir, "contained-fallback");
+		const bucket = path.join(testAgentDir, "contained-bucket");
+		const explicitDir = path.join(testAgentDir, "explicit-other-bucket");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(fallback, { recursive: true });
+		const old = SessionManager.create(home, bucket);
+		old.appendMessage({ role: "user", content: "contained prior session", timestamp: 1 });
+		old.appendMessage(makeAssistantMessage());
+		await old.flush();
+		const oldFile = old.getSessionFile();
+		if (!oldFile) throw new Error("Expected persisted prior session file");
+		await old.close();
+		writeTerminalBreadcrumb(home, path.join(bucket, "fresh-missing.jsonl"), true, {
+			runtimeFallback: { cwd: fallback, sessionId: "contained-boundary-id" },
+		});
+		await fsp.rm(home, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(fallback, explicitDir);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(path.resolve(oldFile));
+			expect(resumed.getSessionHome()).toBe(path.resolve(fallback));
+			expect(resumed.getCwd()).toBe(path.resolve(fallback));
+			expect(resumed.getSessionDir()).toBe(path.resolve(explicitDir));
+			expect(resumed.getEntries()).toHaveLength(0);
+			expect(fs.existsSync(oldFile)).toBe(true);
+			expect(fs.existsSync(home)).toBe(false);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("does not let an unrelated fresh breadcrumb hide the launch project's session", async () => {
+		const local = SessionManager.create(cwd);
+		local.appendMessage({ role: "user", content: "launch project conversation", timestamp: 1 });
+		local.appendMessage(makeAssistantMessage());
+		await local.flush();
+		const localFile = local.getSessionFile();
+		const localId = local.getSessionId();
+		if (!localFile) throw new Error("Expected persisted local session file");
+		await local.close();
+
+		const unrelatedHome = path.join(testAgentDir, "unrelated-fresh-home");
+		const unrelatedFile = path.join(testAgentDir, "unrelated-fresh-bucket", "missing.jsonl");
+		fs.mkdirSync(unrelatedHome, { recursive: true });
+		writeTerminalBreadcrumb(unrelatedHome, unrelatedFile, true);
+
+		const resumed = await SessionManager.continueRecent(cwd);
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(localFile));
+			expect(resumed.getSessionId()).toBe(localId);
+			expect(JSON.stringify(resumed.getEntries())).toContain("launch project conversation");
+		} finally {
+			await resumed.close();
 		}
 	});
 });

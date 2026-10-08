@@ -13,6 +13,12 @@ import {
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { SessionStorage } from "./session-storage";
+import {
+	createSessionHomeFallback,
+	formatSessionHomeFallback,
+	parseSessionHomeFallbackExtras,
+	type SessionHomeFallback,
+} from "../bwoah/execution-workspace/session-home";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -303,13 +309,19 @@ export interface ParsedTerminalBreadcrumb {
 	sessionFile: string;
 	fresh: boolean;
 	cwdIdentity: CwdIdentity | undefined;
+	runtimeFallback?: SessionHomeFallback;
 }
 
 /** Parse breadcrumb file content; null when it lacks the cwd and session lines. */
 export function parseTerminalBreadcrumb(content: string): ParsedTerminalBreadcrumb | null {
 	const lines = content.trim().split("\n");
 	if (lines.length < 2) return null;
-	return { cwd: lines[0], sessionFile: lines[1], ...parseBreadcrumbExtras(lines) };
+	return {
+		cwd: lines[0],
+		sessionFile: lines[1],
+		...parseBreadcrumbExtras(lines),
+		runtimeFallback: parseSessionHomeFallbackExtras(lines, lines[0]),
+	};
 }
 
 /**
@@ -326,6 +338,10 @@ export interface CustomSessionFileScope {
 	 * local path gc reads from disk, so it would only ever dangle.
 	 */
 	remoteStorage?: boolean;
+}
+
+export interface TerminalBreadcrumbWriteOptions extends CustomSessionFileScope {
+	runtimeFallback?: { cwd: string; sessionId: string };
 }
 
 /**
@@ -387,7 +403,7 @@ export function writeTerminalBreadcrumb(
 	cwd: string,
 	sessionFile: string,
 	fresh = false,
-	scope?: CustomSessionFileScope,
+	scope?: TerminalBreadcrumbWriteOptions,
 ): void {
 	// Persist session files the managed-root glob scan cannot fully account for,
 	// regardless of terminal identity. Storage GC needs the exact path after the
@@ -402,6 +418,16 @@ export function writeTerminalBreadcrumb(
 	if (fresh) extras.push("fresh");
 	const identity = readCwdIdentity(cwd);
 	if (identity) extras.push(`${CWDSTAT_PREFIX}${identity.dev} ${identity.ino}`);
+	const runtimeFallback = scope?.runtimeFallback
+		? createSessionHomeFallback(
+				cwd,
+				scope.runtimeFallback.cwd,
+				scope.runtimeFallback.sessionId,
+				readCwdIdentity(scope.runtimeFallback.cwd),
+			)
+		: undefined;
+	const formattedRuntimeFallback = formatSessionHomeFallback(runtimeFallback);
+	if (formattedRuntimeFallback) extras.push(formattedRuntimeFallback);
 	const extraBlock = extras.length > 0 ? `${extras.join("\n")}\n` : "";
 	const content = `${cwd}\n${sessionFile}\n${extraBlock}`;
 	// Synchronous + best-effort. Infrequent (session create/switch/reset, never
@@ -424,8 +450,9 @@ export interface TerminalBreadcrumb {
 	exists: boolean;
 	/** Recorded as a `/new` fresh-session boundary whose JSONL may not exist yet. */
 	fresh: boolean;
-	/** Device+inode of `cwd` when the breadcrumb was written, if that path existed. */
+	/** Device+inode of `cwd` when that path existed, if recorded. */
 	cwdIdentity?: CwdIdentity;
+	runtimeFallback?: SessionHomeFallback;
 }
 
 /**
@@ -447,13 +474,22 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
 		const parsed = parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text());
 		if (!parsed) return null;
-		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
+		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity, runtimeFallback } = parsed;
 
 		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
 		const exists = stat?.isFile() === true;
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
-		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };
+		if (exists || fresh) {
+			return {
+				cwd: breadcrumbCwd,
+				sessionFile,
+				exists,
+				fresh,
+				cwdIdentity,
+				...(runtimeFallback ? { runtimeFallback } : {}),
+			};
+		}
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
 		// Breadcrumb doesn't exist or is corrupt — fall through

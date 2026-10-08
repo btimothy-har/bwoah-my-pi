@@ -98,6 +98,26 @@ describe("writeStartupNotice", () => {
 			capture.restore();
 		}
 	});
+
+	it("keeps RPC stdout clean by writing notices to stderr", () => {
+		const capture = captureProcessOutput();
+		try {
+			writeStartupNotice({ mode: "rpc" }, "hello\n");
+			expect(capture.read()).toEqual({ stdout: "", stderr: "hello\n" });
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("keeps ACP stdout clean by writing notices to stderr", () => {
+		const capture = captureProcessOutput();
+		try {
+			writeStartupNotice({ mode: "acp" }, "hello\n");
+			expect(capture.read()).toEqual({ stdout: "", stderr: "hello\n" });
+		} finally {
+			capture.restore();
+		}
+	});
 });
 
 describe("createSessionManager — missing session (#2084)", () => {
