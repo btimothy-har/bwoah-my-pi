@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an opt-in programmatic, read-only validator for Git execution-workspace bindings in Bwoah My Pi; validation leaves session files and the active workspace unchanged ([#43](https://github.com/btimothy-har/bwoah-my-pi/issues/43))
 - Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
 
 ### Changed

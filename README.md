@@ -54,6 +54,12 @@ App self-update and upstream update notifications are disabled in this fork. `om
 
 For general OMP documentation, use the [upstream repository](https://github.com/can1357/oh-my-pi); upstream does not maintain or support this fork.
 
+### Execution-workspace development
+
+The fork-owned execution-workspace validator is opt-in through `bwoah.executionWorkspace.enabled: true` in settings or `BWOAH_EXECUTION_WORKSPACE=1`. It provides programmatic, read-only inspection through `resolveExecutionBinding` in `packages/coding-agent/src/bwoah/execution-workspace/binding.ts`. H is the canonical conversation home; E is an optional execution directory. Both paths must pass Git's `rev-parse --is-inside-work-tree` predicate and share the same physical Git common directory. Fresh repositories without commits and dirty working trees are eligible. Bare repositories, Git metadata directories, failed checks and inconclusive checks reject the binding. Git commands have a deadline and ignore inherited repository-location overrides. An absent or `null` `executionCwd` means no assignment.
+
+This increment does not activate or persist execution bindings, change `/wt`, or relocate conversations. The flag defaults to off. Runtime routing and durable binding changes will be separate increments.
+
 ---
 
 **Upstream reference.** The remainder of this README is retained from upstream [Oh My Pi](https://github.com/can1357/oh-my-pi). Its installation methods (installer, Homebrew, npm, Nix), pull-request notice, and general documentation describe the upstream project, not this fork — use the source setup above for Bwoah My Pi.
