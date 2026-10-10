@@ -34,7 +34,7 @@ This repository is a personal fork of [Oh My Pi](https://github.com/can1357/oh-m
 
 This pass provides source-checkout usage; binary distribution and a fork installer are deferred.
 
-Prerequisites: Git; Bun `>= 1.4` (the root `packageManager` constraint); the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (rustup resolves it automatically); and native build tools — Xcode Command Line Tools on macOS. Nix users can get the pinned Bun and Rust toolchains via `nix develop` (see the Development section below).
+Prerequisites: Git; Bun `1.4.2` (the root `packageManager` pin, aligned with upstream OMP's verified CI runtime); the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (rustup resolves it automatically); and native build tools — Xcode Command Line Tools on macOS. Nix users can get the pinned Bun and Rust toolchains via `nix develop` (see the Development section below).
 
 Clone into a durable checkout and run setup from its root:
 
