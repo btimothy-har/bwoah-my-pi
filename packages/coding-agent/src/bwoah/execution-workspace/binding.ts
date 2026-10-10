@@ -35,6 +35,9 @@ interface FileIdentity {
 async function queryGit(cwd: string, args: string[]): Promise<string> {
 	const env = { ...filterProcessEnv(Bun.env), ...NON_INTERACTIVE_ENV };
 	stripGitRepoLocationEnv(env);
+	for (const key of Object.keys(env)) {
+		if (key.toUpperCase() === "GIT_CEILING_DIRECTORIES") delete env[key];
+	}
 	const result = await ptree.exec(["git", "--no-optional-locks", "-C", cwd, "rev-parse", ...args], {
 		env,
 		timeout: 5_000,

@@ -256,6 +256,17 @@ describe("read-only execution binding resolution", () => {
 		expect(filterSpy).toHaveBeenCalled();
 	});
 
+	it("accepts nested E despite an inherited Git discovery ceiling", async () => {
+		const home = await repository();
+		const execution = await directory("home/nested");
+		const filter = environment.filterProcessEnv;
+		vi.spyOn(environment, "filterProcessEnv").mockImplementation(env => ({
+			...filter(env),
+			GIT_CEILING_DIRECTORIES: home,
+		}));
+		expect(await inspect(home, execution)).toEqual({ kind: "valid", executionCwd: execution });
+	});
+
 	it.each([
 		"spawn failure",
 		"timeout",
