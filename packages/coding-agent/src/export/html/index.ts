@@ -4,7 +4,13 @@ import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
-import { SessionManager } from "../../session/session-manager";
+import type { SessionManager } from "../../session/session-manager";
+import {
+	assertExportOutputIsSeparate,
+	loadExportSession,
+	sessionHeaderForExport,
+	type ExportSessionProjection,
+} from "../../bwoah/execution-workspace/export-projection";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
 import templateCssPath from "./template.css" with { type: "file" };
@@ -176,13 +182,6 @@ export interface SessionData {
 	subSessions?: Record<string, SubSession>;
 }
 
-function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | null {
-	if (!header) return null;
-	const exported = { ...header };
-	delete exported.previousSessionFiles;
-	return exported;
-}
-
 /** Snapshot the session (plus optional agent state) into the JSON shape the viewer renders. */
 export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
 	return {
@@ -247,21 +246,18 @@ export async function exportSessionToHtml(
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
-	let sm: SessionManager;
+	let projection: ExportSessionProjection;
 	try {
-		sm = await SessionManager.open(inputPath, undefined, undefined, {
-			suppressBreadcrumb: true,
-			throwIfMissing: true,
-		});
+		projection = await loadExportSession(inputPath);
 	} catch (err) {
 		if (isEnoent(err)) throw new Error(`File not found: ${inputPath}`);
 		throw err;
 	}
 
 	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
+		header: sessionHeaderForExport(projection.header),
+		entries: projection.entries,
+		leafId: projection.leafId,
 	};
 	if (opts.includeSubSessions !== false) {
 		const subSessions = await collectExportSubSessions(inputPath);
@@ -269,8 +265,9 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 	}
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
-	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
+	await assertExportOutputIsSeparate(inputPath, outputPath, Object.keys(sessionData.subSessions ?? {}));
+	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
 
 	await Bun.write(outputPath, html);
 	return outputPath;

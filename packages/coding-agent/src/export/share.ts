@@ -31,6 +31,7 @@ import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { SubSession } from "../session/sub-sessions";
+import { sessionHeaderForExport } from "../bwoah/execution-workspace/export-projection";
 import { buildSessionData, type SessionData } from "./html";
 
 export { DEFAULT_SHARE_URL };
@@ -80,6 +81,8 @@ export interface ShareSessionOptions {
 	obfuscator?: SecretObfuscator;
 }
 
+export type ShareSessionDataOptions = Omit<ShareSessionOptions, "state">;
+
 export interface ShareSessionResult {
 	/** Viewer link: `<serverUrl>/<id>#<key>`. */
 	url: string;
@@ -94,7 +97,27 @@ export interface ShareSessionResult {
 /** Build the snapshot that gets sealed and uploaded, redacted when an obfuscator is provided. */
 export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOptions): SessionData {
 	const data = buildSessionData(sm, options?.state);
-	return options?.obfuscator?.hasSecrets() ? redactSessionDataForShare(options.obfuscator, data) : data;
+	return redactSessionDataForShare(options?.obfuscator, data);
+}
+
+/** Publish a prebuilt session envelope without opening a writable session. */
+export async function shareSessionData(
+	data: SessionData,
+	options?: ShareSessionDataOptions,
+): Promise<ShareSessionResult> {
+	const projectedData: SessionData = {
+		...data,
+		header: sessionHeaderForExport(data.header),
+	};
+	if (data.subSessions !== undefined) {
+		projectedData.subSessions = Object.fromEntries(
+			Object.entries(data.subSessions).map(([key, sub]) => [
+				key,
+				{ ...sub, header: sessionHeaderForExport(sub.header) },
+			]),
+		);
+	}
+	return publishShareSnapshot(redactSessionDataForShare(options?.obfuscator, projectedData), options);
 }
 
 /**
@@ -225,8 +248,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 	const addHeader = (header: SessionHeader | null): void => {
 		if (!header) return;
 		add(header.title);
-		add(header.cwd);
-		for (const previousSessionFile of header.previousSessionFiles ?? []) add(previousSessionFile);
+		if (typeof header.cwd === "string") add(header.cwd);
 	};
 
 	addHeader(data.header);
@@ -249,15 +271,12 @@ function redactShareHeader(
 	return {
 		...header,
 		title: header.title === undefined ? undefined : o.obfuscate(header.title, sharedRegexSecretValues),
-		cwd: o.obfuscate(header.cwd, sharedRegexSecretValues),
-		previousSessionFiles: header.previousSessionFiles?.map(previousSessionFile =>
-			o.obfuscate(previousSessionFile, sharedRegexSecretValues),
-		),
+		...(typeof header.cwd === "string" ? { cwd: o.obfuscate(header.cwd, sharedRegexSecretValues) } : {}),
 	};
 }
 
-function redactSessionDataForShare(o: SecretObfuscator, data: SessionData): SessionData {
-	return o.batch(() => redactSessionDataBatch(o, data));
+function redactSessionDataForShare(o: SecretObfuscator | undefined, data: SessionData): SessionData {
+	return o?.hasSecrets() ? o.batch(() => redactSessionDataBatch(o, data)) : data;
 }
 
 function redactSessionDataBatch(o: SecretObfuscator, data: SessionData): SessionData {
@@ -493,9 +512,15 @@ function redactShareMessage(
 	}
 }
 
-/** Share the session; uploads to the share server unless `options.store` is `"gist"`. */
+/** Share the live session; uploads to the share server unless `options.store` is `"gist"`. */
 export async function shareSession(sm: SessionManager, options?: ShareSessionOptions): Promise<ShareSessionResult> {
-	const data = buildShareSnapshot(sm, options);
+	return publishShareSnapshot(buildShareSnapshot(sm, options), options);
+}
+
+async function publishShareSnapshot(
+	data: SessionData,
+	options?: Pick<ShareSessionOptions, "serverUrl" | "store">,
+): Promise<ShareSessionResult> {
 	const keyBytes = new Uint8Array(SHARE_KEY_BYTES);
 	crypto.getRandomValues(keyBytes);
 	const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);

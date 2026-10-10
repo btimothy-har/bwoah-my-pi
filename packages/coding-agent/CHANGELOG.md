@@ -49,6 +49,7 @@
 ### Fixed
 
 - Fixed resumed conversations losing their original project ownership and persistence bucket when the project directory is unavailable ([#43](https://github.com/btimothy-har/bwoah-my-pi/issues/43))
+- Fixed standalone HTML export and encrypted sharing activating or repairing saved sessions; publication now leaves source state unchanged and omits machine-local execution metadata ([#43](https://github.com/btimothy-har/bwoah-my-pi/issues/43))
 - Fixed `/new` keeping plan mode (and its plan-role model) or goal mode active in the new session ([#14653](https://github.com/can1357/oh-my-pi/issues/14653))
 - Fixed parallel first bash calls each spawning an rc-sourcing shell ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
 - Fixed the todo list's auto-clear never firing while subagents were streaming progress ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
