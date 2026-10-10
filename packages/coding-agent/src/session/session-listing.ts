@@ -8,7 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { computeDefaultSessionDir } from "./session-paths";
+import { computeDefaultSessionDir, sessionDirForCwd } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -927,6 +927,8 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
+	/** Resolve and scan the implicit local bucket without creating, migrating, or repairing it. */
+	readOnly?: boolean;
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
 }
@@ -944,8 +946,11 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
+	const localSessionDir =
+		sessionDir ?? (resolvedOptions.readOnly ? sessionDirForCwd(cwd) : computeDefaultSessionDir(cwd, storage));
+	const localSessions = await (resolvedOptions.readOnly
+		? listSessionsReadOnly(localSessionDir, storage)
+		: listSessions(localSessionDir, storage));
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };

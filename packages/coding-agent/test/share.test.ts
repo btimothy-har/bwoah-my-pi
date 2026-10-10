@@ -1,21 +1,553 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { hashPath } from "@oh-my-pi/pi-utils/dirs";
 import type { SessionData } from "../src/export/html";
-import {
-	buildShareSnapshot,
-	normalizeShareServerUrl,
-	SERVER_MAX_SEALED_BYTES,
-	sealToFit,
-	shareSession,
-} from "../src/export/share";
+import { buildShareSnapshot, normalizeShareServerUrl, SERVER_MAX_SEALED_BYTES, sealToFit } from "../src/export/share";
 import { SecretObfuscator } from "../src/secrets/obfuscator";
 import type { SessionEntry } from "../src/session/session-entries";
+import { sessionDirForCwd } from "../src/session/session-paths";
 import type { SessionManager } from "../src/session/session-manager";
 
 const IV_LENGTH = 12;
 const TEST_MAX_SEALED_BYTES = 4_000;
-const CLI_ENTRY = path.join(import.meta.dir, "..", "src", "cli.ts");
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+const CLI_ENTRY = path.join(REPO_ROOT, "packages", "coding-agent", "src", "cli.ts");
+const LOOPBACK_GUARD = path.join(import.meta.dir, "fixtures", "share-loopback-guard.ts");
+const PUBLICATION_FIXTURE = path.join(import.meta.dir, "fixtures", "share-publication-fixture.ts");
+const BUN_EXECUTABLE = path.resolve(process.execPath);
+
+interface ChildRun {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+}
+
+interface Workspace {
+	agentDir: string;
+	launchCwd: string;
+	sessionsRoot: string;
+	blobsDir: string;
+	customFilesDir: string;
+	terminalSessionsDir: string;
+	tmuxPane: string;
+	env: Record<string, string>;
+}
+interface LoopbackSink {
+	server: Bun.Server<undefined>;
+	origin: string;
+	uploads: Uint8Array<ArrayBuffer>[];
+	readonly requestCount: number;
+}
+
+function captureLoopbackUploads({ status, redirectTo }: { status?: number; redirectTo?: string } = {}): LoopbackSink {
+	const uploads: Uint8Array<ArrayBuffer>[] = [];
+	let requestCount = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			requestCount++;
+			if (request.method === "POST") uploads.push(new Uint8Array(await request.arrayBuffer()));
+			if (redirectTo) return new Response("redirect", { status: 302, headers: { location: redirectTo } });
+			if (status !== undefined) return new Response("sink rejected publication", { status });
+			return Response.json({ id: "localshare01" });
+		},
+	});
+	return {
+		server,
+		origin: `http://127.0.0.1:${server.port}`,
+		uploads,
+		get requestCount() {
+			return requestCount;
+		},
+	};
+}
+
+async function runChild(argv: string[], cwd: string, env: Record<string, string>): Promise<ChildRun> {
+	const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	return { exitCode, stdout, stderr };
+}
+
+async function createWorkspace(tempDir: TempDir, origin: string): Promise<Workspace> {
+	const root = tempDir.path();
+	const home = path.join(root, "home");
+	const agentDir = path.join(root, "agent");
+	const launchCwd = path.join(root, "launch-project");
+	const emptyBin = path.join(root, "empty-bin");
+	const tmp = process.env.TMPDIR ?? process.env.TMP ?? process.env.TEMP ?? path.dirname(root);
+	const tmuxPane = `share-${process.pid}-${crypto.randomUUID()}`;
+	const sessionsRoot = path.join(agentDir, "sessions");
+	const blobsDir = path.join(agentDir, "blobs");
+	const customFilesDir = path.join(agentDir, "custom-session-files");
+	const terminalSessionsDir = path.join(agentDir, "terminal-sessions");
+
+	await Promise.all(
+		[
+			home,
+			agentDir,
+			launchCwd,
+			emptyBin,
+			path.join(home, ".config"),
+			path.join(home, ".local", "share"),
+			path.join(home, ".local", "state"),
+			path.join(home, ".cache"),
+			blobsDir,
+			customFilesDir,
+			terminalSessionsDir,
+		].map(dir => fs.mkdir(dir, { recursive: true })),
+	);
+	await fs.writeFile(path.join(blobsDir, "artifact-sentinel.bin"), Buffer.from("existing-artifact"));
+	const env: Record<string, string> = {
+		PATH: emptyBin,
+		TMPDIR: process.env.TMPDIR ?? tmp,
+		TMP: process.env.TMP ?? tmp,
+		TEMP: process.env.TEMP ?? tmp,
+		HOME: home,
+		USERPROFILE: home,
+		XDG_CONFIG_HOME: path.join(home, ".config"),
+		XDG_DATA_HOME: path.join(home, ".local", "share"),
+		XDG_STATE_HOME: path.join(home, ".local", "state"),
+		XDG_CACHE_HOME: path.join(home, ".cache"),
+		PI_CODING_AGENT_DIR: agentDir,
+		OMP_TEST_SHARE_ORIGIN: origin,
+		TMUX_PANE: tmuxPane,
+		NO_COLOR: "1",
+		AWS_EC2_METADATA_DISABLED: "true",
+	};
+	for (const key of ["SystemRoot", "WINDIR"] as const) {
+		const value = process.env[key];
+		if (value) env[key] = value;
+	}
+
+	return { agentDir, launchCwd, sessionsRoot, blobsDir, customFilesDir, terminalSessionsDir, tmuxPane, env };
+}
+
+async function writeSettings(
+	filePath: string,
+	{
+		serverUrl,
+		redactSecrets,
+		secretsEnabled,
+	}: { serverUrl?: string; redactSecrets: boolean; secretsEnabled: boolean },
+): Promise<void> {
+	const shareUrl = serverUrl === undefined ? "" : `  serverUrl: ${JSON.stringify(serverUrl)}\n`;
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await fs.writeFile(
+		filePath,
+		`share:\n${shareUrl}  store: blob\n  redactSecrets: ${redactSecrets}\nsecrets:\n  enabled: ${secretsEnabled}\n`,
+	);
+}
+
+async function writeSecrets(filePath: string, secret: string): Promise<void> {
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await fs.writeFile(
+		filePath,
+		`- type: plain\n  content: ${JSON.stringify(secret)}\n  mode: replace\n  replacement: "[synthetic-secret-redacted]"\n`,
+	);
+}
+async function configureGlobalSettings(
+	workspace: Workspace,
+	origin: string,
+	{ redactSecrets = false, secretsEnabled = false }: { redactSecrets?: boolean; secretsEnabled?: boolean } = {},
+): Promise<void> {
+	await writeSettings(path.join(workspace.agentDir, "config.yml"), {
+		serverUrl: origin,
+		redactSecrets,
+		secretsEnabled,
+	});
+}
+
+async function writeTranscript(
+	sessionPath: string,
+	transcript: {
+		id: string;
+		cwd?: unknown;
+		executionCwd?: unknown;
+		previousSessionFiles?: string[];
+		text: string;
+		imageBlobRef?: string;
+	},
+): Promise<void> {
+	const { id, cwd, executionCwd, previousSessionFiles, text, imageBlobRef } = transcript;
+	const header: Record<string, unknown> = {
+		type: "session",
+		version: 3,
+		id,
+		timestamp: "2026-10-09T00:00:00.000Z",
+	};
+	if (Object.hasOwn(transcript, "cwd")) header.cwd = cwd;
+	if (executionCwd !== undefined) header.executionCwd = executionCwd;
+	if (previousSessionFiles !== undefined) header.previousSessionFiles = previousSessionFiles;
+	const entry = messageEntry("message-1", null, text, imageBlobRef);
+	await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+	await fs.writeFile(sessionPath, `${JSON.stringify(header)}\n${JSON.stringify(entry)}\n`);
+}
+
+async function snapshotTree(root: string): Promise<string> {
+	const records: Array<Record<string, string | number>> = [];
+	const visit = async (current: string): Promise<void> => {
+		const stat = await fs.stat(current, { bigint: true }).catch(error => {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		});
+		if (!stat) return;
+		const relative = path.relative(root, current) || ".";
+		records.push({
+			path: relative,
+			kind: "directory",
+			mtimeNs: String(stat.mtimeNs),
+			mode: Number(stat.mode & 0o777n),
+		});
+		const children = (await fs.readdir(current, { withFileTypes: true })).sort((a, b) =>
+			a.name.localeCompare(b.name),
+		);
+		for (const child of children) {
+			const childPath = path.join(current, child.name);
+			if (child.isDirectory()) {
+				await visit(childPath);
+			} else if (child.isFile()) {
+				const [fileStat, bytes] = await Promise.all([fs.stat(childPath, { bigint: true }), fs.readFile(childPath)]);
+				records.push({
+					path: path.relative(root, childPath),
+					kind: "file",
+					mtimeNs: String(fileStat.mtimeNs),
+					mode: Number(fileStat.mode & 0o777n),
+					bytes: bytes.toString("base64"),
+				});
+			} else if (child.isSymbolicLink()) {
+				records.push({
+					path: path.relative(root, childPath),
+					kind: "symlink",
+					target: await fs.readlink(childPath),
+				});
+			}
+		}
+	};
+	const rootStat = await fs.stat(root).catch(error => {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!rootStat) return "missing";
+	await visit(root);
+	return JSON.stringify(records);
+}
+
+async function fileState(filePath: string): Promise<string> {
+	try {
+		const [stat, bytes] = await Promise.all([fs.stat(filePath, { bigint: true }), fs.readFile(filePath)]);
+		return JSON.stringify({
+			bytes: bytes.toString("base64"),
+			mtimeNs: String(stat.mtimeNs),
+			mode: Number(stat.mode & 0o777n),
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+		throw error;
+	}
+}
+
+async function setSourceReadOnly(sessionPath: string): Promise<void> {
+	if (process.platform === "win32") return;
+	await fs.chmod(sessionPath, 0o444);
+	await fs.chmod(path.dirname(sessionPath), 0o555);
+}
+
+async function restoreSourcePermissions(sessionPath: string): Promise<void> {
+	if (process.platform === "win32") return;
+	await fs.chmod(path.dirname(sessionPath), 0o755);
+	await fs.chmod(sessionPath, 0o644);
+}
+
+async function sourceState(workspace: Workspace, sessionPath: string): Promise<string> {
+	return JSON.stringify({
+		source: await snapshotTree(path.dirname(sessionPath)),
+		sessions: await snapshotTree(workspace.sessionsRoot),
+		blobs: await snapshotTree(workspace.blobsDir),
+		customFiles: await snapshotTree(workspace.customFilesDir),
+		terminalSessions: await snapshotTree(workspace.terminalSessionsDir),
+		breadcrumb: await fileState(path.join(workspace.terminalSessionsDir, `tmux-${workspace.tmuxPane}`)),
+	});
+}
+
+async function writeBreadcrumb(workspace: Workspace, sessionPath: string): Promise<string> {
+	const breadcrumbPath = path.join(workspace.terminalSessionsDir, `tmux-${workspace.tmuxPane}`);
+	await fs.writeFile(breadcrumbPath, `${workspace.launchCwd}\n${sessionPath}\n`);
+	return breadcrumbPath;
+}
+
+function guardedArgs(entry: string, ...args: string[]): string[] {
+	return [BUN_EXECUTABLE, "--preload", LOOPBACK_GUARD, entry, ...args];
+}
+
+async function runCliShare(workspace: Workspace, sessionArg: string): Promise<ChildRun> {
+	return runChild(guardedArgs(CLI_ENTRY, "share", sessionArg), workspace.launchCwd, workspace.env);
+}
+
+async function runPublicationFixture(
+	tempDir: TempDir,
+	workspace: Workspace,
+	mode: "data" | "live",
+	manifest: Record<string, unknown>,
+): Promise<ChildRun> {
+	const manifestPath = path.join(tempDir.path(), `publication-${mode}-${crypto.randomUUID()}.json`);
+	await fs.writeFile(manifestPath, JSON.stringify(manifest));
+	return runChild(guardedArgs(PUBLICATION_FIXTURE, mode, manifestPath), workspace.launchCwd, workspace.env);
+}
+
+async function decryptUpload(url: string, sink: LoopbackSink): Promise<SessionData> {
+	expect(sink.uploads).toHaveLength(1);
+	expect(sink.requestCount).toBe(1);
+	const parsed = new URL(url);
+	expect(parsed.origin).toBe(sink.origin);
+	expect(parsed.pathname).toBe("/localshare01");
+	expect(parsed.hash.length).toBeGreaterThan(1);
+	const key = await crypto.subtle.importKey("raw", Buffer.from(parsed.hash.slice(1), "base64url"), "AES-GCM", false, [
+		"decrypt",
+	]);
+	return open(key, sink.uploads[0]!);
+}
+
+function cliShareUrl(stdout: string): string {
+	const line = stdout.split(/\r?\n/).find(value => value.startsWith("Share URL: "));
+	if (!line) throw new Error(`No share URL in child output: ${stdout}`);
+	return line.slice("Share URL: ".length);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.access(filePath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+describe("share publication network fence", () => {
+	test("rejects a disallowed origin before making a network request", async () => {
+		using tempDir = TempDir.createSync("@omp-share-guard-deny-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			const script = `void (async () => {
+				try { await fetch("https://outside.invalid/"); console.log("unexpected success"); process.exitCode = 2; }
+				catch (error) { console.log(error instanceof Error ? error.message : String(error)); }
+			})();`;
+			const run = await runChild(
+				[BUN_EXECUTABLE, "--preload", LOOPBACK_GUARD, "-e", script],
+				workspace.launchCwd,
+				workspace.env,
+			);
+			expect(run.exitCode).toBe(0);
+			expect(run.stdout).toContain("Blocked network request: target is not the configured loopback share origin");
+			expect(sink.requestCount).toBe(0);
+			expect(sink.uploads).toHaveLength(0);
+		} finally {
+			sink.server.stop(true);
+		}
+	});
+
+	test("rejects redirects instead of following them to a disallowed origin", async () => {
+		using tempDir = TempDir.createSync("@omp-share-guard-redirect-");
+		const sink = captureLoopbackUploads({ redirectTo: "https://outside.invalid/" });
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			const script = `void (async () => {
+				try {
+					await fetch(${JSON.stringify(sink.origin)});
+					console.log("unexpected success"); process.exitCode = 2;
+				} catch (error) { console.log(error instanceof Error ? error.message : String(error)); }
+			})();`;
+			const run = await runChild(
+				[BUN_EXECUTABLE, "--preload", LOOPBACK_GUARD, "-e", script],
+				workspace.launchCwd,
+				workspace.env,
+			);
+			expect(run.exitCode).toBe(0);
+			expect(run.stdout).toMatch(/redirect/i);
+			expect(sink.requestCount).toBe(1);
+			expect(sink.uploads).toHaveLength(0);
+		} finally {
+			sink.server.stop(true);
+		}
+	});
+});
+
+describe("child-fenced publication APIs", () => {
+	test("publishes plain data with projected headers, redaction, and input immutability", async () => {
+		using tempDir = TempDir.createSync("@omp-share-data-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			const secret = "data-child-secret-Q7";
+			const data = {
+				header: {
+					type: "session",
+					version: 3,
+					id: "data-main",
+					timestamp: "2026-10-09T00:00:00.000Z",
+					cwd: "/projects/home-owner",
+					additionalDirectories: ["/projects/workspace-root"],
+					executionCwd: "/private/runtime-binding",
+					previousSessionFiles: ["/private/move-history.jsonl"],
+				},
+				entries: [messageEntry("main-1", null, `main conversation contains ${secret}`)],
+				leafId: "main-1",
+				subSessions: {
+					Child: {
+						agentId: "Child",
+						parent: null,
+						header: {
+							type: "session",
+							version: 3,
+							id: "data-child",
+							timestamp: "2026-10-09T00:00:00.000Z",
+							cwd: "/projects/home-owner/child",
+							executionCwd: 17,
+							previousSessionFiles: ["/private/child-move-history.jsonl"],
+						},
+						entries: [messageEntry("child-1", null, `nested conversation ${secret}`)],
+						leafId: "child-1",
+						aborted: false,
+					},
+				},
+			} as unknown as SessionData;
+			const original = JSON.stringify(data);
+			const run = await runPublicationFixture(tempDir, workspace, "data", { data, secret });
+			expect(run.exitCode, run.stderr).toBe(0);
+			const report = JSON.parse(run.stdout) as {
+				result: { url: string; method: string; gistUrl?: string };
+				unchanged: boolean;
+			};
+			expect(report.unchanged).toBe(true);
+			expect(report.result.method).toBe("server");
+			expect(report.result.gistUrl).toBeUndefined();
+			expect(JSON.stringify(data)).toBe(original);
+
+			const opened = await decryptUpload(report.result.url, sink);
+			const flat = JSON.stringify(opened);
+			expect(opened.header?.cwd).toBe("/projects/home-owner");
+			expect(opened.header?.additionalDirectories).toEqual(["/projects/workspace-root"]);
+			expect(opened.entries).toHaveLength(1);
+			expect(flat).toContain("main conversation");
+			expect(flat).toContain("nested conversation");
+			expect(flat).toContain("/projects/home-owner");
+			expect(flat).not.toContain(secret);
+			expect(Object.hasOwn(opened.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(opened.header ?? {}, "previousSessionFiles")).toBe(false);
+			const child = opened.subSessions?.Child;
+			expect(child?.header?.cwd).toBe("/projects/home-owner/child");
+			expect(Object.hasOwn(child?.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(child?.header ?? {}, "previousSessionFiles")).toBe(false);
+			expect(child?.entries).toHaveLength(1);
+		} finally {
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("strips private metadata from plain data without an obfuscator", async () => {
+		using tempDir = TempDir.createSync("@omp-share-data-no-obfuscator-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			const data = {
+				header: {
+					type: "session",
+					version: 3,
+					id: "clear-main",
+					timestamp: "2026-10-09T00:00:00.000Z",
+					cwd: "/projects/clear-owner",
+					executionCwd: false,
+					previousSessionFiles: ["/private/old.jsonl"],
+				},
+				entries: [messageEntry("clear-1", null, "unredacted conversation")],
+				leafId: "clear-1",
+				subSessions: {
+					Nested: {
+						agentId: "Nested",
+						parent: null,
+						header: {
+							type: "session",
+							version: 3,
+							id: "clear-child",
+							timestamp: "2026-10-09T00:00:00.000Z",
+							cwd: "/projects/clear-owner/nested",
+							executionCwd: null,
+							previousSessionFiles: ["/private/nested-old.jsonl"],
+						},
+						entries: [messageEntry("nested-1", null, "nested remains clear")],
+						leafId: "nested-1",
+						aborted: false,
+					},
+				},
+			} as unknown as SessionData;
+			const original = JSON.stringify(data);
+			const run = await runPublicationFixture(tempDir, workspace, "data", { data });
+			expect(run.exitCode, run.stderr).toBe(0);
+			const report = JSON.parse(run.stdout) as {
+				result: { url: string; method: string };
+				unchanged: boolean;
+			};
+			expect(report.unchanged).toBe(true);
+			expect(report.result.method).toBe("server");
+			expect(JSON.stringify(data)).toBe(original);
+
+			const opened = await decryptUpload(report.result.url, sink);
+			expect(JSON.stringify(opened)).toContain("unredacted conversation");
+			expect(opened.header?.cwd).toBe("/projects/clear-owner");
+			expect(Object.hasOwn(opened.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(opened.header ?? {}, "previousSessionFiles")).toBe(false);
+			expect(Object.hasOwn(opened.subSessions?.Nested?.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(opened.subSessions?.Nested?.header ?? {}, "previousSessionFiles")).toBe(false);
+		} finally {
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("publishes live sessions without mutating their state or legacy header", async () => {
+		using tempDir = TempDir.createSync("@omp-share-live-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			const source = path.join(tempDir.path(), "live-source", "session.jsonl");
+			const secret = "live-child-secret-U8";
+			await fs.mkdir(path.join(tempDir.path(), "session-home"), { recursive: true });
+			await writeTranscript(source, {
+				id: "live-session",
+				cwd: path.join(tempDir.path(), "session-home"),
+				executionCwd: path.join(tempDir.path(), "launch-project"),
+				previousSessionFiles: ["/private/live-move-history.jsonl"],
+				text: `live conversation ${secret}`,
+			});
+			const before = await fileState(source);
+			const run = await runPublicationFixture(tempDir, workspace, "live", { sessionPath: source, secret });
+			expect(run.exitCode, run.stderr).toBe(0);
+			const report = JSON.parse(run.stdout) as {
+				result: { url: string; method: string };
+				unchanged: boolean;
+			};
+			expect(report.unchanged).toBe(true);
+			expect(await fileState(source)).toBe(before);
+			expect(report.result.method).toBe("server");
+
+			const opened = await decryptUpload(report.result.url, sink);
+			expect(opened.header?.cwd).toBe(path.join(tempDir.path(), "session-home"));
+			expect(Object.hasOwn(opened.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(opened.header ?? {}, "previousSessionFiles")).toBe(false);
+			expect(JSON.stringify(opened)).toContain("live conversation");
+			expect(JSON.stringify(opened)).not.toContain(secret);
+		} finally {
+			sink.server.stop(true);
+		}
+	}, 30_000);
+});
 
 async function makeKey(): Promise<CryptoKey> {
 	const bytes = new Uint8Array(32);
@@ -33,13 +565,15 @@ async function open(key: CryptoKey, sealed: Uint8Array<ArrayBuffer>): Promise<Se
 	return JSON.parse(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(plain))));
 }
 
-function messageEntry(id: string, parentId: string | null, text: string): SessionEntry {
+function messageEntry(id: string, parentId: string | null, text: string, imageBlobRef?: string): SessionEntry {
+	const content: Array<Record<string, unknown>> = [{ type: "text", text }];
+	if (imageBlobRef) content.push({ type: "image", data: imageBlobRef, mimeType: "image/png" });
 	return {
 		type: "message",
 		id,
 		parentId,
 		timestamp: "2026-06-12T00:00:00.000Z",
-		message: { role: "user", content: [{ type: "text", text }] },
+		message: { role: "user", content },
 	} as unknown as SessionEntry;
 }
 
@@ -580,72 +1114,347 @@ describe("normalizeShareServerUrl", () => {
 	});
 });
 
-describe("shareSession", () => {
-	test("default store seals the snapshot and uploads it to the share server", async () => {
-		const entries = [messageEntry("e1", null, "share me"), messageEntry("e2", "e1", "second")];
-		const sm = {
-			getHeader: () => sessionData([], "x").header,
-			getEntries: () => entries,
-			getLeafId: () => "e2",
-		} as unknown as SessionManager;
-
-		let uploaded: Uint8Array<ArrayBuffer> | null = null;
-		const server = Bun.serve({
-			port: 0,
-			async fetch(req) {
-				if (req.method !== "POST") return new Response("nope", { status: 405 });
-				uploaded = new Uint8Array(await req.arrayBuffer());
-				return Response.json({ id: "blobshareid01" });
-			},
-		});
-		try {
-			const base = `http://localhost:${server.port}`;
-			const result = await shareSession(sm, { serverUrl: base });
-
-			// Default store ("blob") routes to the server, not a gist: server-issued id, no gistUrl.
-			expect(result.method).toBe("server");
-			expect(result.gistUrl).toBeUndefined();
-			const [link, keyText] = result.url.split("#");
-			expect(link).toBe(`${base}/blobshareid01`);
-			expect(uploaded).not.toBeNull();
-
-			// The #key fragment decrypts the exact bytes the server received.
-			const key = await crypto.subtle.importKey("raw", Buffer.from(keyText, "base64url"), "AES-GCM", false, [
-				"decrypt",
-			]);
-			const opened = await open(key, uploaded as unknown as Uint8Array<ArrayBuffer>);
-			expect(opened.entries).toHaveLength(2);
-			expect(JSON.stringify(opened)).toContain("share me");
-		} finally {
-			server.stop(true);
-		}
+async function writeProjectPolicy(
+	projectCwd: string,
+	origin: string,
+	redactSecrets: boolean,
+	secretsEnabled: boolean,
+): Promise<void> {
+	await writeSettings(path.join(projectCwd, ".omp", "config.yml"), {
+		serverUrl: origin,
+		redactSecrets,
+		secretsEnabled,
 	});
-});
+}
+
+async function successfulCliShare(workspace: Workspace, sink: LoopbackSink, sessionArg: string): Promise<SessionData> {
+	const run = await runCliShare(workspace, sessionArg);
+	expect(run.exitCode, run.stderr).toBe(0);
+	return decryptUpload(cliShareUrl(run.stdout), sink);
+}
 
 describe("share command", () => {
-	test("rejects a missing path without creating or uploading a session", async () => {
-		using tempDir = TempDir.createSync("@omp-share-missing-");
-		const sessionArg = "./ghost.jsonl";
-		const missingSession = path.join(tempDir.path(), "ghost.jsonl");
-		const proc = Bun.spawn([process.execPath, CLI_ENTRY, "share", sessionArg], {
-			cwd: tempDir.path(),
-			env: {
-				...process.env,
-				NO_COLOR: "1",
-				PI_CODING_AGENT_DIR: path.join(tempDir.path(), "agent"),
-			},
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [exitCode, stdout, stderr] = await Promise.all([
-			proc.exited,
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
+	test("uses the saved H policy for path shares from an unrelated launch project L", async () => {
+		using tempDir = TempDir.createSync("@omp-share-path-policy-");
+		const sink = captureLoopbackUploads();
+		let source: string | undefined;
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			const owner = path.join(tempDir.path(), "saved-home-H");
+			await fs.mkdir(owner, { recursive: true });
+			const homeSecret = "synthetic-home-secret-H4";
+			const launchSecret = "synthetic-launch-secret-L5";
+			const artifact = Buffer.from("share-session-blob-fixture");
+			const artifactHash = new Bun.SHA256().update(artifact).digest("hex");
+			await fs.writeFile(path.join(workspace.blobsDir, artifactHash), artifact);
+			await writeProjectPolicy(owner, sink.origin, true, true);
+			await writeSecrets(path.join(owner, ".omp", "secrets.yml"), homeSecret);
+			await writeProjectPolicy(workspace.launchCwd, "https://launch-policy.invalid/share", false, false);
+			await writeSecrets(path.join(workspace.launchCwd, ".omp", "secrets.yml"), launchSecret);
 
-		expect(exitCode).toBe(1);
-		expect(stdout).toBe("");
-		expect(stderr).toBe(`Session "${sessionArg}" not found.\n`);
-		expect(await Bun.file(missingSession).exists()).toBe(false);
-	});
+			source = path.join(tempDir.path(), "read-only-custom-bucket", "session.jsonl");
+			await writeTranscript(source, {
+				id: "path-owned-session",
+				cwd: owner,
+				executionCwd: workspace.launchCwd,
+				previousSessionFiles: [path.join(tempDir.path(), "private-move-history.jsonl")],
+				text: `conversation uses H secret ${homeSecret}; L secret ${launchSecret} stays visible`,
+				imageBlobRef: `blob:sha256:${artifactHash}`,
+			});
+			await setSourceReadOnly(source);
+			const breadcrumbPath = await writeBreadcrumb(workspace, source);
+			const before = await sourceState(workspace, source);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+			const markerPath = path.join(workspace.customFilesDir, hashPath(path.resolve(source)));
+
+			const opened = await successfulCliShare(workspace, sink, source);
+
+			const payload = JSON.stringify(opened);
+			expect(opened.header?.cwd).toBe(owner);
+			expect(Object.hasOwn(opened.header ?? {}, "executionCwd")).toBe(false);
+			expect(Object.hasOwn(opened.header ?? {}, "previousSessionFiles")).toBe(false);
+			expect(payload).not.toContain(homeSecret);
+			expect(payload).toContain(launchSecret);
+			expect(payload).toContain("conversation uses H secret");
+			expect(payload).toContain(artifact.toString("base64"));
+			expect(await sourceState(workspace, source)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(await pathExists(markerPath)).toBe(false);
+		} finally {
+			if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("uses H policy for a global-only ID match without creating L's launch bucket", async () => {
+		using tempDir = TempDir.createSync("@omp-share-global-id-");
+		const sink = captureLoopbackUploads();
+		let source: string | undefined;
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			const owner = path.join(tempDir.path(), "global-session-home-H");
+			await fs.mkdir(owner, { recursive: true });
+			const homeSecret = "synthetic-global-home-H6";
+			const launchSecret = "synthetic-global-launch-L7";
+			await writeProjectPolicy(owner, sink.origin, true, true);
+			await writeSecrets(path.join(owner, ".omp", "secrets.yml"), homeSecret);
+			await writeProjectPolicy(workspace.launchCwd, "https://launch-id-policy.invalid/share", false, false);
+			await writeSecrets(path.join(workspace.launchCwd, ".omp", "secrets.yml"), launchSecret);
+
+			const ownerBucket = sessionDirForCwd(owner, workspace.sessionsRoot);
+			source = path.join(ownerBucket, `2026-10-09T000000_global-owner-001.jsonl`);
+			await writeTranscript(source, {
+				id: "global-owner-001",
+				cwd: owner,
+				executionCwd: workspace.launchCwd,
+				text: `global conversation has ${homeSecret}; launch-only ${launchSecret}`,
+			});
+			const launchBucket = sessionDirForCwd(workspace.launchCwd, workspace.sessionsRoot);
+			expect(await pathExists(launchBucket)).toBe(false);
+			await setSourceReadOnly(source);
+			const breadcrumbPath = await writeBreadcrumb(workspace, source);
+			const before = await sourceState(workspace, source);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+			const markerPath = path.join(workspace.customFilesDir, hashPath(path.resolve(source)));
+
+			const opened = await successfulCliShare(workspace, sink, "global-owner");
+
+			const payload = JSON.stringify(opened);
+			expect(opened.header?.cwd).toBe(owner);
+			expect(payload).not.toContain(homeSecret);
+			expect(payload).toContain(launchSecret);
+			expect(payload).toContain("global conversation has");
+			expect(await sourceState(workspace, source)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(await pathExists(markerPath)).toBe(false);
+			expect(await pathExists(launchBucket)).toBe(false);
+		} finally {
+			if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("keeps a legacy-named bucket in place during read-only ID lookup", async () => {
+		using tempDir = TempDir.createSync("@omp-share-legacy-bucket-");
+		const sink = captureLoopbackUploads();
+		let source: string | undefined;
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			const owner = path.join(tempDir.path(), "legacy-owner-H");
+			await fs.mkdir(owner, { recursive: true });
+			await writeProjectPolicy(owner, sink.origin, false, false);
+			const legacyName = `--${workspace.launchCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+			const legacyBucket = path.join(workspace.sessionsRoot, legacyName);
+			const canonicalBucket = sessionDirForCwd(workspace.launchCwd, workspace.sessionsRoot);
+			source = path.join(legacyBucket, "2026-10-09T000000_legacy-owner-001.jsonl");
+			await writeTranscript(source, {
+				id: "legacy-owner-001",
+				cwd: owner,
+				text: "conversation stays in the legacy bucket",
+			});
+			expect(await pathExists(canonicalBucket)).toBe(false);
+			await setSourceReadOnly(source);
+			const breadcrumbPath = await writeBreadcrumb(workspace, source);
+			const before = await sourceState(workspace, source);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+
+			const opened = await successfulCliShare(workspace, sink, "legacy-owner");
+
+			expect(JSON.stringify(opened)).toContain("conversation stays in the legacy bucket");
+			expect(await sourceState(workspace, source)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(await pathExists(legacyBucket)).toBe(true);
+			expect(await pathExists(source)).toBe(true);
+			expect(await pathExists(canonicalBucket)).toBe(false);
+		} finally {
+			if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("leaves the session layout absent after an unmatched ID lookup", async () => {
+		using tempDir = TempDir.createSync("@omp-share-no-match-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			const launchBucket = sessionDirForCwd(workspace.launchCwd, workspace.sessionsRoot);
+			const breadcrumbPath = await writeBreadcrumb(workspace, path.join(workspace.launchCwd, "not-created.jsonl"));
+			const sessionsBefore = await snapshotTree(workspace.sessionsRoot);
+			const blobsBefore = await snapshotTree(workspace.blobsDir);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+			const terminalSessionsBefore = await snapshotTree(workspace.terminalSessionsDir);
+
+			const run = await runCliShare(workspace, "no-such-publication-session");
+
+			expect(run.exitCode).toBe(1);
+			expect(run.stdout).toBe("");
+			expect(run.stderr).toBe('Session "no-such-publication-session" not found.\n');
+			expect(sink.requestCount).toBe(0);
+			expect(sink.uploads).toHaveLength(0);
+			expect(await snapshotTree(workspace.sessionsRoot)).toBe(sessionsBefore);
+			expect(await snapshotTree(workspace.blobsDir)).toBe(blobsBefore);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(await snapshotTree(workspace.terminalSessionsDir)).toBe(terminalSessionsBefore);
+			expect(await pathExists(workspace.sessionsRoot)).toBe(false);
+			expect(await pathExists(launchBucket)).toBe(false);
+		} finally {
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("preserves missing-path behavior under the child-only network fence", async () => {
+		using tempDir = TempDir.createSync("@omp-share-missing-");
+		const sink = captureLoopbackUploads();
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			const sessionArg = "./ghost.jsonl";
+			const missingSession = path.join(workspace.launchCwd, "ghost.jsonl");
+			const breadcrumbPath = await writeBreadcrumb(workspace, missingSession);
+			const before = await sourceState(workspace, missingSession);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+
+			const run = await runCliShare(workspace, sessionArg);
+
+			expect(run.exitCode).toBe(1);
+			expect(run.stdout).toBe("");
+			expect(run.stderr).toBe(`Session "${sessionArg}" not found.\n`);
+			expect(await pathExists(missingSession)).toBe(false);
+			expect(await sourceState(workspace, missingSession)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(sink.requestCount).toBe(0);
+			expect(sink.uploads).toHaveLength(0);
+		} finally {
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	test("keeps a missing recorded H as policy scope instead of substituting launch L", async () => {
+		using tempDir = TempDir.createSync("@omp-share-missing-home-");
+		const sink = captureLoopbackUploads();
+		let source: string | undefined;
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin, { redactSecrets: true, secretsEnabled: true });
+			const missingHome = path.join(tempDir.path(), "recorded-but-missing-H");
+			const globalSecret = "synthetic-global-secret-M8";
+			const launchSecret = "synthetic-launch-secret-M9";
+			await writeSecrets(path.join(workspace.agentDir, "secrets.yml"), globalSecret);
+			await writeProjectPolicy(workspace.launchCwd, "https://launch-missing-home.invalid/share", false, true);
+			await writeSecrets(path.join(workspace.launchCwd, ".omp", "secrets.yml"), launchSecret);
+			source = path.join(tempDir.path(), "missing-home-source", "session.jsonl");
+			await writeTranscript(source, {
+				id: "missing-recorded-home",
+				cwd: missingHome,
+				executionCwd: workspace.launchCwd,
+				text: `global policy sees ${globalSecret}; launch policy must not redact ${launchSecret}`,
+			});
+			expect(await pathExists(missingHome)).toBe(false);
+			await setSourceReadOnly(source);
+			const breadcrumbPath = await writeBreadcrumb(workspace, source);
+			const before = await sourceState(workspace, source);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+
+			const opened = await successfulCliShare(workspace, sink, source);
+
+			const payload = JSON.stringify(opened);
+			expect(opened.header?.cwd).toBe(missingHome);
+			expect(payload).not.toContain(globalSecret);
+			expect(payload).toContain(launchSecret);
+			expect(payload).toContain("global policy sees");
+			expect(await pathExists(missingHome)).toBe(false);
+			expect(await sourceState(workspace, source)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+		} finally {
+			if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+			sink.server.stop(true);
+		}
+	}, 30_000);
+
+	for (const cwdCase of ["absent", "null"] as const) {
+		test(`falls back to launch L redaction when legacy cwd is ${cwdCase}`, async () => {
+			using tempDir = TempDir.createSync(`@omp-share-${cwdCase}-cwd-`);
+			const sink = captureLoopbackUploads();
+			let source: string | undefined;
+			try {
+				const workspace = await createWorkspace(tempDir, sink.origin);
+				await configureGlobalSettings(workspace, sink.origin);
+				const launchSecret = `synthetic-${cwdCase}-fallback-secret-P2`;
+				await writeProjectPolicy(workspace.launchCwd, sink.origin, true, true);
+				await writeSecrets(path.join(workspace.launchCwd, ".omp", "secrets.yml"), launchSecret);
+				source = path.join(tempDir.path(), `${cwdCase}-cwd-source`, "session.jsonl");
+				const transcript = {
+					id: `${cwdCase}-legacy-cwd-session`,
+					executionCwd: path.join(tempDir.path(), "ignored-execution-binding"),
+					text: `launch fallback redacts ${launchSecret}`,
+				};
+				if (cwdCase === "null") {
+					await writeTranscript(source, { ...transcript, cwd: null });
+				} else {
+					await writeTranscript(source, transcript);
+				}
+				await setSourceReadOnly(source);
+				const breadcrumbPath = await writeBreadcrumb(workspace, source);
+				const before = await sourceState(workspace, source);
+				const breadcrumbBefore = await fileState(breadcrumbPath);
+
+				const opened = await successfulCliShare(workspace, sink, source);
+
+				const payload = JSON.stringify(opened);
+				expect(payload).not.toContain(launchSecret);
+				expect(payload).toContain("launch fallback redacts");
+				if (cwdCase === "null") {
+					expect(Object.hasOwn(opened.header ?? {}, "cwd")).toBe(true);
+					expect(opened.header?.cwd).toBeNull();
+				} else {
+					expect(Object.hasOwn(opened.header ?? {}, "cwd")).toBe(false);
+				}
+				expect(await sourceState(workspace, source)).toBe(before);
+				expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			} finally {
+				if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+				sink.server.stop(true);
+			}
+		}, 30_000);
+	}
+
+	test("surfaces upload failure without changing source, artifacts, or continuation state", async () => {
+		using tempDir = TempDir.createSync("@omp-share-upload-error-");
+		const sink = captureLoopbackUploads({ status: 500 });
+		let source: string | undefined;
+		try {
+			const workspace = await createWorkspace(tempDir, sink.origin);
+			await configureGlobalSettings(workspace, sink.origin);
+			await writeProjectPolicy(workspace.launchCwd, sink.origin, false, false);
+			source = path.join(tempDir.path(), "error-source", "session.jsonl");
+			await writeTranscript(source, {
+				id: "upload-error-session",
+				cwd: workspace.launchCwd,
+				text: "upload error conversation",
+			});
+			await setSourceReadOnly(source);
+			const breadcrumbPath = await writeBreadcrumb(workspace, source);
+			const before = await sourceState(workspace, source);
+			const breadcrumbBefore = await fileState(breadcrumbPath);
+			const markerPath = path.join(workspace.customFilesDir, hashPath(path.resolve(source)));
+
+			const run = await runCliShare(workspace, source);
+
+			expect(run.exitCode).not.toBe(0);
+			expect(run.stderr).toContain("HTTP 500");
+			expect(run.stderr).toContain(sink.origin);
+			expect(sink.requestCount).toBe(1);
+			expect(sink.uploads).toHaveLength(1);
+			expect(await sourceState(workspace, source)).toBe(before);
+			expect(await fileState(breadcrumbPath)).toBe(breadcrumbBefore);
+			expect(await pathExists(markerPath)).toBe(false);
+		} finally {
+			if (source && (await pathExists(source))) await restoreSourcePermissions(source);
+			sink.server.stop(true);
+		}
+	}, 30_000);
 });

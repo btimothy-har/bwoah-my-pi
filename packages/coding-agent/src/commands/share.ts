@@ -7,14 +7,16 @@
  * `share.redactSecrets`.
  */
 
+import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { shareHelp as commandHelp } from "../cli/command-help";
 import { Settings } from "../config/settings";
-import { shareSession } from "../export/share";
+import { shareSessionData } from "../export/share";
 import { buildSecretObfuscator } from "../secrets";
 import { resolveResumableSession } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
+import { resolveSessionHome } from "../bwoah/execution-workspace/session-home";
+import { loadExportSession, type ExportSessionProjection } from "../bwoah/execution-workspace/export-projection";
 
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "./settings";
@@ -37,38 +39,37 @@ export default class Share extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Share);
 
+		const launchCwd = process.cwd();
 		const sessionArg = args.session ?? "";
 		let sessionPath: string | undefined = sessionArg;
 		if (!sessionArg.includes("/") && !sessionArg.includes("\\") && !sessionArg.endsWith(".jsonl")) {
-			const match = await resolveResumableSession(sessionArg, process.cwd());
+			const match = await resolveResumableSession(sessionArg, launchCwd, undefined, { readOnly: true });
 			sessionPath = match?.session.path;
 		}
 
-		let sm: SessionManager | undefined;
+		let projection: ExportSessionProjection | undefined;
 		if (sessionPath) {
 			try {
-				sm = await SessionManager.open(sessionPath, undefined, undefined, { throwIfMissing: true });
+				projection = await loadExportSession(sessionPath);
 			} catch (err) {
 				if (!isEnoent(err)) throw err;
 			}
 		}
-		if (!sm) {
+		if (!projection) {
 			process.stderr.write(`Session "${sessionArg}" not found.\n`);
 			process.exitCode = 1;
 			return;
 		}
-		// Settings resolve against the session's own project so its
-		// share.redactSecrets/secrets.enabled policy governs, not the invoking cwd's.
-		const settings = await Settings.loadReadOnly({ cwd: sm.getCwd() });
-		// Same leak boundary as /share: a share blob leaves the machine, so honor
-		// share.redactSecrets with the full obfuscator built against the session's
-		// own project directory (its secrets.yml, not the invoking cwd's).
+
+		// Settings and secrets follow the saved session's home, not the launch project.
+		const policyCwd = path.resolve(resolveSessionHome(projection.header, launchCwd));
+		const settings = await Settings.loadReadOnly({ cwd: policyCwd });
 		const obfuscator =
 			cfgShareRedactSecrets.get(settings) && cfgSecretsEnabled.get(settings)
-				? await buildSecretObfuscator(sm.getCwd(), getAgentDir())
+				? await buildSecretObfuscator(policyCwd, getAgentDir())
 				: undefined;
 
-		const result = await shareSession(sm, {
+		const result = await shareSessionData(projection, {
 			serverUrl: cfgShareServerUrl.get(settings),
 			store: flags.gist ? "gist" : cfgShareStore.get(settings),
 			obfuscator,

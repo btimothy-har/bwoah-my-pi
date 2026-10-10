@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FileEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { findMostRecentSession, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -157,6 +158,62 @@ describe("resolveResumableSession", () => {
 
 		expect(match?.scope).toBe("local");
 		expect(match?.session.path).toBe(path.join(sessionDir, "2025-01-01_moved.jsonl"));
+	});
+
+	it("keeps explicit local hits ahead of global fallback in read-only mode", async () => {
+		const id = writeSession("2025-01-01_local.jsonl", "/tmp/project", "local1234");
+
+		const match = await resolveResumableSession("local", "/tmp/project", sessionDir, {
+			readOnly: true,
+			allowGlobalFallback: true,
+		});
+
+		expect(match?.scope).toBe("local");
+		expect(match?.session.id).toBe(id);
+	});
+
+	it("does not promote backups in read-only mode and keeps default recovery behavior", async () => {
+		const id = "backup1234";
+		const backupDir = path.join(tempDir, "backup-source");
+		const primaryPath = path.join(backupDir, "2025-01-01_backup.jsonl");
+		const backupPath = `${primaryPath}.recovery.bak`;
+		fs.mkdirSync(backupDir);
+		const originalSessionDir = sessionDir;
+		sessionDir = backupDir;
+		writeSession("2025-01-01_backup.jsonl", "/tmp/project", id);
+		fs.renameSync(path.join(backupDir, "2025-01-01_backup.jsonl"), backupPath);
+		sessionDir = originalSessionDir;
+
+		const readOnlyMatch = await resolveResumableSession("backup", "/tmp/project", backupDir, {
+			readOnly: true,
+		});
+		expect(readOnlyMatch).toBeUndefined();
+		expect(fs.existsSync(backupPath)).toBe(true);
+		expect(fs.existsSync(primaryPath)).toBe(false);
+
+		const recovered = await resolveResumableSession("backup", "/tmp/project", backupDir);
+		expect(recovered?.scope).toBe("local");
+		expect(recovered?.session.id).toBe(id);
+		expect(fs.existsSync(path.join(backupDir, "2025-01-01_backup.jsonl"))).toBe(true);
+		expect(fs.existsSync(backupPath)).toBe(false);
+	});
+
+	it("accepts read-only options with either storage argument form", async () => {
+		const id = writeSession("2025-01-01_options.jsonl", "/tmp/project", "options1234");
+
+		const optionsArgument = await resolveResumableSession("options", "/tmp/project", sessionDir, {
+			readOnly: true,
+		});
+		const storageArgument = await resolveResumableSession(
+			"options",
+			"/tmp/project",
+			sessionDir,
+			new FileSessionStorage(),
+			{ readOnly: true },
+		);
+
+		expect(optionsArgument?.session.id).toBe(id);
+		expect(storageArgument?.session.id).toBe(id);
 	});
 });
 
